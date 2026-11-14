@@ -12,15 +12,16 @@
   },
   "scripts": {
     "build": "npm run build -w @feedink/shared && npm run build -w @feedink/web && npm run build -w @feedink/api",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p tsconfig.tests.json",
+    "test": "npm run test --workspaces --if-present && npm run test:fixtures",
+    "test:fixtures": "node --test tests/fixtures/*.test.mjs",
     "test:e2e": "playwright test",
     "dev:api": "npm run dev -w @feedink/api",
     "dev:web": "npm run dev -w @feedink/web"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
-    "@playwright/test": "^1.56.1",
-    "@types/node": "^24.10.0"
+    "typescript": "5.9.3",
+    "@playwright/test": "1.56.1",
+    "@types/node": "24.10.0"
   }
 }

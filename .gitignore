@@ -8,6 +8,7 @@ test-results/
 !.env.example
 *.log
 .DS_Store
+._*
 .data/
 .artifacts/
 .pi/subagents/
