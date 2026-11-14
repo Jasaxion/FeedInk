@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "FeedInk",
+  "project_id": "4f834e36-e7fd-4deb-a8ce-316aca8e3f9c"
+}
