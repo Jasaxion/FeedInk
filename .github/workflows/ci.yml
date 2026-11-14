@@ -44,17 +44,20 @@ jobs:
           node-version: 24.22.3
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - run: npm run build -w @feedink/shared
+      - name: Production build (shared → web → API)
+        run: npm run build
       - name: Typecheck workspaces and test contracts
         run: npm run typecheck
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=moderate
       - name: Unit, PostgreSQL integration and upstream fixture tests
+        env:
+          NODE_ENV: test
         run: npm test
       - name: Backup format tests and shell syntax
         run: |
           node --test scripts/data-archive.test.mjs
           for script in scripts/*.sh; do sh -n "$script"; done
-      - name: Production build (shared → web → API)
-        run: npm run build
       - name: Install browser for existing end-to-end tests
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: npx playwright install --with-deps chromium webkit
@@ -77,6 +80,7 @@ jobs:
           }
           trap stop_api EXIT
           # Each project gets a fresh owned API process/rate-limit budget, not weaker limits.
+          failed=0
           for project in api desktop mobile tablet webkit; do
             node apps/api/dist/server.js > "$RUNNER_TEMP/feedink-api-$project.log" 2>&1 &
             api_pid=$!
@@ -88,9 +92,23 @@ jobs:
             done
             test "$ready" = true
             # Playwright starts/stops its own upstream fixture for this invocation.
-            PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" npm run test:e2e -- --project="$project" --output="test-results/$project"
+            if ! PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" npm run test:e2e -- --project="$project" --output="test-results/$project"; then
+              failed=1
+            fi
             stop_api
           done
+          test "$failed" = 0
+      - name: Preserve verification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ github.sha }}
+          path: |
+            test-results/
+            playwright-report/
+            ${{ runner.temp }}/feedink-api-*.log
+          retention-days: 7
+          if-no-files-found: ignore
 
   container:
     runs-on: ubuntu-latest
@@ -152,3 +170,19 @@ jobs:
         env:
           TEST_IMAGE: feedink:ci
         run: scripts/test-backup.sh
+      - name: Collect container diagnostics without environment secrets
+        if: always()
+        run: |
+          if test -f .env; then
+            docker compose logs --no-color --tail=200 > "$RUNNER_TEMP/feedink-container.log" 2>&1 || true
+          fi
+      - name: Preserve container diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/feedink-container.log
+            ${{ runner.temp }}/bootstrap-refusal.log
+          retention-days: 7
+          if-no-files-found: ignore
