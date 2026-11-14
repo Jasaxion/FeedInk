@@ -101,6 +101,8 @@ test('PWA reads cached body/images offline, syncs changes and purges private dat
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('reader-content')).toContainText('持久存档');
   await expect(page.getByTestId('offline-status')).toContainText(/离线/);
+  await image.scrollIntoViewIfNeeded();
+  await expect.poll(async () => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true);
   await page.keyboard.press('y');
   await expect(page.getByTestId('offline-status')).toContainText(/待同步|等待同步/);
   expect((await detail(api, item.id)).saved).toBe(false);

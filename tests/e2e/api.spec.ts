@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { createHash } from 'node:crypto';
+import { unzipSync, zipSync, strToU8, strFromU8 } from 'fflate';
 import { baseURL, csrf, detail, register, resetUpstream, subscribe, upstream, waitForArticles, articles } from './helpers.js';
 
 test.beforeEach(async ({ request }) => { await resetUpstream(request); });
@@ -127,7 +128,18 @@ test('full-text capture, portable archive restore and valid ebook download retai
   const download = await request.get(book.downloadUrl);
   expect(download.ok()).toBeTruthy();
   expect(download.headers()['content-type']).toContain('application/epub+zip');
-  expect((await download.body()).subarray(0, 2).toString()).toBe('PK');
+  const epubBytes = await download.body();
+  expect(epubBytes.subarray(0, 2).toString()).toBe('PK');
+  const epub = unzipSync(epubBytes);
+  expect(strFromU8(epub['mimetype']!)).toBe('application/epub+zip');
+  const container = strFromU8(epub['META-INF/container.xml']!);
+  expect(container).toContain('urn:oasis:names:tc:opendocument:xmlns:container');
+  const packagePath = /full-path=["']([^"']+)["']/.exec(container)?.[1];
+  expect(packagePath).toBeTruthy();
+  const packageXml = strFromU8(epub[packagePath!]!);
+  expect(packageXml).toContain('http://www.idpf.org/2007/opf');
+  expect(packageXml).toContain('<spine');
+  expect(Object.entries(epub).some(([name, bytes]) => /\.x?html$/.test(name) && strFromU8(bytes).includes('阅读不是追逐更新'))).toBeTruthy();
   const archive = await request.get('/api/export/archive');
   expect(archive.ok(), await archive.text()).toBeTruthy();
   const zip = await archive.body();
@@ -157,6 +169,9 @@ test('upstream boundaries reject metadata, protocols, redirects and malformed in
   expect(settings.status()).toBe(400);
   const badArchive = await request.post('/api/import/archive', { headers: csrf(session), multipart: { file: { name: 'invalid.zip', mimeType: 'application/zip', buffer: Buffer.from('not a ZIP') } } });
   expect(badArchive.status()).toBeGreaterThanOrEqual(400);
+  const traversal = zipSync({ '../outside.txt': strToU8('must never be written') });
+  const unsafeArchive = await request.post('/api/import/archive', { headers: csrf(session), multipart: { file: { name: 'traversal.zip', mimeType: 'application/zip', buffer: Buffer.from(traversal) } } });
+  expect(unsafeArchive.status()).toBeGreaterThanOrEqual(400);
   const me = await request.get('/api/session');
   expect(me.ok()).toBeTruthy();
   const serialized = await me.text();
