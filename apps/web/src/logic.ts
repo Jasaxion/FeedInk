@@ -41,6 +41,7 @@ export function sortArticles(articles: ArticleSummary[], order: ArticleQuery['so
 export function shortcutAction(key: string, target: EventTarget | null, modifiers = false): string | undefined {
   const element = target as HTMLElement | null;
   if (modifiers || element?.closest?.('input,textarea,select,[contenteditable="true"],[role="dialog"]')) return;
+  if ((key === 'Enter' || key === ' ') && element?.closest?.('button,a[href],summary,audio,video,[role="button"],[role="link"]')) return;
   return ({ j: 'next', k: 'previous', Enter: 'open', u: 'back', o: 'back', ' ': 'page', y: 'save', m: 'read', v: 'original', g: 'feed', '?': 'help' } as Record<string, string>)[key];
 }
 
@@ -55,6 +56,13 @@ export function safeExternalUrl(raw: string): string | null {
 export function ownedAssetUrl(raw: string): string | null {
   // No query strings, external hosts, traversal or arbitrary image proxies.
   return /^\/api\/assets\/[a-zA-Z0-9_-]+$/.test(raw) ? raw : null;
+}
+
+export const RASTER_IMAGE_MIME = /^image\/(png|jpeg|webp|gif|avif|bmp)$/;
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+export function ownedImageUrl(raw: string): string | null {
+  return ownedAssetUrl(raw) || (/^\/api\/feed-icons\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw) ? raw : null);
 }
 
 export function formatDate(value: string, short = false): string {

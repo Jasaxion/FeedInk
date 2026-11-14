@@ -13,7 +13,14 @@ import {
   ApiFailure,
   safeError,
 } from "./core.js";
-import { Content, httpUrl, htmlText, cleanHtml, raster } from "./content.js";
+import {
+  ARTICLE_HTML_MAX_LENGTH,
+  Content,
+  httpUrl,
+  htmlText,
+  cleanHtml,
+  raster,
+} from "./content.js";
 import { SafeFetcher, requireOk } from "./network.js";
 
 export interface FeedEntry {
@@ -203,8 +210,16 @@ export class Feeds {
         .map(({ topic: _, ...feed }) => feed);
     const response = requireOk(await this.fetcher.fetch(query));
     const body = response.body.toString("utf8");
+    // Only complete leading comments are skipped for document classification.
+    // Feed/OPML entity restrictions still inspect the original document.
+    let prolog = body.trimStart();
+    while (prolog.startsWith("<!--")) {
+      const end = prolog.indexOf("-->", 4);
+      if (end === -1) break;
+      prolog = prolog.slice(end + 3).trimStart();
+    }
     const htmlDocument =
-      /^\s*<!doctype\s+html\s*>/i.test(body) ||
+      /^<!doctype\s+html\s*>/i.test(prolog) ||
       (/^text\/html\b/i.test(String(response.headers["content-type"] || "")) &&
         !/<!DOCTYPE|<!ENTITY/i.test(body));
     if (htmlDocument && /<!ENTITY/i.test(body)) rejectXmlEntities(body);
@@ -331,7 +346,7 @@ export class Feeds {
                   "DEMO_QUOTA",
                   "Demo archive limit is 100 articles; register for your own library",
                 );
-              if (entry.html.length > 2 * 1024 * 1024)
+              if (entry.html.length > ARTICLE_HTML_MAX_LENGTH)
                 throw new ApiFailure(
                   413,
                   "CONTENT_SIZE",

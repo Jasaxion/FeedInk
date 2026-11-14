@@ -20,6 +20,7 @@ export default defineConfig({
   },
   projects: [
     { name: 'api', testMatch: /api\.spec\.ts/ },
+    { name: 'workflows', testMatch: /workflows\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, launchOptions: { executablePath } } },
     { name: 'desktop', testMatch: /reader\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, launchOptions: { executablePath } } },
     { name: 'mobile', testMatch: /reader\.spec\.ts/, use: { ...devices['Pixel 5'], viewport: { width: 390, height: 844 }, launchOptions: { executablePath } } },
     { name: 'tablet', testMatch: /reader\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 820, height: 1180 }, hasTouch: true, launchOptions: { executablePath } } },

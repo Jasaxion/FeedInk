@@ -233,14 +233,13 @@ export class SafeFetcher {
         options = { ...options, headers: {} };
         continue;
       }
-      if (
-        response.body.length &&
-        response.headers["content-encoding"] &&
-        response.headers["content-encoding"] !== "identity"
-      ) {
+      const encoding = normalizeContentCoding(
+        String(response.headers["content-encoding"] || "identity"),
+      );
+      if (response.body.length && encoding !== "identity") {
         response.body = await decodeBody(
           response.body,
-          String(response.headers["content-encoding"]),
+          encoding,
           options.maxBytes ?? 4 * 1024 * 1024,
           deadline,
         );
@@ -250,6 +249,9 @@ export class SafeFetcher {
     throw new ApiFailure(502, "FETCH_REDIRECT", "Too many upstream redirects");
   }
 }
+function normalizeContentCoding(value: string): string {
+  return value.replace(/^[ \t]+|[ \t]+$/g, "").toLowerCase();
+}
 export async function decodeBody(
   body: Buffer,
   encoding: string,
@@ -258,6 +260,7 @@ export async function decodeBody(
 ): Promise<Buffer> {
   if (Date.now() >= deadline)
     throw new ApiFailure(504, "FETCH_TIMEOUT", "Upstream decoding timed out");
+  encoding = normalizeContentCoding(encoding);
   const decoder =
     encoding === "gzip"
       ? createGunzip()

@@ -8,7 +8,11 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "test:browser": "node test/browser-smoke.mjs"
+    "test:browser": "node test/browser-smoke.mjs",
+    "test:audit": "node test/audit-browser.mjs",
+    "test:shell": "node test/shell-update.mjs",
+    "test:images": "node test/portable-images.mjs",
+    "test:offline-origin": "node test/offline-origin.mjs"
   },
   "dependencies": {
     "@feedink/shared": "0.1.0",

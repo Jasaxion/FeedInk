@@ -33,6 +33,25 @@ test('offline identity stores no CSRF/session credential', async () => {
   assert.equal((await db.identity())?.user.id, 'alice');
   assert.equal(JSON.stringify(await db.identity()).includes('secret'), false);
 });
+test('image writes use portable binary records and legacy Blob rows remain readable', async () => {
+  const factory = new IDBFactory(); const db = new OfflineStore('portable', factory); await db.activate(session());
+  await db.saveImage('alice', '/api/assets/portable', new Blob(['pixels'], { type: 'image/png' }));
+  await new Promise<void>((resolve, reject) => {
+    const open = factory.open('portable', 2); open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction('rows', 'readwrite'); const rows = tx.objectStore('rows'); const get = rows.get('alice:image:/api/assets/portable');
+      get.onsuccess = () => { assert.equal(get.result.value instanceof Blob, false); assert.ok(get.result.value.bytes instanceof ArrayBuffer); assert.equal(get.result.value.type, 'image/png'); };
+      rows.put({ key: 'alice:image:/api/assets/legacy', userId: 'alice', kind: 'image', value: new Blob(['legacy'], { type: 'image/png' }) });
+      rows.put({ key: 'alice:image:/api/assets/active', userId: 'alice', kind: 'image', value: { type: 'image/svg+xml', bytes: new ArrayBuffer(10) } });
+      tx.oncomplete = () => { open.result.close(); resolve(); }; tx.onerror = () => reject(tx.error);
+    };
+  });
+  assert.equal(await (await db.image('alice', '/api/assets/portable'))?.text(), 'pixels');
+  assert.equal(await db.imageSource('alice', '/api/assets/portable'), 'data:image/png;base64,cGl4ZWxz');
+  assert.equal(await (await db.image('alice', '/api/assets/legacy'))?.text(), 'legacy');
+  assert.equal(await db.image('alice', '/api/assets/active'), undefined);
+});
+
 test('private article bodies and images can be retrieved only under active owner', async () => {
   const db = store(); await db.activate(session()); await db.saveArticle('alice', article());
   await db.saveImage('alice', '/api/assets/image-one', new Blob(['pixels'], { type: 'image/png' }));

@@ -12,10 +12,16 @@ import {
   ApiFailure,
 } from "./core.js";
 import { Articles } from "./articles.js";
-import { cleanHtml, htmlText, countWords, raster } from "./content.js";
+import {
+  ARTICLE_HTML_MAX_LENGTH,
+  cleanHtml,
+  htmlText,
+  countWords,
+  raster,
+} from "./content.js";
 import { makeZip, readZip, ZIP_LIMIT } from "./zip.js";
 import { preferences, uuid, color } from "./validation.js";
-const text = z.string().max(2 * 1024 * 1024),
+const text = z.string().max(ARTICLE_HTML_MAX_LENGTH),
   label = z.string().max(1000),
   date = z.iso.datetime();
 const externalUrl = z

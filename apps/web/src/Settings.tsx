@@ -41,7 +41,7 @@ export function SettingsPanel({ path }: { path: string }) {
         <button type="button" className="secondary" onClick={() => app.navigate('/export')}>生成、下载与查看发送状态</button></>}
       {tab === 'offline' && <><h3>离线阅读与 PWA</h3>{toggle('offlineEnabled', '在此设备保存读过的文章和图片', '离线数据仅属于当前账号。关闭后清除正文与图片缓存，但保留尚未同步的状态队列。')}
         <p>本地占用：{storage || '浏览器未提供存储统计'}</p><p className="muted">离线只显示已缓存文章，不代表全部服务器存档。服务器持久存档不受浏览器缓存清理影响。离线已读、收藏、标签和进度将在相同账号联网后同步。</p>
-        <div className="button-row"><button type="button" className="secondary" onClick={() => void app.task(async () => { await app.store.removeArticles(app.session.user.id); app.notify('此设备的正文与图片缓存已清除，服务器存档未删除'); })}>清理正文缓存</button>
+        <div className="button-row"><button type="button" className="secondary" onClick={() => void app.task(async () => { await app.clearCache(); app.notify('此设备的正文与图片缓存已清除，服务器存档未删除'); })}>清理正文缓存</button>
         <button type="button" className="secondary" onClick={() => void app.task(async () => { if (!navigator.storage?.persist) throw new Error('当前浏览器不支持持久存储授权'); const granted = await navigator.storage.persist(); app.notify(granted ? '浏览器已授予持久存储' : '浏览器未授予持久存储，缓存可能被系统回收', !granted); })}>申请保留离线数据</button></div>
         <h4>安装到桌面或主屏幕</h4><p>Chrome / Edge：使用地址栏的安装按钮或浏览器菜单“安装 FeedInk”。iPhone / iPad：Safari → 分享 → 添加到主屏幕。需要 HTTPS（或 localhost）。无需应用商店或原生安装包。</p><p>先联网打开文章或选择“缓存当前列表”，确认图片已归档后即可离线阅读。退出账号会清除所有私有缓存与待同步状态。</p></>}
       <div className="form-footer"><button className="primary" disabled={busy || !app.online}>{busy ? '保存中…' : '保存设置'}</button><button type="button" className="text-button" onClick={() => setDraft({ ...DEFAULT_SETTINGS })}>恢复默认值（保存后生效）</button></div>

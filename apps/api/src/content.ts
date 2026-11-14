@@ -24,8 +24,10 @@ export function httpUrl(
     return null;
   }
 }
+// Keep finalized HTML within the same string-length ceiling as archive bodies.
+export const ARTICLE_HTML_MAX_LENGTH = 2 * 1024 * 1024;
 export function cleanHtml(html: string): string {
-  return sanitizeHtml(html, {
+  const sanitized = sanitizeHtml(html, {
     allowedTags: [
       "p",
       "div",
@@ -88,6 +90,13 @@ export function cleanHtml(html: string): string {
       !/^\/api\/assets\/[a-f0-9-]{36}$/.test(frame.attribs.src || ""),
     parser: { lowerCaseTags: true },
   });
+  if (sanitized.length > ARTICLE_HTML_MAX_LENGTH)
+    throw new ApiFailure(
+      413,
+      "CONTENT_SIZE",
+      "Sanitized article HTML exceeds the archive body limit (2097152 characters)",
+    );
+  return sanitized;
 }
 export const htmlText = (html: string) =>
   cheerio.load(html).text().replace(/\s+/g, " ").trim();
@@ -162,11 +171,14 @@ export class Content {
           requireOk(result);
           const { bytes, type } = await raster(result.body);
           await this.store.writeTransaction(sql, async (put) => {
+            const [current] =
+              await sql`SELECT status FROM images WHERE id=${image.id} FOR UPDATE`;
+            if (!current || current.status === "cached") return;
             const key = await put(bytes);
             await sql`UPDATE images SET status='cached',content_type=${type},file_key=${key},content_hash=${hash(bytes)},captured_at=now(),last_error=null WHERE id=${image.id}`;
           });
         } catch (e) {
-          await sql`UPDATE images SET status='failed',last_error=${safeError(e)} WHERE id=${image.id}`;
+          await sql`UPDATE images SET status='failed',last_error=${safeError(e)} WHERE id=${image.id} AND status!='cached'`;
         }
       },
       connection,
@@ -178,7 +190,7 @@ export class Content {
     baseUrl: string,
     sql: SQL = this.db,
   ) {
-    if (html.length > 2 * 1024 * 1024)
+    if (html.length > ARTICLE_HTML_MAX_LENGTH)
       throw new ApiFailure(
         413,
         "CONTENT_SIZE",

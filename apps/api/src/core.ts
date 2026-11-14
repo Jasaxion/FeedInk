@@ -274,12 +274,16 @@ export class Store {
       }
       throw e;
     } finally {
-      if (finished && directory)
-        await rm(directory, { recursive: true, force: true });
       try {
-        await sql`SELECT pg_advisory_unlock(71244004)`;
-      } catch {
-        /* A lost connection releases its server-side lock. */
+        if (finished && directory)
+          await rm(directory, { recursive: true, force: true });
+      } finally {
+        // Cleanup errors must not return a still-locked backend to the pool.
+        try {
+          await sql`SELECT pg_advisory_unlock(71244004)`;
+        } catch {
+          /* A lost connection releases its server-side lock. */
+        }
       }
     }
   }

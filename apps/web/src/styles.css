@@ -425,3 +425,20 @@ kbd{font:12px ui-monospace,monospace;background:var(--panel);border:1px solid va
 
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}
 }
+
+.source-icon{position:relative;overflow:hidden}
+.source-icon>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:var(--paper)}
+.original-page{padding:12px 0;border:0;text-align:left}
+.original-page-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.original-frame{width:100%;height:70vh;min-height:320px;border:1px solid var(--line);background:white}
+.reader-pane{container-type:inline-size}
+@container(max-width:450px){.reader-toolbar .desktop-tool{display:none}.reader-toolbar{gap:2px;padding-inline:8px}.reader-toolbar .toolbar-spacer{min-width:0}}
+@media(min-width:1100px){
+.app-shell{grid-template-columns:min(var(--sidebar-width,256px),26vw) min(var(--list-width,338px),calc(100vw - min(var(--sidebar-width,256px),26vw) - 360px)) minmax(360px,1fr)}
+.app-shell.sidebar-collapsed{grid-template-columns:0 min(var(--list-width,338px),calc(100vw - 360px)) minmax(360px,1fr)}
+}
+@media(max-width:360px){.reader-toolbar{gap:2px;padding-inline:6px}.reader-toolbar .toolbar-spacer{min-width:0}.reader-toolbar .icon-button{flex-shrink:1}.article-document{padding-inline:16px}}
+/* A fixed drawer leaves grid flow on tablets; keep both remaining panes in their named columns. */
+.sidebar{grid-column:1;grid-row:1}
+.list-pane{grid-column:2;grid-row:1}
+.reader-pane{grid-column:3;grid-row:1}

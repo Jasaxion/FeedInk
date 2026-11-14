@@ -43,6 +43,10 @@ jobs:
         with:
           node-version: 24.22.3
           cache: npm
+      - name: Check public source hygiene
+        run: |
+          node scripts/check-public-content.mjs
+          node --test scripts/check-public-content.test.mjs
       - run: npm ci --no-audit --no-fund
       - name: Production build (shared → web → API)
         run: npm run build
@@ -81,7 +85,7 @@ jobs:
           trap stop_api EXIT
           # Each project gets a fresh owned API process/rate-limit budget, not weaker limits.
           failed=0
-          for project in api desktop mobile tablet webkit; do
+          for project in api desktop mobile tablet webkit workflows; do
             node apps/api/dist/server.js > "$RUNNER_TEMP/feedink-api-$project.log" 2>&1 &
             api_pid=$!
             ready=false
@@ -98,17 +102,7 @@ jobs:
             stop_api
           done
           test "$failed" = 0
-      - name: Preserve verification diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: verification-${{ github.sha }}
-          path: |
-            test-results/
-            playwright-report/
-            ${{ runner.temp }}/feedink-api-*.log
-          retention-days: 7
-          if-no-files-found: ignore
+      # Raw browser traces, session data and machine logs are not uploaded.
 
   container:
     runs-on: ubuntu-latest
@@ -170,19 +164,4 @@ jobs:
         env:
           TEST_IMAGE: feedink:ci
         run: scripts/test-backup.sh
-      - name: Collect container diagnostics without environment secrets
-        if: always()
-        run: |
-          if test -f .env; then
-            docker compose logs --no-color --tail=200 > "$RUNNER_TEMP/feedink-container.log" 2>&1 || true
-          fi
-      - name: Preserve container diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: container-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/feedink-container.log
-            ${{ runner.temp }}/bootstrap-refusal.log
-          retention-days: 7
-          if-no-files-found: ignore
+      # Keep raw diagnostic files ephemeral; publish only reviewed summaries.

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ArticleDetail, ArticleMode } from '@feedink/shared';
 import { useApp } from './context';
-import { download, downloadBlob, mutate } from './api';
-import { AssetImage, Empty, Field, Icon, IconButton, Modal, Toggle } from './components';
+import { download, downloadCachedImage, mutate } from './api';
+import { AssetImage, Empty, Field, Icon, IconButton, Modal, Toggle, SourceIcon } from './components';
 import { formatDate, ownedAssetUrl, progressAt, safeExternalUrl } from './logic';
 import { sanitizeArticle } from './safety';
 
@@ -23,16 +23,16 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
     return () => { cancelAnimationFrame(id); if (progressTimer.current) clearTimeout(progressTimer.current); };
   }, [article?.id, mode]);
   useEffect(() => {
-    let alive = true; const urls: string[] = [];
+    let alive = true;
     for (const img of bodyRef.current?.querySelectorAll<HTMLImageElement>('img[data-asset]') || []) {
       img.loading = settings.lazyImages ? 'lazy' : 'eager'; img.tabIndex = 0; img.setAttribute('role', 'button'); img.setAttribute('aria-label', `放大图片：${img.alt || '文章图片'}`);
       img.onclick = () => setImage(img.dataset.asset!); img.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setImage(img.dataset.asset!); } };
       const originalTitle = img.title;
       img.onerror = () => { img.classList.add('failed-image'); img.title = '图片不可用；可在文末查看状态并重试'; };
       img.onload = () => { img.classList.remove('failed-image'); img.title = originalTitle; };
-      void app.store.image(app.session.user.id, img.dataset.asset!).then(blob => { if (blob && alive) { const url = URL.createObjectURL(blob); urls.push(url); img.src = url; } }).catch(() => {});
+      void app.store.imageSource(app.session.user.id, img.dataset.asset!).then(url => { if (url && alive) { img.loading = 'eager'; img.src = url; } }).catch(() => {});
     }
-    return () => { alive = false; urls.forEach(url => URL.revokeObjectURL(url)); };
+    return () => { alive = false; };
   }, [html, app.session.user.id, settings.lazyImages]);
   async function extract() {
     if (!article) return; setFetching(true);
@@ -60,12 +60,12 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
       </header> : <div className="collapsed-toolbar"><IconButton icon="back" label="返回" onClick={back} /><button className="text-button" onClick={() => setToolbar(true)}>显示工具栏</button></div>}
       {!app.online && <div className="reader-offline"><Icon name="offline" size={13} />离线阅读 · 更改将在本账号联网后同步</div>}
       <div className="reader-scroll" ref={scrollRef} tabIndex={0} onScroll={scroll} onTouchStart={event => { const point = event.touches[0]; touch.current = { x: point.clientX, y: point.clientY }; }} onTouchEnd={event => { const start = touch.current; touch.current = null; if (!start || window.getSelection()?.toString()) return; const point = event.changedTouches[0]; if (Math.abs(point.clientY - start.y) < 50 && point.clientX - start.x > 110) back(); }}>
-        <article className="article-document"><div className="article-source"><span className="source-icon"><Icon name="rss" size={15} /></span><span>{article.feedTitle || '网页存档'}</span></div>
+        <article className="article-document"><div className="article-source"><SourceIcon subscriptionId={article.subscriptionId} /><span>{article.feedTitle || '网页存档'}</span></div>
           <h1><a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">{article.title || '无标题文章'}</a></h1>
           <div className="article-meta"><time dateTime={article.publishedAt}>{formatDate(article.publishedAt)}</time>{article.author && <span>· {article.author}</span>}<span>· 约 {Math.max(1, Math.ceil(article.wordCount / 400))} 分钟</span></div>
           <div className="article-mode"><select aria-label="正文模式" value={mode} onChange={event => { const value = event.target.value as ArticleMode; setMode(value); if (value === 'fulltext' && !article.fulltextHtml && app.online) void extract(); }}><option value="feed">RSS 正文</option><option value="fulltext">归档全文</option><option value="webpage">原网页</option></select><button className="text-button" onClick={() => setSpeech(value => !value)}><Icon name="audio" size={16} />{speech ? '收起朗读' : '朗读'}</button></div>
           {speech && <SpeechPanel article={article} next={() => move(1)} />}
-          {mode === 'webpage' ? <section className="original-page"><Icon name="external" size={32} /><h2>阅读原网页</h2><p>为避免第三方页面读取账号信息，原网页在独立标签页打开。本站仍保留已归档正文供离线阅读。</p><a className="primary" href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">打开原网页</a><button className="secondary" onClick={() => setMode('feed')}>返回归档正文</button></section> : <>
+          {mode === 'webpage' ? <section className="original-page"><div className="original-page-actions"><a className="secondary" href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">在新标签页打开原文</a><button className="text-button" onClick={() => setMode('feed')}>返回归档正文</button></div><p className="muted small">原网页在受限沙箱中显示。网站可能拒绝嵌入或需要脚本，此时请使用上方外部打开链接。页面不能导航本应用或读取账号。</p>{app.online && safeExternalUrl(article.url) ? <iframe key={article.url} className="original-frame" title={`原网页：${article.title}`} src={safeExternalUrl(article.url)!} sandbox="" referrerPolicy="no-referrer" /> : <p role="status">离线时原网页不可用，请返回已归档正文。</p>}</section> : <>
             {mode === 'fulltext' && !article.fulltextHtml && <p className="notice">{article.fulltextError || (app.online ? '尚未取得全文，当前显示 RSS 正文。可点击上方“提取全文”重试。' : '此文章的全文尚未缓存，当前显示已缓存的 RSS 正文。')}</p>}
             <div className="article-content" data-testid="reader-content" ref={bodyRef} dangerouslySetInnerHTML={{ __html: html }} onClick={event => { if (settings.tapToPage && !window.getSelection()?.toString() && !(event.target as HTMLElement).closest('a,img,button,summary,pre,code')) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />
           </>}
@@ -76,7 +76,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
       </div>
       <nav className="page-controls" aria-label="阅读翻页"><button onClick={() => scrollRef.current?.scrollBy({ top: -(scrollRef.current.clientHeight * 0.85), behavior: 'instant' })}><Icon name="up" />上一页</button><button onClick={() => { const element = scrollRef.current; if (element && progressAt(element.scrollTop, element.scrollHeight, element.clientHeight) >= 0.99) move(1); else element?.scrollBy({ top: element.clientHeight * 0.85, behavior: 'instant' }); }}>下一页 <Icon name="down" /></button></nav>
     </>}
-    {image && <Modal title="图片预览" wide onClose={() => setImage(null)}><div className="image-preview" style={{ '--zoom': zoom } as React.CSSProperties}><AssetImage src={image} alt="归档文章图片" className="zoomed-image" /></div><div className="button-row zoom-controls"><button className="secondary" disabled={zoom <= 0.5} onClick={() => setZoom(value => Math.max(0.5, value - 0.25))}>缩小</button><output aria-live="polite">{Math.round(zoom * 100)}%</output><button className="secondary" disabled={zoom >= 4} onClick={() => setZoom(value => Math.min(4, value + 0.25))}>放大</button><button className="text-button" onClick={() => setZoom(1)}>适应宽度</button></div><button className="primary" onClick={() => void app.task(async () => { const blob = await app.store.image(app.session.user.id, image); if (blob) downloadBlob(blob, 'FeedInk-image'); else await download(image, 'FeedInk-image'); })}><Icon name="download" />下载图片</button><p className="muted">可使用浏览器缩放手势放大查看。</p></Modal>}
+    {image && <Modal title="图片预览" wide onClose={() => setImage(null)}><div className="image-preview" style={{ '--zoom': zoom } as React.CSSProperties}><AssetImage src={image} alt="归档文章图片" className="zoomed-image" /></div><div className="button-row zoom-controls"><button className="secondary" disabled={zoom <= 0.5} onClick={() => setZoom(value => Math.max(0.5, value - 0.25))}>缩小</button><output aria-live="polite">{Math.round(zoom * 100)}%</output><button className="secondary" disabled={zoom >= 4} onClick={() => setZoom(value => Math.min(4, value + 0.25))}>放大</button><button className="text-button" onClick={() => setZoom(1)}>适应宽度</button></div><button className="primary" onClick={() => void app.task(async () => { const source = await app.store.imageSource(app.session.user.id, image); if (source) downloadCachedImage(source, 'FeedInk-image'); else await download(image, 'FeedInk-image'); })}><Icon name="download" />下载图片</button><p className="muted">可使用浏览器缩放手势放大查看。</p></Modal>}
   </main>;
 }
 

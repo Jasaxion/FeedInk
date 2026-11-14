@@ -6,14 +6,15 @@ Use an isolated test host/workspace with Node24.22.3, npm11, PostgreSQL17 and su
 
 ```sh
 npm ci
-npm run build -w @feedink/shared
+# Integration tests execute the compiled operator CLI, so build all workspaces first.
+npm run build
 npm run typecheck
+npm audit --omit=dev --audit-level=moderate
 # Supply a dedicated disposable PostgreSQL URL; absent TEST_DATABASE_URL skips API integration.
 export TEST_DATABASE_URL='postgresql://test_user:TEST_PASSWORD@127.0.0.1:5432/feedink_test'
 npm test
 node --test scripts/data-archive.test.mjs
 for script in scripts/*.sh; do sh -n "$script"; done
-npm run build
 ```
 
 `npm test` runs workspace tests and the first-party upstream fixture self-tests when included in the root script. Inspect output for **skipped** database integration tests; a green no-database run is not integration evidence. Backend integration and browser suites must not mutate the same database concurrently. Never substitute real SMTP delivery for a mail fixture.
@@ -38,7 +39,7 @@ FEEDINK_FIXTURE_URL=http://127.0.0.1:8899 \
 npm run test:e2e -- --project=desktop
 ```
 
-Run `api`, `desktop`, `mobile`, `tablet`, and optionally `webkit` separately, restarting only your own API process between projects. Combined browser projects share the same loopback rate-limit identity and can legitimately exhaust a minute's budget; do not disable or raise production limits to hide this. CI starts `node apps/api/dist/server.js` directly per project, uses bounded readiness, and terminates/waits for only its captured child PID. It installs both Chromium and WebKit and sets `FEEDINK_TEST_WEBKIT=1`.
+Run `api`, `desktop`, `mobile`, `tablet`, `workflows`, and optionally `webkit` separately, restarting only your own API process between projects. Combined browser projects share the same loopback rate-limit identity and can legitimately exhaust a minute's budget; do not disable or raise production limits to hide this. CI starts `node apps/api/dist/server.js` directly per project, uses bounded readiness, and terminates/waits for only its captured child PID. It installs both Chromium and WebKit and sets `FEEDINK_TEST_WEBKIT=1`.
 
 Playwright starts `tests/fixtures/upstream.mjs` via `webServer`; do not launch a duplicate fixture. If the fixture port is occupied, choose your own free port and set **both** `FEEDINK_FIXTURE_PORT` and `FEEDINK_FIXTURE_URL` consistently; never kill an unknown listener. The API is started separately and must reach that fixture URL. Configure the API's allowlist before launching it. For optional WebKit coverage, install WebKit and set `FEEDINK_TEST_WEBKIT=1`; do not report WebKit coverage when only Chromium ran. Browser screenshots/traces are private diagnostic output, not committed source or proof that unrelated scenarios passed.
 
@@ -65,14 +66,10 @@ The recovery drill uses a first-party SQL body and four binary bytes, **new uniq
 
 The GitHub workflow runs unit/type/build/database tests with `TEST_DATABASE_URL` and a PostgreSQL service, isolated-per-project Chromium/WebKit acceptance, and a separate hosted Docker Engine job that builds the image and runs unmodified Compose health checks. Its operator-only bootstrap streams a private password file into a one-off nonroot container with registration closed; login/admin access and closed registration are checked. It restarts the app and restores actual demo body/image data into a fresh project, then rechecks both those hashes and administrator login, followed by the failure-guard drill. The API suite owns real-HTTP trusted-proxy/two-client/forged-header regression coverage; the Compose smoke does not itself configure a reverse proxy. Adding a workflow is not evidence that GitHub has executed it. Every release must record the actual revision, command, environment, failures and skipped tests.
 
-## Evidence scope
+## Evidence and publication policy
 
-Delivery implementation validation on 2026-11-14: Node24.22.3 archive-format tests **7/7 passed**, shell syntax passed, and PostgreSQL17.12 + independent-volume recovery/failure-guard drills passed using rootless Podman4.9.3 with Docker Compose2.32.4. The drill first passed with a utility-only image and was then repeated successfully with the **full preliminary production image**. The image compiled shared → web → API, ran as uid1000 on a read-only root filesystem, served the SPA/manifest/service worker, and returned database health. Twenty original demo articles plus stored body/image SHA-256 hashes survived an application restart and a paired database+volume restore into a fresh project. Unauthenticated image access returned401.
+Release summaries should identify the tested revision, commands and results using synthetic fixtures and public CI status. A test definition, successful compilation or screenshot does not establish unrelated behavior. Database tests must actually use an isolated database, and browser tests must exercise the matching compiled application.
 
-This was an explicitly **preliminary cross-workspace source snapshot**, not a final merged release build. Source hashes and the generated lock were retained as private implementation evidence; final source must be rebuilt and revalidated. Remote limitations were real: the initial registry pull timed out, Compose needed an isolated Podman API socket, `init:true` required an absent host helper (removed because the Node server handles termination signals directly), CNI service DNS was disabled, and automatic health probes failed while direct probes passed. A test-only override mapped `postgres` to the inspected IP of the owned database, and manual health execution verified both probes. **No DNS override or disabled health dependency is present in production Compose.** These checks prove the image/API/persistence under that compatibility workaround, not unmodified Docker Engine orchestration. Hosted Docker Engine CI has been defined but must actually execute against the final merged source before claiming that gate passed. No unrelated host resources were pruned.
+Do not publish raw browser traces, session files, environment files, credentials, private articles, machine paths or diagnostic bundles. Keep failure investigation local to authorized test resources. The public-content checker reports only file locations and rule names; it supplements review and does not prove the absence of every possible secret.
 
-Post-review backup regressions passed remotely on PostgreSQL17.12, including trailing-slash aliases, collation/FDW/cast detection and the framing-valid corruption/empty-target check. As a mutation test, removing only the checksum comparison in a private copy made the full drill fail specifically because corrupted-payload restore unexpectedly succeeded. This validates that the regression is not merely detecting malformed framing or a previously populated target.
-
-The operator bootstrap/proxy API transition and revised CI must be validated against the consolidated lock and final source; an absent root `package-lock.json` is a real clean-build blocker, not a Podman limitation. Keep `npm ci` and the locked Docker build rather than substituting an unlocked install. Serving PWA files does not prove installation, offline behavior, account-switch isolation or browser parity. Do not interpret this evidence, the product contract or changelog as a completed feature checklist.
-
-Before release, independently review HTTPS/cookies, desktop/mobile/tablet overflow and focus, e-ink/reduced-motion, PWA install/update, offline state replay and account-switch cache isolation, data/asset cross-user access, a source-outage archive read, a database+volume recovery with real app data, SMTP failure/success against a mail sink, and an upgrade rollback. Use authorized public-feed samples as additional evidence; a controlled image fixture does not prove every WeChat/CDN anti-bot case works.
+Before release, verify authentication and account isolation, desktop/mobile/tablet controls, e-ink behavior, PWA install/update and offline replay, archive retention after an upstream outage, database/file recovery, SMTP behavior against a fixture, and migration/rollback instructions. Record platform or source restrictions precisely; do not imply that controlled fixtures prove every external service is reachable.

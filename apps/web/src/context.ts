@@ -19,6 +19,7 @@ export interface AppContextValue {
   openArticle: (id: string) => void;
   logout: () => Promise<void>;
   cacheArticle: (article: ArticleDetail) => Promise<void>;
+  clearCache: (enabled?: boolean) => Promise<void>;
 }
 export const AppContext = createContext<AppContextValue | null>(null);
 export function useApp(): AppContextValue {

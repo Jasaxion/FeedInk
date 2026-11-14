@@ -26,9 +26,19 @@ export function OrganizationPanel({ target, close }: { target: OrganizationTarge
   const [folderId, setFolder] = useState(target.kind === 'subscription' ? target.value.folderId || '' : '');
   const [color, setColor] = useState(target.kind === 'tag' ? target.value?.color || '#861dd4' : '#861dd4');
   const [settings, setSettings] = useState<FeedPreferences>(target.kind === 'tag' ? {} : target.value?.settings || {});
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false); const [createdId, setCreatedId] = useState<string | null>(null);
   const route = target.kind === 'subscription' ? '/subscriptions' : target.kind === 'folder' ? '/folders' : '/tags';
-  async function save(event: FormEvent) { event.preventDefault(); setBusy(true); await app.task(async () => { await mutate(`${route}${value ? `/${value.id}` : ''}`, value ? 'PATCH' : 'POST', target.kind === 'subscription' ? { title: name, folderId: folderId || null, settings } : target.kind === 'folder' ? { name, ...(value ? { settings } : {}) } : { name, color }); app.refresh(); app.notify('已保存'); close(); }); setBusy(false); }
+  async function save(event: FormEvent) {
+    event.preventDefault(); setBusy(true);
+    await app.task(async () => {
+      if (target.kind === 'folder' && !value) {
+        let id = createdId;
+        if (!id) { id = (await mutate<Folder>('/folders', 'POST', { name })).id; setCreatedId(id); }
+        await mutate(`/folders/${id}`, 'PATCH', { name, settings });
+      } else await mutate(`${route}${value ? `/${value.id}` : ''}`, value ? 'PATCH' : 'POST', target.kind === 'subscription' ? { title: name, folderId: folderId || null, settings } : target.kind === 'folder' ? { name, settings } : { name, color });
+      app.refresh(); app.notify('已保存'); close();
+    }); setBusy(false);
+  }
   async function remove() { if (!value || !confirm(target.kind === 'subscription' ? '取消订阅？已归档文章和图片会保留，可在“全部存档”中阅读。' : '删除此项目？文章不会被删除。')) return; setBusy(true); await app.task(async () => { await mutate(`${route}/${value.id}`, 'DELETE'); app.refresh(); app.notify('已删除整理项目，文章存档保留'); close(); }); setBusy(false); }
   return <form onSubmit={save}><Field label="名称"><input autoFocus required maxLength={200} value={name} onChange={event => setName(event.target.value)} /></Field>
     {target.kind === 'tag' ? <Field label="标签颜色"><input type="color" value={color} onChange={event => setColor(event.target.value)} /></Field> : <>
@@ -37,7 +47,7 @@ export function OrganizationPanel({ target, close }: { target: OrganizationTarge
       <Field label="列表样式"><select value={settings.view || ''} onChange={event => setSettings(old => ({ ...old, view: (event.target.value || undefined) as FeedPreferences['view'] }))}><option value="">继承</option><option value="magazine">杂志</option><option value="list">单行</option><option value="grid">网格</option></select></Field>
       <Field label="排序"><select value={settings.sort || ''} onChange={event => setSettings(old => ({ ...old, sort: (event.target.value || undefined) as FeedPreferences['sort'] }))}><option value="">继承</option><option value="newest">最新在前</option><option value="oldest">最早在前</option></select></Field>
       <Field label="未读筛选"><select value={settings.unreadOnly === undefined ? '' : String(settings.unreadOnly)} onChange={event => setSettings(old => ({ ...old, unreadOnly: event.target.value === '' ? undefined : event.target.value === 'true' }))}><option value="">继承</option><option value="true">仅未读</option><option value="false">全部</option></select></Field>
-      <Field label="文章模式"><select value={settings.articleMode || ''} onChange={event => setSettings(old => ({ ...old, articleMode: (event.target.value || undefined) as FeedPreferences['articleMode'] }))}><option value="">继承</option><option value="feed">RSS 正文</option><option value="fulltext">提取全文</option><option value="webpage">原网页链接</option></select></Field>
+      <Field label="文章模式"><select value={settings.articleMode || ''} onChange={event => setSettings(old => ({ ...old, articleMode: (event.target.value || undefined) as FeedPreferences['articleMode'] }))}><option value="">继承</option><option value="feed">RSS 正文</option><option value="fulltext">提取全文</option><option value="webpage">原网页（沙箱）</option></select></Field>
       {target.kind === 'subscription' && <><Toggle label="置顶订阅" checked={!!settings.pinned} onChange={pinned => setSettings(old => ({ ...old, pinned }))} /><Toggle label="静音订阅" hint="不参与 G 键跳转下一个未读源，仍保留文章与自动抓取。" checked={!!settings.muted} onChange={muted => setSettings(old => ({ ...old, muted }))} /></>}
     </>}
     <div className="form-footer"><button className="primary" disabled={busy || !app.online}>保存</button>{target.kind === 'subscription' && <button type="button" className="secondary" disabled={busy || !app.online} onClick={() => void app.task(async () => { await mutate(`/subscriptions/${target.value.id}/refresh`, 'POST'); app.refresh(); app.notify('订阅源已刷新'); })}>立即刷新</button>}{value && <button type="button" className="danger" disabled={busy || !app.online} onClick={() => void remove()}>{target.kind === 'subscription' ? '取消订阅' : '删除'}</button>}</div>
@@ -68,5 +78,5 @@ export function TransferPanel({ mode }: { mode: 'import' | 'export' }) {
 
 export function SaveUrlPanel() {
   const app = useApp(); const params = new URLSearchParams(location.search); const [url, setUrl] = useState(params.get('url') || params.get('text')?.match(/https?:\/\/\S+/)?.[0] || ''); const [busy, setBusy] = useState(false);
-  return <form onSubmit={event => { event.preventDefault(); setBusy(true); void app.task(async () => { if (!safeExternalUrl(url)) throw new Error('请输入有效的 HTTP 或 HTTPS 网页地址'); const article = await mutate<ArticleDetail>('/articles/save-url', 'POST', { url }); await app.cacheArticle(article); app.refresh(); app.navigate(`/?scope=saved&article=${encodeURIComponent(article.id)}`); app.notify('网页已保存为持久化阅读档案'); }).finally(() => setBusy(false)); }}><p className="muted">保存网页正文与可抓取的图片，稍后慢慢读。登录限制、付费墙或源站风控可能使抓取失败，FeedInk 不绕过这些限制。</p><Field label="网页地址"><input autoFocus type="url" required placeholder="https://…" value={url} onChange={event => setUrl(event.target.value)} /></Field><button className="primary" disabled={busy || !app.online}>{busy ? '正在归档网页…' : '保存到稍后阅读'}</button></form>;
+  return <form onSubmit={event => { event.preventDefault(); setBusy(true); void app.task(async () => { if (!safeExternalUrl(url)) throw new Error('请输入有效的 HTTP 或 HTTPS 网页地址'); const article = await mutate<ArticleDetail>('/articles/save-url', 'POST', { url }); app.refresh(); app.navigate(`/?scope=saved&article=${encodeURIComponent(article.id)}`); app.notify('网页已保存为持久化阅读档案'); void app.cacheArticle(article); }).finally(() => setBusy(false)); }}><p className="muted">保存网页正文与可抓取的图片，稍后慢慢读。登录限制、付费墙或源站风控可能使抓取失败，FeedInk 不绕过这些限制。</p><Field label="网页地址"><input autoFocus type="url" required placeholder="https://…" value={url} onChange={event => setUrl(event.target.value)} /></Field><button className="primary" disabled={busy || !app.online}>{busy ? '正在归档网页…' : '保存到稍后阅读'}</button></form>;
 }
