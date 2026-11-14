@@ -1,0 +1,43 @@
+{
+  "name": "@feedink/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "bootstrap-admin": "node dist/operator-cli.js bootstrap-admin",
+    "reconcile-ebook": "node dist/operator-cli.js reconcile-ebook"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/multipart": "^9.3.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/static": "^10.1.11",
+    "@feedink/shared": "0.1.0",
+    "@mozilla/readability": "^0.6.0",
+    "cheerio": "^1.1.2",
+    "fastify": "^5.6.2",
+    "ipaddr.js": "^2.2.0",
+    "jsdom": "^27.2.0",
+    "nodemailer": "^10.5.0",
+    "postgres": "^3.4.7",
+    "rss-parser": "^3.13.0",
+    "sanitize-html": "^2.17.0",
+    "sharp": "^0.35.5",
+    "yauzl": "^3.2.0",
+    "yazl": "^3.3.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^27.0.0",
+    "@types/nodemailer": "^8.0.2",
+    "@types/sanitize-html": "^2.16.0",
+    "@types/yauzl": "^2.10.3",
+    "@types/yazl": "^3.3.0",
+    "tsx": "^4.20.6"
+  }
+}

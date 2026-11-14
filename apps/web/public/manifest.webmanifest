@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "FeedInk · 私人阅读档案",
+  "short_name": "FeedInk",
+  "description": "订阅、阅读、保存。你的自托管 RSS 阅读空间。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#eeeeee",
+  "theme_color": "#861dd4",
+  "icons": [
+    {"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"},
+    {"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ],
+  "share_target": {"action":"/share","method":"GET","params":{"title":"title","text":"text","url":"url"}},
+  "shortcuts": [{"name":"稍后阅读","url":"/?scope=saved"},{"name":"添加订阅","url":"/discover"}]
+}

@@ -1,0 +1,154 @@
+name: Verify FeedInk
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: feedink-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: feedink_ci
+          POSTGRES_PASSWORD: ephemeral_ci_only
+          POSTGRES_DB: feedink_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U feedink_ci -d feedink_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CI: 'true'
+      DATABASE_URL: postgresql://feedink_ci:ephemeral_ci_only@127.0.0.1:5432/feedink_ci
+      TEST_DATABASE_URL: postgresql://feedink_ci:ephemeral_ci_only@127.0.0.1:5432/feedink_ci
+      DATA_DIR: ${{ github.workspace }}/.data/ci
+      APP_URL: http://127.0.0.1:3000
+      BASE_URL: http://127.0.0.1:3000
+      FEEDINK_FIXTURE_URL: http://127.0.0.1:8899
+      FEEDINK_FIXTURE_PORT: '8899'
+      FEEDINK_TEST_WEBKIT: '1'
+      FETCH_ALLOW_HOSTS: 127.0.0.1
+      SESSION_SECRET: ephemeral-ci-session-secret-not-for-production-0001
+      REGISTRATION_ENABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.3
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build -w @feedink/shared
+      - name: Typecheck workspaces and test contracts
+        run: npm run typecheck
+      - name: Unit, PostgreSQL integration and upstream fixture tests
+        run: npm test
+      - name: Backup format tests and shell syntax
+        run: |
+          node --test scripts/data-archive.test.mjs
+          for script in scripts/*.sh; do sh -n "$script"; done
+      - name: Production build (shared → web → API)
+        run: npm run build
+      - name: Install browser for existing end-to-end tests
+        if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
+        run: npx playwright install --with-deps chromium webkit
+      - name: Browser and API end-to-end tests
+        if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
+        run: |
+          mkdir -p "$DATA_DIR"
+          api_pid=
+          stop_api() {
+            if test -n "$api_pid"; then
+              kill "$api_pid" 2>/dev/null || true
+              for attempt in $(seq 1 20); do
+                kill -0 "$api_pid" 2>/dev/null || break
+                sleep 1
+              done
+              if kill -0 "$api_pid" 2>/dev/null; then kill -KILL "$api_pid" 2>/dev/null || true; fi
+              wait "$api_pid" 2>/dev/null || true
+              api_pid=
+            fi
+          }
+          trap stop_api EXIT
+          # Each project gets a fresh owned API process/rate-limit budget, not weaker limits.
+          for project in api desktop mobile tablet webkit; do
+            node apps/api/dist/server.js > "$RUNNER_TEMP/feedink-api-$project.log" 2>&1 &
+            api_pid=$!
+            ready=false
+            for attempt in $(seq 1 60); do
+              if curl --fail --silent "$BASE_URL/api/health" > /dev/null; then ready=true; break; fi
+              kill -0 "$api_pid" || exit 1
+              sleep 1
+            done
+            test "$ready" = true
+            # Playwright starts/stops its own upstream fixture for this invocation.
+            PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" npm run test:e2e -- --project="$project" --output="test-results/$project"
+            stop_api
+          done
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.3
+      - name: Build the actual production image
+        run: docker build --tag feedink:ci .
+      - name: Compose health, migration and restart smoke
+        run: |
+          umask 077
+          {
+            echo 'COMPOSE_PROJECT_NAME=feedink-ci'
+            echo 'FEEDINK_IMAGE=feedink:ci'
+            echo 'APP_URL=http://localhost:3000'
+            echo 'ADMIN_EMAIL=operator-ci@example.invalid'
+            echo 'ADMIN_NAME=CI operator'
+            echo 'REGISTRATION_ENABLED=false'
+            printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)"
+            printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
+          } > .env
+          docker compose config --quiet
+          docker compose up -d --wait --wait-timeout 120 postgres
+          openssl rand -base64 32 > "$RUNNER_TEMP/admin-password"
+          docker compose run --rm --no-deps -T -e ADMIN_PASSWORD_FILE=/dev/stdin --entrypoint npm app run bootstrap-admin -w @feedink/api < "$RUNNER_TEMP/admin-password"
+          if docker compose run --rm --no-deps -T -e ADMIN_PASSWORD_FILE=/dev/stdin --entrypoint npm app run bootstrap-admin -w @feedink/api < "$RUNNER_TEMP/admin-password" > "$RUNNER_TEMP/bootstrap-refusal.log" 2>&1; then
+            echo 'Repeated administrator bootstrap unexpectedly succeeded' >&2
+            exit 1
+          fi
+          grep -F 'Bootstrap requires an unused email and no active administrator' "$RUNNER_TEMP/bootstrap-refusal.log" > /dev/null
+          docker compose up -d --wait --wait-timeout 120
+          curl --fail http://127.0.0.1:3000/api/health
+          BASE_URL=http://127.0.0.1:3000 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" node scripts/test-deployment.mjs bootstrap
+          export BASE_URL=http://127.0.0.1:3000 STATE_FILE="$RUNNER_TEMP/deployment-state.json"
+          node scripts/test-deployment.mjs seed
+          docker compose restart app
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/api/health; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          node scripts/test-deployment.mjs verify
+      - name: Application database and image-volume recovery into a fresh project
+        run: |
+          export COMPOSE_PROJECT_NAME=feedink-ci
+          docker compose stop app
+          scripts/backup.sh "$RUNNER_TEMP/application-backup"
+          export COMPOSE_PROJECT_NAME=feedink-ci-recovery APP_PORT=3001 APP_URL=http://localhost:3001
+          docker compose up -d --wait --wait-timeout 120 postgres
+          scripts/restore.sh "$RUNNER_TEMP/application-backup" --confirm-restore=feedink-ci-recovery
+          docker compose up -d --wait --wait-timeout 120
+          BASE_URL=http://127.0.0.1:3001 STATE_FILE="$RUNNER_TEMP/deployment-state.json" node scripts/test-deployment.mjs verify
+          BASE_URL=http://127.0.0.1:3001 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" node scripts/test-deployment.mjs bootstrap
+      - name: Real PostgreSQL plus independent archive volume failure-guard drill
+        env:
+          TEST_IMAGE: feedink:ci
+        run: scripts/test-backup.sh

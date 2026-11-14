@@ -1,0 +1,25 @@
+# Isolated backup-drill fixture; never use this as a production deployment.
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    environment:
+      POSTGRES_USER: feedink_drill
+      POSTGRES_DB: feedink_drill
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Test password required}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -U, feedink_drill, -d, feedink_drill]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  app:
+    image: ${TEST_IMAGE:?Set TEST_IMAGE to the locally built FeedInk image}
+    command: [node, -e, 'setInterval(() => {}, 1000)']
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - data:/data
+volumes:
+  database:
+  data:

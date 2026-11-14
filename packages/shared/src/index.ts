@@ -81,6 +81,8 @@ export interface ArticleSummary {
   publishedAt: string; summary: string; thumbnailUrl: string | null;
   read: boolean; saved: boolean; tags: Tag[]; wordCount: number;
   archivedAt: string; progress: number; enclosures: Enclosure[];
+  /** Always emitted by the server; optional only for pre-upgrade offline rows. */
+  stateVersion?: number;
 }
 export interface ArchivedImage {
   id: string; originalUrl: string; url: string;

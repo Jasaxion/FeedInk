@@ -139,7 +139,12 @@ test('full-text capture, portable archive restore and valid ebook download retai
   const packageXml = strFromU8(epub[packagePath!]!);
   expect(packageXml).toContain('http://www.idpf.org/2007/opf');
   expect(packageXml).toContain('<spine');
-  expect(Object.entries(epub).some(([name, bytes]) => /\.x?html$/.test(name) && strFromU8(bytes).includes('阅读不是追逐更新'))).toBeTruthy();
+  // XML serializers may legally encode Chinese with numeric character references.
+  const chapterText = Object.entries(epub).filter(([name]) => /\.x?html$/.test(name))
+    .map(([, bytes]) => strFromU8(bytes).replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (_match, value: string) =>
+      String.fromCodePoint(value[0]!.toLowerCase() === 'x' ? parseInt(value.slice(1), 16) : Number(value))))
+    .join('\n');
+  expect(chapterText).toContain('阅读不是追逐更新');
   const archive = await request.get('/api/export/archive');
   expect(archive.ok(), await archive.text()).toBeTruthy();
   const zip = await archive.body();
