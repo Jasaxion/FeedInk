@@ -1,0 +1,26 @@
+{
+  "name": "feedink",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24.22.1 <25"
+  },
+  "scripts": {
+    "build": "npm run build -w @feedink/shared && npm run build -w @feedink/web && npm run build -w @feedink/api",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:e2e": "playwright test",
+    "dev:api": "npm run dev -w @feedink/api",
+    "dev:web": "npm run dev -w @feedink/web"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.0"
+  }
+}
