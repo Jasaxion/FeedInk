@@ -12,12 +12,13 @@ import { fixturePageErrors, verifyRuntimeErrorWitness } from './fixture-page-err
 const artifacts = process.env.FEEDINK_BROWSER_ARTIFACTS || await mkdtemp(join(tmpdir(), 'feedink-audit-')); await mkdir(artifacts, { recursive: true });
 const browser = await engine.launch({ executablePath, headless: true, timeout: 20_000 });
 let passed = 0;
+const failures = [];
 async function scenario(name, action) {
   console.log(`AUDIT ${name}`); const fixture = await auditFixture(); const context = await browser.newContext({ viewport: { width: 1280, height: 800 } }); context.setDefaultTimeout(10_000); context.setDefaultNavigationTimeout(15_000); await context.addInitScript(instrumentStorage);
   const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: fixture.url, apiPaths: ['/api/session', '/api/articles', '/api/subscriptions', '/api/folders', '/api/tags'], fixtureDocumentPaths: ['/original', '/denied'], origin: fixture });
   const page = await context.newPage();
   try { await action({ ...fixture, page, context, setOffline: fixtureOffline(context, fixture) }); await errors.assertClean(); passed++; console.log(`PASS ${name}`); }
-  catch (error) { console.error(`FAIL ${name}`, await page.locator('body').innerText({ timeout: 2000 }).catch(() => 'unavailable')); await page.screenshot({ path: join(artifacts, `failure-${passed}.png`), timeout: 3000 }).catch(() => {}); throw error; }
+  catch (error) { failures.push({ name, error }); console.error(`FAIL ${name}`, await page.locator('body').innerText({ timeout: 2000 }).catch(() => 'unavailable')); await page.screenshot({ path: join(artifacts, `failure-${passed}.png`), timeout: 3000 }).catch(() => {}); }
   finally { await context.close(); await fixture.close(); }
 }
 const open = async (page, url, id = 'one') => { await page.goto(`${url}/?article=${id}`); await expect(page.getByTestId('reader-content')).toBeVisible(); };
@@ -137,5 +138,6 @@ try {
     await page.getByRole('button', { name: '创建账号', exact: true }).click(); await page.getByLabel('昵称').fill('bob'); await page.getByLabel('邮箱', { exact: true }).fill('bob@example.test'); await page.getByLabel('密码', { exact: true }).fill('safe-password-123'); await page.getByRole('button', { name: '注册并开始阅读', exact: true }).click(); held.resolve(); control.holdSession = null;
     await expect(page.getByTestId('app-shell')).toBeVisible(); assert.equal(control.user.id, 'bob'); assert.equal(control.logouts, 0); assert.equal(await page.evaluate(() => localStorage.getItem('feedink-logout-pending')), null);
   });
+  if (failures.length) throw new AggregateError(failures.map(item => item.error), `Audit regressions failed: ${failures.map(item => item.name).join('; ')}`);
   console.log(`PASS ${passed} deterministic browser audit scenarios (HTTP fixture, not real backend acceptance).`);
 } finally { await browser.close(); }
