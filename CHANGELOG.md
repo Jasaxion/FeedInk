@@ -2,6 +2,13 @@
 
 Version records describe FeedInk changes and verified behavior. Development checkpoints are not production releases.
 
+## Unreleased — reading-first contextual controls
+
+- Replace the in-flow annotation panel with selection-adjacent text actions, an explicit floating handwriting palette and an on-demand note drawer.
+- Move reading mode, typography, speech and archive details into contextual reader tools; add opt-in focus reading without changing saved note data.
+- Keep healthy connection state compact and suppress install/update prompts while reading or operating dialogs; retain visible recovery for unwritten notes.
+- Preserve existing annotation ownership, content snapshots, conditional writes, draft recovery, raw exports and MCP contracts. Validation of this development iteration is recorded in CI, not implied by this changelog.
+
 ## 0.2.0 — annotations and read-only AI access — 2026-11-15
 
 - Add reader-scoped text highlights, straight and wavy underlines, remarks, and pressure-aware browser handwriting adapted from Apache-2.0 WebInk.
