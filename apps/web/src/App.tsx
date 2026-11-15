@@ -15,7 +15,7 @@ import { Reader } from './Reader';
 import { scopedCss } from './safety';
 import { SettingsPanel } from './Settings';
 import { PendingNotesOwnerError } from './offline';
-import { allAnnotationDrafts, discardLockedAnnotations, flushActiveNotes, freezeActiveNotes, guardLockedAnnotationLogin, recoverLockedAnnotations, synchronizeAnnotations } from './annotationSync';
+import { allAnnotationDrafts, discardLockedAnnotations, flushActiveNotes, freezeActiveNotes, guardLockedAnnotationLogin, recoverLockedAnnotations, retireActiveNotes, synchronizeAnnotations } from './annotationSync';
 import { exportNotesJson } from './annotationExport';
 
 const emptyLibrary: Library = { subscriptions: [], folders: [], tags: [] };
@@ -33,7 +33,7 @@ export function App() {
   const channelRef = useRef<BroadcastChannel | null>(null);
   const notify = useCallback((text: string, error = false) => setNotice({ text, error }), []);
   const navigateNow = useCallback((path: string, replace = false) => { history[replace ? 'replaceState' : 'pushState']({}, '', path); setLocationKey(location.pathname + location.search); }, []);
-  const navigate = useCallback((path: string, replace = false) => { const epoch = authEpoch(); void flushActiveNotes().then(() => { assertAuthEpoch(epoch); navigateNow(path, replace); }).catch(error => notify(`未切换页面：${message(error)}。请先导出 JSON 或重试保存。`, true)); }, []);
+  const navigate = useCallback((path: string, replace = false) => { const epoch = authEpoch(); void retireActiveNotes(() => { assertAuthEpoch(epoch); navigateNow(path, replace); }).catch(error => notify(`未切换页面：${message(error)}。请先导出 JSON 或重试保存。`, true)); }, []);
   const [notesLogout, setNotesLogout] = useState(false);
   const commitSession = useCallback((value: Session | null, epoch: number) => { assertAuthEpoch(epoch); sessionRef.current = value; setApiSession(value, epoch); setSession(value); }, []);
   const task = useCallback(async <T,>(action: () => Promise<T>): Promise<T | undefined> => { try { return await action(); } catch (error) { if (error instanceof ObsoleteSessionError || error instanceof ObsoleteMutationError) return; if (isConnectionError(error)) setOnline(false); notify(message(error), true); return undefined; } }, [notify]);
@@ -130,7 +130,7 @@ export function App() {
     return () => { alive = false; };
   }, []);
   useEffect(() => {
-    const pop = () => { void flushActiveNotes().then(() => setLocationKey(location.pathname + location.search)).catch(error => { history.pushState({}, '', locationRef.current); notify(`未切换页面：${message(error)}`, true); }); };
+    const pop = () => { const epoch = authEpoch(); void retireActiveNotes(() => { assertAuthEpoch(epoch); setLocationKey(location.pathname + location.search); }).catch(error => { history.pushState({}, '', locationRef.current); notify(`未切换页面：${message(error)}`, true); }); };
     const offline = () => setOnline(false); const reconnect = () => { setOnline(navigator.onLine); if (!sessionRef.current) void retryLogout(); };
     const unauthorized = () => void invalidate();
     window.addEventListener('popstate', pop); window.addEventListener('offline', offline); window.addEventListener('online', reconnect); window.addEventListener('focus', reconnect); window.addEventListener('feedink:unauthorized', unauthorized);
@@ -295,7 +295,7 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
   useEffect(() => { setFocusedIndex(0); void loadPage(); return () => { listRequest.current++; }; }, [queryKey, online, version]);
   useEffect(() => {
     const requestId = ++articleRequest.current;
-    if (!selectedId) { setDetail(null); return; }
+    if (!selectedId) { void task(() => retireActiveNotes(() => { if (requestId === articleRequest.current) setDetail(null); })); return; }
     if (!libraryReady) return;
     setLoadingArticle(true);
     let opened = false;
@@ -310,15 +310,15 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
       detail = newestArticleState(detail, articleRef.current);
       const detailSub = library.subscriptions.find(item => item.id === detail!.subscriptionId); const detailFolder = library.folders.find(item => item.id === detailSub?.folderId);
       const preferred = detailSub?.settings.articleMode || detailFolder?.settings.articleMode || (settings.autoFulltext ? 'fulltext' : 'feed');
-      await flushActiveNotes(); assertAuthEpoch(epoch); if (requestId !== articleRequest.current) return;
-      opened = true; setMode(preferred); setDetail(detail); setLoadingArticle(false);
+      await retireActiveNotes(() => { assertAuthEpoch(epoch); if (requestId !== articleRequest.current) return; opened = true; setMode(preferred); setDetail(detail!); setLoadingArticle(false); });
+      if (requestId !== articleRequest.current) return;
       if (!detail.read) await patchArticle(detail, { read: true });
       if (preferred === 'fulltext' && !detail.fulltextHtml && online) {
-        try { const full = await mutate<ArticleDetail>(`/articles/${detail.id}/fulltext`, 'POST'); if (requestId === articleRequest.current) { await flushActiveNotes(); assertAuthEpoch(epoch); if (requestId !== articleRequest.current) return; detail = { ...full, read: articleRef.current?.read ?? true, saved: articleRef.current?.saved ?? full.saved, tags: articleRef.current?.tags ?? full.tags, progress: articleRef.current?.progress ?? full.progress }; receiveDetail(detail); } if (full.fulltextError) notify(full.fulltextError, true); }
+        try { const full = await mutate<ArticleDetail>(`/articles/${detail.id}/fulltext`, 'POST'); if (requestId === articleRequest.current) { await retireActiveNotes(() => { assertAuthEpoch(epoch); if (requestId !== articleRequest.current) return; detail = { ...full, read: articleRef.current?.read ?? true, saved: articleRef.current?.saved ?? full.saved, tags: articleRef.current?.tags ?? full.tags, progress: articleRef.current?.progress ?? full.progress }; receiveDetail(detail); }); } if (full.fulltextError) notify(full.fulltextError, true); }
         catch (error) { notify(`全文提取失败，保留 RSS 正文：${message(error)}`, true); }
       }
       if (requestId === articleRequest.current) await cacheArticle(detail);
-    }).finally(() => { if (requestId === articleRequest.current) { setLoadingArticle(false); if (!opened) setDetail(null); } });
+    }).finally(() => { if (requestId === articleRequest.current) { setLoadingArticle(false); if (!opened && !articleRef.current) setDetail(null); } });
     return () => { articleRequest.current++; };
   }, [selectedId, userId, libraryReady]);
   useEffect(() => {

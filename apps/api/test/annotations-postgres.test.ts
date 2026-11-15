@@ -86,7 +86,9 @@ test('PostgreSQL annotations: CAS, history, tenant binding, portable archives an
       assert.equal((await request(a, 'PUT', path, payload, 1)).statusCode, 412);
       const restored = await request(a, 'POST', `/articles/${articleId}/annotations/import`, oldBackup, 2);
       assert.equal(restored.statusCode, 200); assert.equal(restored.json().revision, 3); assert.deepEqual(restored.json().ink, payload.ink);
-      assert.equal((await request(a, 'POST', `/articles/${articleId}/annotations/import`, { ...oldBackup, source: { ...oldBackup.source, url: url + '/wrong' } }, 3)).statusCode, 409);
+      assert.equal((await request(a, 'POST', `/articles/${articleId}/annotations/import`, { ...oldBackup, source: { ...oldBackup.source, url: url + '/wrong' } }, 3)).statusCode, 422); // internally inconsistent source/ink URLs
+      const wrongSource = { ...oldBackup, source: { ...oldBackup.source, url: url + '/wrong' }, ink: { ...oldBackup.ink, url: url + '/wrong' } };
+      assert.equal((await request(a, 'POST', `/articles/${articleId}/annotations/import`, wrongSource, 3)).statusCode, 409);
       assert.equal((await request(b, 'POST', `/articles/${otherId}/annotations/import`, oldBackup, 0)).statusCode, 409);
       assert.equal((await request(a, 'PUT', path, { ...payload, contentHash: 'b'.repeat(64) }, 0)).statusCode, 409);
     });

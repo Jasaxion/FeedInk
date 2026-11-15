@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { createOfflineProxy } from './fixtures/offline-proxy.mjs';
 
 const project = process.argv[2];
-if (!['api', 'desktop', 'mobile', 'tablet', 'webkit', 'workflows', 'annotations', 'annotations-mobile', 'mcp'].includes(project)) throw new Error('Choose a configured test project');
+if (!['api', 'desktop', 'mobile', 'tablet', 'webkit', 'workflows', 'annotations', 'annotations-mobile', 'annotations-webkit', 'mcp'].includes(project)) throw new Error('Choose a configured test project');
 if (!process.env.TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL must identify a disposable test database; production DATABASE_URL is never reused implicitly');
 await access('apps/api/dist/server.js');
 const directory = await mkdtemp(join(tmpdir(), 'feedink-test-'));
@@ -32,7 +32,7 @@ const cancel = () => { interrupted = true; runner?.kill('SIGTERM'); api?.kill('S
 process.once('SIGINT', cancel);
 process.once('SIGTERM', cancel);
 try {
-  if (project === 'webkit') proxy = await createOfflineProxy(upstreamUrl);
+  if (project.endsWith('webkit')) proxy = await createOfflineProxy(upstreamUrl);
   const origin = proxy?.publicUrl || upstreamUrl;
   const env = {
     ...process.env,
@@ -42,7 +42,7 @@ try {
     DATA_DIR: join(directory, 'data'),
     HOST: '127.0.0.1', PORT: String(port), APP_URL: origin, BASE_URL: origin,
     WORKER_ENABLED: 'false', REGISTRATION_ENABLED: 'true', FETCH_ALLOW_HOSTS: '127.0.0.1',
-    FEEDINK_TEST_WEBKIT: project === 'webkit' ? '1' : process.env.FEEDINK_TEST_WEBKIT || '0',
+    FEEDINK_TEST_WEBKIT: project.endsWith('webkit') ? '1' : process.env.FEEDINK_TEST_WEBKIT || '0',
     FEEDINK_API_WITNESS_URL: upstreamUrl,
   };
   if (proxy) {

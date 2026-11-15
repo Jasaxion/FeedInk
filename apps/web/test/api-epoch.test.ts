@@ -10,7 +10,7 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 for (const status of [200, 401]) test(`auth epoch rejects delayed ${status} JSON and never invalidates a newer session`, async () => {
   beginAuthTransition(); setApiSession(session()); const body = deferred<unknown>(); const headers = deferred<void>(); let unauthorized = 0;
   const originalFetch = globalThis.fetch; const oldWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: { dispatchEvent: () => unauthorized++ } });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { dispatchEvent: (event: Event) => { if (event.type === 'feedink:unauthorized') unauthorized++; return true; } } });
   globalThis.fetch = async () => { headers.resolve(); return { ok: status === 200, status, json: () => body.promise } as Response; };
   try {
     const pending = api('/articles'); await headers.promise; await Promise.resolve();

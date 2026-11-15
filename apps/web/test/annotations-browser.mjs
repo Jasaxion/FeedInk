@@ -4,6 +4,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { auditFixture } from './audit-fixture.mjs';
+import { annotationRegressions } from './annotation-regressions.mjs';
 const { chromium, webkit, expect } = await import(process.env.FEEDINK_PLAYWRIGHT_MODULE || '@playwright/test');
 const engine = process.env.FEEDINK_BROWSER === 'webkit' ? webkit : chromium;
 const browser = await engine.launch({ headless: true, executablePath: process.env.FEEDINK_BROWSER === 'webkit' ? undefined : process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE });
@@ -71,4 +72,5 @@ try {
   await expect.poll(() => page.evaluate(() => new Promise(resolve => { const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => { const request = open.result.transaction('rows').objectStore('rows').getAll(); request.onsuccess = () => { const rows = request.result; resolve({ identity: rows.some(row => row.key === 'identity'), recovery: rows.some(row => row.kind === 'annotation-recovery'), article: rows.some(row => row.kind === 'article') }); open.result.close(); }; }; }))).toEqual({ identity: false, recovery: true, article: false });
   assert.deepEqual(errors, []);
   console.log('PASS annotations-browser: text/pressure/CAS/export/print/forced-auth client fixtures');
+  await annotationRegressions(browser, expect);
 } finally { await context.close(); await fixture.close(); await browser.close(); }

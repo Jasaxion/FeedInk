@@ -5,13 +5,14 @@ import { download, downloadCachedImage, mutate } from './api';
 import { AssetImage, Empty, Field, Icon, IconButton, Modal, Toggle, SourceIcon } from './components';
 import { formatDate, ownedAssetUrl, progressAt, safeExternalUrl } from './logic';
 import { AnnotatedArticle } from './Annotations';
-import { flushActiveNotes } from './annotationSync';
+import { retireActiveNotes } from './annotationSync';
+import { assertAuthEpoch, authEpoch } from './authEpoch';
 
 export function Reader({ article, mode, setMode, back, move, more, onDetail, scrollRef }: {
   article: ArticleDetail | null; mode: ArticleMode; setMode: (mode: ArticleMode) => void; back: () => void; move: (direction: number) => void; more: () => void; onDetail: (article: ArticleDetail) => void; scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const app = useApp(); const settings = app.session.settings;
-  const changeMode = (value: ArticleMode) => { void app.task(async () => { await flushActiveNotes(); setMode(value); }); };
+  const changeMode = (value: ArticleMode) => { const epoch = authEpoch(); void app.task(() => retireActiveNotes(() => { assertAuthEpoch(epoch); setMode(value); })); };
   const latestArticleId = useRef(article?.id); latestArticleId.current = article?.id;
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touch = useRef<{ x: number; y: number } | null>(null);
@@ -26,7 +27,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
     if (!article) return; setFetching(true);
     await app.task(async () => {
       const detail = await mutate<ArticleDetail>(`/articles/${article.id}/fulltext`, 'POST');
-      if (latestArticleId.current === detail.id) { await flushActiveNotes(); if (latestArticleId.current === detail.id) { onDetail(detail); setMode('fulltext'); } }
+      if (latestArticleId.current === detail.id) await retireActiveNotes(() => { if (latestArticleId.current === detail.id) { onDetail(detail); setMode('fulltext'); } });
       await app.cacheArticle(detail);
       if (detail.fulltextError) app.notify(`全文提取未完成：${detail.fulltextError}`, true); else app.notify('全文与可用图片已持久归档');
     }); setFetching(false);
@@ -58,7 +59,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
             <AnnotatedArticle key={`${article.id}:${mode}:${mode === 'fulltext' ? article.fulltextHtml : article.contentHtml}`} article={article} mode={mode === 'fulltext' && article.fulltextHtml ? 'fulltext' : 'feed'} onImage={setImage} onTap={() => { if (settings.tapToPage) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />
           </>}
           {article.enclosures.length > 0 && <section className="enclosures"><h3>播客与附件</h3>{article.enclosures.map((enclosure, index) => { const url = safeExternalUrl(enclosure.url); if (!url) return null; return <div key={index}>{enclosure.type.startsWith('audio/') ? <audio controls preload="none" src={url} aria-label={`播客音频 ${index + 1}`} /> : enclosure.type.startsWith('video/') ? <video controls preload="none" src={url} aria-label={`视频 ${index + 1}`} /> : <a href={url} target="_blank" rel="noopener noreferrer">打开附件 {index + 1} ({enclosure.type})</a>}<small className="muted">媒体由原站提供，未加入离线图片缓存。浏览器支持的格式才能播放。</small></div>; })}</section>}
-          <details className="archive-details"><summary><Icon name="archive" size={16} />存档信息 · {article.images.filter(item => item.status === 'cached').length}/{article.images.length} 张图片已在服务器保存</summary><p>正文抓取：{formatDate(article.fetchedAt)}</p><p>首次归档：{formatDate(article.archivedAt)}</p><p className="hash">SHA-256: {article.contentHash}</p>{article.images.map(item => <div className="image-status" key={item.id}><span>{item.status === 'cached' ? '已归档' : item.status === 'failed' ? '抓取失败' : '等待抓取'}</span><span className="truncate">{item.originalUrl}</span>{item.status === 'cached' && ownedAssetUrl(item.url) && <button className="text-button" onClick={() => setImage(item.url)}>查看</button>}</div>)}<button className="secondary" disabled={!app.online} onClick={() => void app.task(async () => { const detail = await mutate<ArticleDetail>(`/articles/${article.id}/retry-images`, 'POST'); onDetail(detail); await app.cacheArticle(detail); const failed = detail.images.filter(item => item.status !== 'cached').length; app.notify(failed ? `重试完成，仍有 ${failed} 张图片未归档` : '所有图片已归档', failed > 0); })}>重新抓取图片</button><p className="muted small">服务器归档与此设备离线缓存不同。源站限制可能导致部分图片始终无法抓取。</p></details>
+          <details className="archive-details"><summary><Icon name="archive" size={16} />存档信息 · {article.images.filter(item => item.status === 'cached').length}/{article.images.length} 张图片已在服务器保存</summary><p>正文抓取：{formatDate(article.fetchedAt)}</p><p>首次归档：{formatDate(article.archivedAt)}</p><p className="hash">SHA-256: {article.contentHash}</p>{article.images.map(item => <div className="image-status" key={item.id}><span>{item.status === 'cached' ? '已归档' : item.status === 'failed' ? '抓取失败' : '等待抓取'}</span><span className="truncate">{item.originalUrl}</span>{item.status === 'cached' && ownedAssetUrl(item.url) && <button className="text-button" onClick={() => setImage(item.url)}>查看</button>}</div>)}<button className="secondary" disabled={!app.online} onClick={() => void app.task(async () => { const detail = await mutate<ArticleDetail>(`/articles/${article.id}/retry-images`, 'POST'); await retireActiveNotes(() => { if (latestArticleId.current === detail.id) onDetail(detail); }); await app.cacheArticle(detail); const failed = detail.images.filter(item => item.status !== 'cached').length; app.notify(failed ? `重试完成，仍有 ${failed} 张图片未归档` : '所有图片已归档', failed > 0); })}>重新抓取图片</button><p className="muted small">服务器归档与此设备离线缓存不同。源站限制可能导致部分图片始终无法抓取。</p></details>
           <footer className="article-end"><span>— 读到这里 —</span><button className="secondary" onClick={() => move(1)}>下一篇 <Icon name="next" /></button></footer>
         </article>
       </div>

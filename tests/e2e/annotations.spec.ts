@@ -357,7 +357,7 @@ test('a delayed backend save stays locally pending and a real 412 preserves both
   } finally { release(); await context.unroute(pattern); }
 });
 
-test('forced session expiry locks drafts; another user cannot read/replay them; only the original owner recovers', async ({ page, context, playwright, browserName }) => {
+test('forced expiry strictly blocks account switching until the original owner recovers and resolves drafts', async ({ page, context, playwright, browserName }) => {
   test.setTimeout(100_000);
   const api = context.request;
   const session = await createAnnotationUser(api);
@@ -379,17 +379,44 @@ test('forced session expiry locks drafts; another user cannot read/replay them; 
     await expect(page.getByText(fixtureRemark, { exact: false })).toHaveCount(0);
     await page.reload();
     await expect(page.getByTestId('reader-content')).toHaveCount(0);
-    await login(page, otherSession.user.email);
-    await openAnnotations(page, otherArticles.first.id);
-    await expect(page.getByTestId('annotations-panel')).not.toContainText(fixtureRemark);
-    expect((await getAnnotation(otherApi, otherArticles.first.id)).marks).toEqual([]);
-    await openSettings(page);
-    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    let foreignLoginRequests = 0;
+    const observeLogin = (request: import('@playwright/test').Request) => { if (new URL(request.url()).pathname === '/api/auth/login') foreignLoginRequests++; };
+    page.on('request', observeLogin);
+    await page.getByLabel('邮箱', { exact: true }).fill(otherSession.user.email);
+    await page.getByLabel('密码', { exact: true }).fill(fixturePassword);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByText(/请先重新登录原账号恢复/)).toBeVisible();
+    expect(foreignLoginRequests, 'strict gate blocks B before authentication').toBe(0);
+    page.off('request', observeLogin);
     await expect(page.getByTestId('app-shell')).toHaveCount(0);
+    await expect(page.getByTestId('reader-content')).toHaveCount(0);
+    await expect(page.getByText(fixtureRemark, { exact: false })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /导出.*笔记|导出 JSON/ })).toHaveCount(0);
+    expect(await page.evaluate(() => new Promise<boolean>(resolve => {
+      const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => { const request = open.result.transaction('rows').objectStore('rows').get('identity'); request.onsuccess = () => { resolve(Boolean(request.result)); open.result.close(); }; };
+    })), 'blocked B has no active offline identity').toBe(false);
+    expect((await getAnnotation(otherApi, otherArticles.first.id)).marks).toEqual([]);
     await login(page, session.user.email);
     await openAnnotations(page, first.id);
     await expect(page.getByTestId('annotations-panel')).toContainText(fixtureRemark);
     await expect.poll(async () => (await getAnnotation(api, first.id)).marks.map(mark => mark.text)).toContain(fixtureRemark);
+    await expect(page.getByTestId('annotation-status')).toContainText(synchronized);
+    expect((await getAnnotation(otherApi, otherArticles.first.id)).marks).toEqual([]);
+    // An explicit owner-authorized discard, not a foreign login, resolves the next draft.
+    const pattern = `**/api/articles/${first.id}/annotations?*`;
+    await context.route(pattern, route => route.request().method() === 'PUT'
+      ? route.fulfill({ status: 503, json: { error: { code: 'UNAVAILABLE', message: '受控保存失败' } } }) : route.continue());
+    await addRemark(page, '明确放弃的未同步备注');
+    await expect(page.getByTestId('annotation-status')).toContainText(pending);
+    await openSettings(page);
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await page.getByRole('button', { name: '放弃未同步更改', exact: true }).click();
+    await expect(page.getByTestId('app-shell')).toHaveCount(0);
+    await context.unroute(pattern);
+    await login(page, otherSession.user.email);
+    await openAnnotations(page, otherArticles.first.id);
+    await expect(page.getByTestId('annotations-panel')).not.toContainText(fixtureRemark);
+    await expect(page.getByTestId('annotations-panel')).not.toContainText('明确放弃的未同步备注');
     expect((await getAnnotation(otherApi, otherArticles.first.id)).marks).toEqual([]);
   } finally { await setOffline(false); await otherApi.dispose(); }
 });

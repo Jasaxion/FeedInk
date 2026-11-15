@@ -12,7 +12,10 @@ export async function exportNotesMarkdown(document: AnnotationDocument) {
   const epoch = authEpoch(), path = annotationPath(document.context).replace('/annotations?', '/annotations/export?');
   const response = await fetch(`/api${path}&format=markdown`, { credentials: 'same-origin', cache: 'no-store' });
   assertAuthEpoch(epoch);
-  if (!response.ok) throw new HttpError(response.status, `Markdown 导出失败 (${response.status})；当前草稿未丢失`);
+  if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event('feedink:unauthorized'));
+    throw new HttpError(response.status, `Markdown 导出失败 (${response.status})；当前草稿未丢失`);
+  }
   const blob = await response.blob(); assertAuthEpoch(epoch); downloadBlob(blob, 'FeedInk-notes.zip');
 }
 /** Presentation report only: every raw stroke is inventoried, never restored from SVG. */

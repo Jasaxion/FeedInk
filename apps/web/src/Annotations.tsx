@@ -24,6 +24,9 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
   const [historyState, setHistoryState] = useState({ undo: false, redo: false }), [editor, setEditor] = useState<string | null>(null);
   const [versions, setVersions] = useState<AnnotationVersion[]>([]), [nextVersion, setNextVersion] = useState<number | null>(0);
   const [historical, setHistorical] = useState(false), [syncing, setSyncing] = useState(false);
+  const pauses = useRef(0), syncBusy = useRef(false);
+  const [paused, setPaused] = useState(false), [loadGeneration, setLoadGeneration] = useState(0), [syncAgain, setSyncAgain] = useState(0);
+  const readOnly = loading || paused;
   const rawHtml = row?.document.context.contentHtml ?? (mode === 'fulltext' && article.fulltextHtml ? article.fulltextHtml : article.contentHtml);
   const html = useMemo(() => sanitizeArticle(rawHtml, app.session.settings.lazyImages), [rawHtml, app.session.settings.lazyImages]);
   const present = (next: StoredAnnotations) => { current.current = next; if (alive.current) setRow(next); };
@@ -43,7 +46,7 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     void work.catch(reason => { writeError.current = reason; if (alive.current) { setStatus('未保存 · 请保留此页并导出 JSON'); setError(errorText(reason)); } });
   }
   function update(document: AnnotationDocument): boolean {
-    if (frozen.current || !current.current) return false;
+    if (frozen.current || pauses.current || !current.current) return false;
     try {
       const next = { ...current.current, document: validateAnnotations(document), pending: true, localVersion: crypto.randomUUID() };
       present(next); setStatus('未保存 · 正在写入本机'); setError(''); persist(next); return true;
@@ -51,31 +54,39 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
   }
   async function flush() {
     if (engine.current && !engine.current.flush()) throw new Error('笔迹尚未交给本地存储，请保留页面并导出');
-    await writeTail.current;
+    let tail: Promise<void>;
+    do { tail = writeTail.current; await tail; } while (tail !== writeTail.current);
     if (writeError.current) throw writeError.current;
   }
-  const actions = useRef({ update, flush }); actions.current = { update, flush };
+  function pause() {
+    // Capture accepted engine input before rejecting any further edits.
+    engine.current?.flush(); pauses.current++; setPaused(true); engine.current?.configure({ enabled: false });
+    return () => { pauses.current--; if (alive.current) setPaused(pauses.current > 0); };
+  }
+  const actions = useRef({ update, flush, pause }); actions.current = { update, flush, pause };
   useEffect(() => {
     alive.current = true;
-    const unregister = registerNotes({ owner, email: app.session.user.email, flush: () => actions.current.flush(), freeze: () => { engine.current?.flush(); frozen.current = true; engine.current?.configure({ enabled: false }); }, snapshot: () => current.current });
+    const unregister = registerNotes({ owner, email: app.session.user.email, flush: () => actions.current.flush(), pause: () => actions.current.pause(), freeze: () => { engine.current?.flush(); frozen.current = true; engine.current?.configure({ enabled: false }); }, snapshot: () => current.current });
     const unload = (event: BeforeUnloadEvent) => { engine.current?.flush(); if (current.current?.pending || writeError.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', unload);
     return () => { alive.current = false; window.dispatchEvent(new Event('feedink:annotation-context-retired')); unregister(); window.removeEventListener('beforeunload', unload); engine.current?.destroy(); engine.current = null; };
   }, []);
   async function load(contentHash?: string) {
-    if (loading) return;
+    if (loading || pauses.current || frozen.current) return;
+    const resume = pause();
     setLoading(true); setError('');
     try {
       await flush(); assertAuthEpoch(epoch);
-      let document: AnnotationDocument;
+      let document: AnnotationDocument, cachedHistory: StoredAnnotations | undefined;
       const localDocuments = (await app.store.annotationDocuments(owner)).filter(item => item.document.context.articleId === article.id && item.document.context.mode === mode);
       assertAuthEpoch(epoch);
       if (app.online) {
         try { document = await fetchAnnotations(article.id, mode, contentHash); }
         catch (reason) {
           const local = contentHash && localDocuments.find(item => item.document.contentHash === contentHash);
-          if (!(reason instanceof HttpError) || reason.status !== 404 || !local) throw reason;
-          document = local.document;
+          if (!(reason instanceof HttpError) || !(reason.status === 404 || reason.status === 409 && reason.code === 'ANNOTATION_CONTEXT') || !local) throw reason;
+          assertContext(local.document, { articleId: article.id, mode, sourceUrl: article.url, contentHash });
+          cachedHistory = local; document = local.document;
         }
       } else {
         const cached = localDocuments.filter(item => !contentHash || item.document.contentHash === contentHash);
@@ -86,13 +97,13 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
       assertAuthEpoch(epoch); if (!alive.current) return;
       assertContext(document, { articleId: article.id, mode, sourceUrl: article.url, contentHash });
       const local = await app.store.annotations(owner, document.context); assertAuthEpoch(epoch); if (!alive.current) return;
-      let next: StoredAnnotations = local?.pending ? local : { document, pending: false, localVersion: crypto.randomUUID() };
-      if (local?.pending && app.online && local.document.revision !== document.revision) next = { ...local, conflict: document };
+      let next: StoredAnnotations = cachedHistory ? local || cachedHistory : local?.pending ? local : { document, pending: false, localVersion: crypto.randomUUID() };
+      if (!cachedHistory && local?.pending && app.online && local.document.revision !== document.revision) next = { ...local, conflict: document };
       await app.store.putAnnotations(owner, next, local?.localVersion ?? null); assertAuthEpoch(epoch); if (!alive.current) return;
-      engine.current?.destroy(); engine.current = null; setTool('text'); setEditor(null);
-      storedVersion.current = next.localVersion; present(next); setStatus(pendingLabel(next)); setHistorical(!!contentHash || !app.online); setVersions([...new Map([...(document.versions || []), ...localDocuments.map(item => ({ contentHash: item.document.contentHash, revision: item.document.revision, updatedAt: item.document.updatedAt || '', markCount: item.document.marks.length, strokeCount: item.document.ink?.strokes.length || 0 }))].map(item => [item.contentHash, item])).values()]); setNextVersion(0);
+      setLoadGeneration(value => value + 1); setTool('text'); setEditor(null);
+      storedVersion.current = next.localVersion; present(next); setStatus(`${cachedHistory ? '本机历史快照 · ' : ''}${pendingLabel(next)}`); setHistorical(!!contentHash || !app.online); setVersions([...new Map([...(document.versions || []), ...localDocuments.map(item => ({ contentHash: item.document.contentHash, revision: item.document.revision, updatedAt: item.document.updatedAt || '', markCount: item.document.marks.length, strokeCount: item.document.ink?.strokes.length || 0 }))].map(item => [item.contentHash, item])).values()]); setNextVersion(0);
     } catch (reason) { if (alive.current) { setError(errorText(reason)); setStatus('载入失败 · 未启用书写'); } }
-    finally { if (alive.current) setLoading(false); }
+    finally { resume(); if (alive.current) setLoading(false); }
   }
   const contextKey = row ? annotationKey(row.document.context) : '';
   useEffect(() => {
@@ -124,8 +135,8 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
       engine.current = overlay;
     } catch (reason) { setEngineError(errorText(reason)); return; }
     return () => { window.dispatchEvent(new Event('feedink:annotation-context-retired')); overlay.destroy(); if (engine.current === overlay) engine.current = null; };
-  }, [contextKey, html]);
-  useEffect(() => { engine.current?.configure({ enabled: open && tool !== 'text' && !loading, tool: tool === 'text' ? 'pen' : tool, color: app.session.settings.theme === 'eink' ? '#000000' : markColors[color], width: tool === 'highlighter' ? Math.max(12, width * 4) : tool === 'eraser' ? Math.max(16, width * 4) : width }); }, [open, tool, color, width, contextKey, loading, app.session.settings.theme]);
+  }, [contextKey, html, loadGeneration]);
+  useEffect(() => { engine.current?.configure({ enabled: open && tool !== 'text' && !readOnly && !frozen.current && !pauses.current, tool: tool === 'text' ? 'pen' : tool, color: app.session.settings.theme === 'eink' ? '#000000' : markColors[color], width: tool === 'highlighter' ? Math.max(12, width * 4) : tool === 'eraser' ? Math.max(16, width * 4) : width }); }, [open, tool, color, width, contextKey, html, loadGeneration, readOnly, app.session.settings.theme]);
   useEffect(() => {
     let active = true;
     for (const image of root.current?.querySelectorAll<HTMLImageElement>('img[data-asset]') || []) {
@@ -145,15 +156,21 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     present(saved); setStatus(pendingLabel(saved));
   }
   async function sync() {
-    if (syncing || frozen.current) return; setSyncing(true); setError('');
-    try { if (writeError.current && current.current) persist(current.current); await flush(); await synchronizeAnnotations(app.store, owner, epoch); await refreshLocal(); }
+    if (syncBusy.current || frozen.current || pauses.current) return; syncBusy.current = true; setSyncing(true); setError('');
+    try {
+      if (writeError.current && current.current) persist(current.current);
+      await flush(); const sentVersion = current.current?.localVersion;
+      await synchronizeAnnotations(app.store, owner, epoch); await refreshLocal();
+      // Only successful passes can re-arm a debounce consumed by an in-flight save.
+      if (alive.current && current.current?.pending && !current.current.conflict && current.current.localVersion !== sentVersion) setSyncAgain(value => value + 1);
+    }
     catch (reason) { if (alive.current) setError(`未同步：${errorText(reason)}。草稿仍保留。`); }
-    finally { if (alive.current) setSyncing(false); }
+    finally { syncBusy.current = false; if (alive.current) setSyncing(false); }
   }
   useEffect(() => {
     if (!row?.pending || row.conflict || !app.online) return;
     const timer = setTimeout(() => void sync(), 1000); return () => clearTimeout(timer);
-  }, [row?.localVersion, app.online]);
+  }, [row?.localVersion, app.online, syncAgain]);
   useEffect(() => {
     const refreshed = () => { void refreshLocal().catch(() => {}); };
     window.addEventListener('feedink:annotations-synced', refreshed);
@@ -200,12 +217,12 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
   }
   return <section className="annotation-section">
     <div className="annotation-heading"><button type="button" className="secondary" data-testid="annotation-toggle" aria-expanded={open} onClick={() => { setOpen(value => !value); if (!row && !loading) void load(); }}>批注与笔记</button><span role="status" data-testid="annotation-status">{status}</span></div>
-    {open && <aside className="annotations-panel" data-testid="annotations-panel" aria-label="批注与笔记">
+    {open && <aside className="annotations-panel" data-testid="annotations-panel" aria-label="批注与笔记" inert={paused || undefined}>
       <div className="annotation-toolbar" data-testid="annotation-toolbar" role="toolbar" aria-label="批注工具">
         <button aria-pressed={tool === 'text'} onClick={() => setTool('text')}>选择文字</button>
-        {(['highlight', 'underline', 'wave', 'note'] as TextMarkKind[]).map(kind => <button key={kind} disabled={!row || loading} onPointerDown={event => event.preventDefault()} onClick={() => addMark(kind)}>{markLabels[kind]}</button>)}
-        {([['pen', '钢笔'], ['highlighter', '荧光笔'], ['eraser', '橡皮']] as const).map(([key, label]) => <button key={key} disabled={!row || loading} aria-pressed={tool === key} onClick={() => setTool(key)}>{label}</button>)}
-        <button disabled={!historyState.undo || loading} onClick={() => engine.current?.undo()}>撤销笔迹</button><button disabled={!historyState.redo || loading} onClick={() => engine.current?.redo()}>重做笔迹</button>
+        {(['highlight', 'underline', 'wave', 'note'] as TextMarkKind[]).map(kind => <button key={kind} disabled={!row || readOnly} onPointerDown={event => event.preventDefault()} onClick={() => addMark(kind)}>{markLabels[kind]}</button>)}
+        {([['pen', '钢笔'], ['highlighter', '荧光笔'], ['eraser', '橡皮']] as const).map(([key, label]) => <button key={key} disabled={!row || readOnly} aria-pressed={tool === key} onClick={() => setTool(key)}>{label}</button>)}
+        <button disabled={!historyState.undo || readOnly} onClick={() => engine.current?.undo()}>撤销笔迹</button><button disabled={!historyState.redo || readOnly} onClick={() => engine.current?.redo()}>重做笔迹</button>
         <label>颜色<select aria-label="批注颜色" value={color} onChange={event => setColor(event.target.value as MarkColor)}>{Object.keys(markColors).map(value => <option key={value} value={value}>{({ yellow: '黄色', green: '绿色', blue: '蓝色', lilac: '淡紫' } as Record<string, string>)[value]}</option>)}</select></label>
         <label>笔宽<input aria-label="笔宽" type="range" min="1" max="12" value={width} onChange={event => setWidth(Number(event.target.value))} /></label>
       </div>
@@ -217,7 +234,7 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
         <details><summary>正文版本 {historical ? '· 正在查看历史 / 离线快照' : '· 当前正文'}</summary><p className="hash">{row.document.contentHash}</p><button disabled={!app.online || loading} onClick={() => void load()}>返回最新正文版本</button>{versions.map(version => <button key={version.contentHash} disabled={loading} onClick={() => void load(version.contentHash)}>{version.contentHash.slice(0, 12)} · {version.markCount} 标记 / {version.strokeCount} 笔 · 修订 {version.revision}</button>)}<button disabled={!app.online || nextVersion === null} onClick={() => void app.task(async () => { const page = await api<{ items: AnnotationVersion[]; nextOffset: number | null }>(`/articles/${article.id}/annotation-versions?mode=${mode}&offset=${nextVersion}&limit=20`); assertAuthEpoch(epoch); if (!alive.current) return; setVersions(old => [...new Map([...old, ...page.items].map(item => [item.contentHash, item])).values()]); setNextVersion(page.nextOffset); })}>加载更多版本</button></details>
         <h3>文字批注（{row.document.marks.length}） · 手写 {row.document.ink?.strokes.length || 0} 笔</h3>
         <ol className="annotation-list">{row.document.marks.map(mark => <li key={mark.id}><button className="annotation-list-item" onClick={() => setEditor(mark.id)}><strong>{markLabels[mark.kind]}</strong>{mark.anchor && <blockquote>{mark.anchor.exact}</blockquote>}{mark.text && <p>{mark.text}</p>}{!mark.anchor && <small>整篇备注</small>}</button><button aria-label={`删除${markLabels[mark.kind]}`} onClick={() => { if (confirm('删除这条批注？')) update({ ...row.document, marks: row.document.marks.filter(item => item.id !== mark.id) }); }}>删除</button></li>)}</ol>
-        {editing && <section className="note-editor" aria-label="备注编辑器"><h3>编辑{markLabels[editing.kind]}</h3>{editing.anchor && <blockquote>{editing.anchor.exact}</blockquote>}<label>备注内容（纯文本）<textarea data-testid="note-editor" aria-label="备注内容" disabled={loading} maxLength={32768} rows={4} value={editing.text} onChange={event => editMark(editing.id, { text: event.target.value })} /></label><label>标记颜色<select value={editing.color} onChange={event => editMark(editing.id, { color: event.target.value as MarkColor })}>{Object.keys(markColors).map(value => <option key={value} value={value}>{value}</option>)}</select></label><button onClick={() => void app.task(async () => { await flush(); setEditor(null); if (app.online) await sync(); })}>保存备注</button><small>输入会立即写入本机草稿；“服务器已确认”才表示跨设备保存。</small></section>}
+        {editing && <section className="note-editor" aria-label="备注编辑器"><h3>编辑{markLabels[editing.kind]}</h3>{editing.anchor && <blockquote>{editing.anchor.exact}</blockquote>}<label>备注内容（纯文本）<textarea data-testid="note-editor" aria-label="备注内容" disabled={readOnly} maxLength={32768} rows={4} value={editing.text} onChange={event => editMark(editing.id, { text: event.target.value })} /></label><label>标记颜色<select value={editing.color} onChange={event => editMark(editing.id, { color: event.target.value as MarkColor })}>{Object.keys(markColors).map(value => <option key={value} value={value}>{value}</option>)}</select></label><button onClick={() => void app.task(async () => { await flush(); setEditor(null); if (app.online) await sync(); })}>保存备注</button><small>输入会立即写入本机草稿；“服务器已确认”才表示跨设备保存。</small></section>}
       </>}
       {!row && <button disabled={loading} onClick={() => void load()}>{loading ? '正在验证批注上下文…' : '重新载入批注'}</button>}
     </aside>}

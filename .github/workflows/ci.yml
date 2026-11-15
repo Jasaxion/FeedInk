@@ -83,7 +83,7 @@ jobs:
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: |
           failed=0
-          for project in api desktop mobile tablet webkit workflows mcp annotations annotations-mobile; do
+          for project in api desktop mobile tablet webkit workflows mcp annotations annotations-mobile annotations-webkit; do
             if ! PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" node tests/run-project.mjs "$project"; then
               failed=1
             fi
@@ -118,7 +118,7 @@ jobs:
           {
             echo 'COMPOSE_PROJECT_NAME=feedink-ci'
             echo 'FEEDINK_IMAGE=feedink:ci'
-            echo 'APP_URL=http://localhost:3000'
+            echo 'APP_URL=https://localhost:3443'
             echo 'ADMIN_EMAIL=operator-ci@example.invalid'
             echo 'ADMIN_NAME=CI operator'
             echo 'REGISTRATION_ENABLED=false'
@@ -127,6 +127,11 @@ jobs:
           } > .env
           docker compose config --quiet
           docker compose up -d --wait --wait-timeout 120 postgres
+          export TRUST_PROXY="$(docker network inspect feedink-ci_default --format '{{(index .IPAM.Config 0).Gateway}}')"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$RUNNER_TEMP/tls.key" -out "$RUNNER_TEMP/tls.crt" -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' > /dev/null 2>&1
+          export NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/tls.crt"
+          TEST_TLS_CERT="$RUNNER_TEMP/tls.crt" TEST_TLS_KEY="$RUNNER_TEMP/tls.key" node tests/fixtures/deployment-tls-proxy.mjs > "$RUNNER_TEMP/tls-proxy.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/tls-proxy.pid"
           openssl rand -base64 32 > "$RUNNER_TEMP/admin-password"
           docker compose run --rm --no-deps -T -e ADMIN_PASSWORD_FILE=/dev/stdin --entrypoint npm app run bootstrap-admin -w @feedink/api < "$RUNNER_TEMP/admin-password"
           if docker compose run --rm --no-deps -T -e ADMIN_PASSWORD_FILE=/dev/stdin --entrypoint npm app run bootstrap-admin -w @feedink/api < "$RUNNER_TEMP/admin-password" > "$RUNNER_TEMP/bootstrap-refusal.log" 2>&1; then
@@ -136,8 +141,8 @@ jobs:
           grep -F 'Bootstrap requires an unused email and no active administrator' "$RUNNER_TEMP/bootstrap-refusal.log" > /dev/null
           docker compose up -d --wait --wait-timeout 120
           curl --fail http://127.0.0.1:3000/api/health
-          BASE_URL=http://127.0.0.1:3000 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" MCP_STATE_FILE="$RUNNER_TEMP/mcp-state.json" node scripts/test-deployment.mjs bootstrap
-          export BASE_URL=http://127.0.0.1:3000 STATE_FILE="$RUNNER_TEMP/deployment-state.json"
+          BASE_URL=https://localhost:3443 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" MCP_STATE_FILE="$RUNNER_TEMP/mcp-state.json" node scripts/test-deployment.mjs bootstrap
+          export BASE_URL=https://localhost:3443 STATE_FILE="$RUNNER_TEMP/deployment-state.json"
           node scripts/test-deployment.mjs seed
           docker compose restart app
           ready=false
@@ -152,12 +157,14 @@ jobs:
           export COMPOSE_PROJECT_NAME=feedink-ci
           docker compose stop app
           scripts/backup.sh "$RUNNER_TEMP/application-backup"
-          export COMPOSE_PROJECT_NAME=feedink-ci-recovery APP_PORT=3001 APP_URL=http://localhost:3001
+          export COMPOSE_PROJECT_NAME=feedink-ci-recovery APP_PORT=3001 APP_URL=https://localhost:3444
+          export NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/tls.crt"
           docker compose up -d --wait --wait-timeout 120 postgres
+          export TRUST_PROXY="$(docker network inspect feedink-ci-recovery_default --format '{{(index .IPAM.Config 0).Gateway}}')"
           scripts/restore.sh "$RUNNER_TEMP/application-backup" --confirm-restore=feedink-ci-recovery
           docker compose up -d --wait --wait-timeout 120
-          BASE_URL=http://127.0.0.1:3001 STATE_FILE="$RUNNER_TEMP/deployment-state.json" node scripts/test-deployment.mjs verify
-          BASE_URL=http://127.0.0.1:3001 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" MCP_STATE_FILE="$RUNNER_TEMP/mcp-state.json" node scripts/test-deployment.mjs bootstrap
+          BASE_URL=https://localhost:3444 STATE_FILE="$RUNNER_TEMP/deployment-state.json" node scripts/test-deployment.mjs verify
+          BASE_URL=https://localhost:3444 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" MCP_STATE_FILE="$RUNNER_TEMP/mcp-state.json" node scripts/test-deployment.mjs bootstrap
       - name: Real PostgreSQL plus independent archive volume failure-guard drill
         env:
           TEST_IMAGE: feedink:ci

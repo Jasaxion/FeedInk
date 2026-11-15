@@ -1,6 +1,7 @@
 import type { AnnotationContext, AnnotationDocument, AnnotationMode, Session } from '@feedink/shared';
+import { flushSync } from 'react-dom';
 import { api, HttpError } from './api';
-import { assertAuthEpoch, getApiSession, updateCredentials, withAuthNetworkLock } from './authEpoch';
+import { assertAuthEpoch, authEpoch, getApiSession, updateCredentials, withAuthNetworkLock } from './authEpoch';
 import { annotationKey, assertContext, payloadOf, validateAnnotations, type StoredAnnotations } from './annotationData';
 import type { OfflineStore } from './offline';
 import { withOwnerLock, OwnerMismatchError } from './stateSync';
@@ -34,10 +35,15 @@ export async function synchronizeAnnotations(store: OfflineStore, owner: string,
       }
     }
     window.dispatchEvent(new Event('feedink:annotations-synced'));
-  }));
+  })).catch(error => {
+    // /session deliberately does not dispatch in api(); annotation verification must.
+    // A regular API 401 may already have retired this epoch; never lock a newer login.
+    if (authEpoch() === epoch && (error instanceof OwnerMismatchError || error instanceof HttpError && error.status === 401)) window.dispatchEvent(new Event('feedink:unauthorized'));
+    throw error;
+  });
 }
 
-interface LiveNotes { owner: string; email: string; flush: () => Promise<void>; freeze: () => void; snapshot: () => StoredAnnotations | null }
+interface LiveNotes { owner: string; email: string; flush: () => Promise<void>; pause: () => () => void; freeze: () => void; snapshot: () => StoredAnnotations | null }
 const live = new Set<LiveNotes>();
 // Only a verified matching session may move locked in-memory failures back into active storage.
 const locked = new Map<string, { email: string; rows: StoredAnnotations[] }>();
@@ -61,6 +67,18 @@ export async function recoverLockedAnnotations(store: OfflineStore, owner: strin
 export function discardLockedAnnotations(owner: string) { locked.delete(owner); }
 export function registerNotes(notes: LiveNotes) { live.add(notes); return () => live.delete(notes); }
 export async function flushActiveNotes() { for (const notes of live) await notes.flush(); }
+/** Keep the old reader read-only until its last local write and React retirement commit. */
+export async function retireActiveNotes(commit: () => void) {
+  const entries = [...live], resume: Array<() => void> = [];
+  try {
+    for (const notes of entries) resume.push(notes.pause());
+    await Promise.all(entries.map(notes => notes.flush()));
+    flushSync(commit);
+  } finally {
+    // Failure cancels the commit, keeping the registered snapshot available for export/retry.
+    for (const release of resume) release();
+  }
+}
 export function freezeActiveNotes(owner?: string) {
   const entries = [...live].filter(note => !owner || note.owner === owner);
   for (const notes of entries) {
