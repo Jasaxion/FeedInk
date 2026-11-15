@@ -45,7 +45,8 @@ export function printNotes(document: AnnotationDocument) {
   const doc = popup.document; doc.title = `${snapshot.context.title} · 批注报告`;
   doc.documentElement.lang = 'zh-CN'; doc.body.replaceChildren();
   const style = doc.createElement('style');
-  style.textContent = '@page{size:A4;margin:16mm}body{font:16px/1.65 system-ui,sans-serif;color:#111;background:white;max-width:180mm;margin:20px auto;padding:0 12px}h1{font-size:24px}section,figure{break-inside:avoid;margin:20px 0}blockquote{border-left:3px solid #777;padding-left:12px;margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}p{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;max-width:100%;max-height:235mm;object-fit:contain}small{color:#444}button{padding:12px} @media print{button{display:none}body{margin:0;padding:0}}';
+  // One CJK-capable face keeps mixed-script PDF text on the same baseline and reading order.
+  style.textContent = '@page{size:A4;margin:16mm}body{font:16px/1.65 "Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:#111;background:white;max-width:180mm;margin:20px auto;padding:0 12px}h1{font-size:24px}section,figure{break-inside:avoid;margin:20px 0}blockquote{border-left:3px solid #777;padding-left:12px;margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}p{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;max-width:100%;max-height:235mm;object-fit:contain}small{color:#444}button{padding:12px} @media print{button{display:none}body{margin:0;padding:0}}';
   doc.head.append(style);
   const add = (tag: string, text: string, parent: HTMLElement = doc.body) => { const node = doc.createElement(tag); node.textContent = text; parent.append(node); return node; };
   add('h1', snapshot.context.title || '批注报告');

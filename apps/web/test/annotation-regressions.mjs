@@ -175,20 +175,27 @@ export async function annotationRegressions(browser, expect) {
     await page.getByTestId('reader').getByRole('button', { name: '返回', exact: true }).click();
     await expect(page.getByTestId('reader-content')).toHaveCount(0);
   });
-  await scenario('slow same-context load rearms pending debounce when editing resumes', async ({ page, state }) => {
+  await scenario('slow same-context load rearms pending debounce when editing resumes', async ({ page, state, fixture }) => {
+    await page.setViewportSize({ width: 1280, height: 2400 });
+    const stateWrites = fixture.control.writes.length;
     state.loadHold = deferred();
     await newNote(page, 'pending through slow load');
     await page.getByText('正文版本 · 当前正文', { exact: true }).click();
     const loads = state.loads;
     await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
     await expect.poll(() => state.loads).toBe(loads + 1);
-    await page.waitForTimeout(1300); assert.equal(state.writes, 0);
+    assert.equal(await page.locator('.reader-scroll').evaluate(element => element.scrollHeight <= element.clientHeight), true);
+    await page.waitForTimeout(1300);
+    assert.equal(fixture.control.writes.length, stateWrites, 'no progress-triggered workspace sync during the paused debounce');
+    assert.equal(state.writes, 0);
     state.loadHold.resolve(); state.loadHold = null;
     await expect.poll(() => state.document.marks[0]?.text).toBe('pending through slow load');
     await expect(page.getByTestId('annotation-status')).toContainText('已同步');
   });
   await scenario('already-rejected retirement resumes the retained pen without switching tools', async ({ page, fixture }) => {
-    fixture.control.holdDetail = deferred();
+    const heldDetail = deferred();
+    fixture.control.holdDetail = heldDetail;
+    try {
     await page.getByRole('button', { name: '下一篇 (J)', exact: true }).click();
     await expect.poll(() => fixture.control.detailCaptured).toBe(true);
     await page.evaluate(() => {
@@ -200,7 +207,7 @@ export async function annotationRegressions(browser, expect) {
     });
     await draw(page);
     await expect(page.getByTestId('annotation-status')).toContainText('未保存');
-    fixture.control.holdDetail.resolve();
+    heldDetail.resolve();
     await expect(page.getByRole('alert').filter({ hasText: 'Controlled immediate pen failure' }).last()).toBeVisible();
     // Wait for the replacement attempt to finish; the old article and selected tool must survive.
     await expect(page.locator('.reader-loading')).toHaveCount(0);
@@ -210,6 +217,7 @@ export async function annotationRegressions(browser, expect) {
     await expect(page.getByTestId('annotations-panel').getByRole('heading', { name: /手写 2 笔/ })).toBeVisible();
     const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
     assert.equal(JSON.parse(await readFile(await (await downloaded).path(), 'utf8')).ink.strokes.length, 2);
+    } finally { heldDetail.resolve(); }
   });
   for (const blockedMarker of [false, true]) await scenario(`locked exit quarantines durable notes (marker-only failure: ${blockedMarker})`, async ({ page, state, fixture }) => {
     state.failure = 503; await newNote(page, 'durable locked exit witness');
