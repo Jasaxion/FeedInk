@@ -90,11 +90,22 @@ test('real UI registration, organization, subscription, tagging, exports and arc
 
   await page.goto('/import');
   const imports = page.getByRole('dialog', { name: '导入', exact: true });
+  const opmlDone = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/api/import/opml'));
   await imports.getByLabel('导入 OPML', { exact: true }).setInputFiles({ name: 'feeds.opml', mimeType: 'application/xml', buffer: Buffer.from(`<opml version="2.0"><body><outline text="迁入文件夹"><outline text="Atom迁入" type="rss" xmlUrl="${upstream}/atom.xml?ui=${randomUUID()}" /></outline></body></opml>`) });
-  await expect(imports.getByRole('status')).toContainText('导入 1');
+  expect((await opmlDone).ok()).toBe(true);
+  await expect(imports.getByRole('status').filter({ hasText: '正在安全导入' })).toHaveCount(0);
+  const result = imports.getByRole('status').filter({ has: page.getByRole('heading', { name: '导入结果', exact: true }) });
+  await expect(result).toContainText('导入 1');
+  const archiveDone = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/api/import/archive'));
   await imports.getByLabel('导入 FeedInk ZIP 存档', { exact: true }).setInputFiles(zipPath);
-  await expect(imports.getByRole('status')).toContainText('失败 0');
-  await expect(imports.getByRole('status')).toContainText('跳过 2');
+  const archiveResponse = await archiveDone;
+  expect(archiveResponse.ok()).toBe(true);
+  const archiveResult = await archiveResponse.json();
+  expect(archiveResult.skipped).toBe(2);
+  expect(archiveResult.errors.length).toBe(0);
+  await expect(imports.getByRole('status').filter({ hasText: '正在安全导入' })).toHaveCount(0);
+  await expect(result).toContainText('跳过 2');
+  await expect(result).toContainText('失败 0');
   await assertNoHorizontalOverflow(page);
 });
 
