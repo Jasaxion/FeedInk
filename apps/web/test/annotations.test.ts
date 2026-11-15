@@ -13,6 +13,33 @@ function document(): AnnotationDocument {
 const draft = (localVersion = 'first'): StoredAnnotations => ({ document: document(), localVersion, pending: true });
 const store = () => new OfflineStore('annotations-unit', new IDBFactory());
 
+test('legacy v2 tabs cannot erase v3 note drafts and blocked upgrades preserve caches', async () => {
+  const factory = new IDBFactory(), name = 'legacy-note-fence';
+  const legacy = await new Promise<IDBDatabase>((resolve, reject) => {
+    const open = factory.open(name, 2);
+    open.onupgradeneeded = () => { const rows = open.result.createObjectStore('rows', { keyPath: 'key' }); rows.createIndex('ownerKind', ['userId', 'kind']); };
+    open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = legacy.transaction('rows', 'readwrite');
+    tx.objectStore('rows').put({ key: 'identity', userId: 'alice', kind: 'identity', value: { user: session().user, settings: session().settings } });
+    tx.objectStore('rows').put({ key: 'alice:article:one', userId: 'alice', kind: 'article', value: article() });
+    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+  });
+  const blocked = new OfflineStore(name, factory);
+  await assert.rejects(blocked.identity(), /旧版本标签页/);
+  legacy.close();
+  const upgraded = new OfflineStore(name, factory);
+  assert.equal((await upgraded.identity())?.user.id, 'alice');
+  assert.equal((await upgraded.article('alice', 'one'))?.id, 'one');
+  const row = draft(); await upgraded.putAnnotations('alice', row, null);
+  await assert.rejects(new Promise((resolve, reject) => { const old = factory.open(name, 2); old.onsuccess = () => { old.result.close(); resolve(undefined); }; old.onerror = () => reject(old.error); }), (error: any) => error.name === 'VersionError');
+  assert.deepEqual(await upgraded.annotations('alice', row.document.context), row);
+  const future = await new Promise<IDBDatabase>((resolve, reject) => { const open = factory.open(name, 4); open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error); });
+  try { await assert.rejects(upgraded.clear(), /存储版本已更新/); }
+  finally { future.close(); }
+});
+
 test('annotationData JSON backup preserves every plain-text note and raw stroke, excludes user/session/projection', () => {
   const source = document(); source.ink = { version: 1, url: source.context.sourceUrl, title: source.context.title, updatedAt: 1, layoutWidth: 800, strokes: [{ id: 'raw-one', brush: 'pressure-v1', tool: 'pen', color: '#493356', opacity: 1, width: 3, points: [{ x: 2, y: 4, p: 0.2 }, { x: 20, y: 8, p: 0.9 }], anchor: { kind: 'future-unknown', stable: 'retain-me' } }] };
   const backup = backupOf(source);

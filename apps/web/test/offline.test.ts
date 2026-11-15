@@ -37,7 +37,7 @@ test('image writes use portable binary records and legacy Blob rows remain reada
   const factory = new IDBFactory(); const db = new OfflineStore('portable', factory); await db.activate(session());
   await db.saveImage('alice', '/api/assets/portable', new Blob(['pixels'], { type: 'image/png' }));
   await new Promise<void>((resolve, reject) => {
-    const open = factory.open('portable', 2); open.onerror = () => reject(open.error);
+    const open = factory.open('portable'); open.onerror = () => reject(open.error);
     open.onsuccess = () => {
       const tx = open.result.transaction('rows', 'readwrite'); const rows = tx.objectStore('rows'); const get = rows.get('alice:image:/api/assets/portable');
       get.onsuccess = () => { assert.equal(get.result.value instanceof Blob, false); assert.ok(get.result.value.bytes instanceof ArrayBuffer); assert.equal(get.result.value.type, 'image/png'); };

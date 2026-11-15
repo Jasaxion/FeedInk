@@ -24,19 +24,31 @@ export class CacheInvalidatedError extends Error { constructor() { super('缓存
 /** Owner, cache-policy and lease checks run in the same transaction as their writes. */
 export class OfflineStore {
   private db: Promise<IDBDatabase>;
+  private retired = false;
   constructor(name = 'feedink-private-v1', factory: IDBFactory = indexedDB) {
     this.db = new Promise((resolve, reject) => {
-      const open = factory.open(name, 2);
+      // v2 clients predate notes and can clear the entire store on logout. Fence them out.
+      const open = factory.open(name, 3);
+      let blocked = false;
+      open.onblocked = () => { blocked = true; reject(new Error('旧版本标签页仍占用本地存储。请关闭其他旧标签页，再重新载入；不要清除网站数据。')); };
       open.onupgradeneeded = () => {
         const rows = open.result.objectStoreNames.contains('rows') ? open.transaction!.objectStore('rows') : open.result.createObjectStore('rows', { keyPath: 'key' });
         if (!rows.indexNames.contains('ownerKind')) rows.createIndex('ownerKind', ['userId', 'kind']);
       };
-      open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const database = open.result;
+        if (blocked) { database.close(); return; }
+        database.onversionchange = () => { this.retired = true; database.close(); };
+        resolve(database);
+      };
+      open.onerror = () => reject(open.error);
     });
     void this.db.catch(() => {});
   }
   private async access<T>(owner: string | null, mode: IDBTransactionMode, work: (store: IDBObjectStore) => Promise<T>): Promise<T> {
-    const tx = (await this.db).transaction('rows', mode); const finished = done(tx); void finished.catch(() => {});
+    const database = await this.db;
+    if (this.retired) throw new Error('本机存储版本已更新，请先导出未保存笔记，再重新载入本页。');
+    const tx = database.transaction('rows', mode); const finished = done(tx); void finished.catch(() => {});
     const store = tx.objectStore('rows');
     try {
       if (owner !== null && (await request(store.get('identity')) as Row<OfflineIdentity> | undefined)?.value.user.id !== owner) throw new Error('离线账号已变更，操作已取消');

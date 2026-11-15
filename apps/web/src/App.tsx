@@ -111,9 +111,11 @@ export function App() {
     const epoch = beginAuthTransition(); commitSession(null, epoch);
     navigateNow('/login', true); channelRef.current?.postMessage({ type: 'logout' });
     await retiring.catch(() => {});
-    if (!marked) { notify('已锁定本页；无法持久保存退出标记，服务器会话未撤销。请保留此标签页并恢复浏览器存储。', true); return; }
+    // Local quarantine must not depend on revocation-marker durability.
+    const localPurge = withAuthNetworkLock(async () => { assertAuthEpoch(epoch); await purge(epoch, owner.id, true); });
+    if (!marked) { await localPurge; notify('已锁定本页；无法持久保存退出标记，服务器会话未撤销。请保留此标签页并恢复浏览器存储。', true); return; }
     // No alternate HTTP path: missing auth coordination must still suppress revocation.
-    await Promise.all([withAuthNetworkLock(async () => { assertAuthEpoch(epoch); await purge(epoch, owner.id, true); }), retryLogout()]);
+    await Promise.all([localPurge, retryLogout()]);
     if (!navigator.onLine) notify('笔记已锁定；离线时无法撤销服务器会话，恢复联网后会自动重试');
   }
   async function performLogout(discard = false) {

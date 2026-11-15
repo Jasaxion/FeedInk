@@ -181,19 +181,29 @@ export async function annotationRegressions(browser, expect) {
     const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
     assert.equal(JSON.parse(await readFile(await (await downloaded).path(), 'utf8')).ink.strokes.length, 2);
   });
-  await scenario('locked exit quarantines durable notes without discarding or publishing identity', async ({ page, state }) => {
+  for (const blockedMarker of [false, true]) await scenario(`locked exit quarantines durable notes (marker-only failure: ${blockedMarker})`, async ({ page, state, context, fixture }) => {
     state.failure = 503; await newNote(page, 'durable locked exit witness');
     await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
+    if (blockedMarker) await page.evaluate(() => { Storage.prototype.setItem = function() { throw new DOMException('marker-only failure', 'QuotaExceededError'); }; });
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByRole('button', { name: '锁定笔记并退出', exact: true }).click();
     await expect(page.getByTestId('app-shell')).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => new Promise(resolve => {
       const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => {
         const read = open.result.transaction('rows').objectStore('rows').getAll();
-        read.onsuccess = () => { resolve({ identity: read.result.some(row => row.key === 'identity'), recovery: read.result.some(row => row.kind === 'annotation-recovery' && row.value.document.marks.some(mark => mark.text === 'durable locked exit witness')) }); open.result.close(); };
+        read.onsuccess = () => { resolve({ identity: read.result.some(row => row.key === 'identity'), ordinaryCache: read.result.some(row => ['article', 'image'].includes(row.kind)), recovery: read.result.some(row => row.kind === 'annotation-recovery' && row.value.document.marks.some(mark => mark.text === 'durable locked exit witness')) }); open.result.close(); };
       };
-    }))).toEqual({ identity: false, recovery: true });
-    assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
+    }))).toEqual({ identity: false, ordinaryCache: false, recovery: true });
+    if (blockedMarker) {
+      assert.equal(fixture.control.logouts, 0);
+      let foreignLogins = 0;
+      await context.route('**/api/auth/login', route => { foreignLogins++; return route.fulfill({ status: 401, body: '{}' }); });
+      await page.getByLabel('邮箱', { exact: true }).fill('bob@example.test');
+      await page.getByLabel('密码', { exact: true }).fill('synthetic-password');
+      await page.getByRole('button', { name: '登录', exact: true }).click();
+      await expect(page.getByRole('alert').filter({ hasText: '请先登录原账号' })).toBeVisible();
+      assert.equal(foreignLogins, 0);
+    } else assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
   });
   for (const blockedMarker of [false, true]) await scenario(`unreadable storage locked exit preserves memory, guard and recovery (marker blocked: ${blockedMarker})`, async ({ page, context, fixture, state }) => {
     state.failure = 503;
