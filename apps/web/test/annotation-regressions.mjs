@@ -8,7 +8,7 @@ export async function annotationRegressions(browser, expect) {
     const fixture = await auditFixture(), context = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
     const page = await context.newPage(); context.setDefaultTimeout(15000);
     const article = fixture.control.articles[0], hash = 'a'.repeat(64);
-    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, preconditionFailures: 0, failure: 0, hold: null, ackHold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT', loadHold: null, loads: 0 };
+    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, preconditionFailures: 0, failure: 0, hold: null, ackHold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT', historyRequests: [], loadHold: null, loads: 0 };
     fixture.route(/^\/api\/articles\/one\/annotations(?:\/import)?$/, async ({ request, url, body, json }) => {
       if (url.pathname.endsWith('/import')) {
         assert.equal(url.search, '', 'import context is carried by the backup');
@@ -22,7 +22,10 @@ export async function annotationRegressions(browser, expect) {
         if (state.failure) return json({ error: { code: 'UNAVAILABLE', message: '受控保存失败' } }, state.failure);
         state.document = { ...state.document, ...payload, revision: state.document.revision + 1 };
         if (state.ackHold) await state.ackHold.promise;
-      } else if (url.searchParams.has('contentHash') && url.searchParams.get('contentHash') !== state.document.contentHash) return json({ error: { code: state.historyCode, message: '历史上下文不可用' } }, state.historyStatus);
+      } else if (url.searchParams.has('contentHash') && url.searchParams.get('contentHash') !== state.document.contentHash) {
+        state.historyRequests.push({ contentHash: url.searchParams.get('contentHash'), status: state.historyStatus, code: state.historyCode });
+        return json({ error: { code: state.historyCode, message: '历史上下文不可用' } }, state.historyStatus);
+      }
       if (request.method === 'GET') { state.loads++; if (state.loadHold) await state.loadHold.promise; }
       return json(state.document);
     });
@@ -360,8 +363,14 @@ export async function annotationRegressions(browser, expect) {
     await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
     await expect(page.getByTestId('reader-content')).toContainText('H2 current body');
     state.historyStatus = 409; state.historyCode = 'OTHER_CONFLICT';
+    const requests = state.historyRequests.length;
     await page.getByRole('button', { name: /^aaaaaaaaaaaa ·/ }).click();
-    await expect(page.getByTestId('annotation-status')).toContainText('载入失败');
+    await expect.poll(() => state.historyRequests.length).toBe(requests + 1);
+    assert.deepEqual(state.historyRequests.at(-1), { contentHash: 'a'.repeat(64), status: 409, code: 'OTHER_CONFLICT' });
+    // A background refresh may report the still-active H2 as synchronized; the
+    // persistent load error and unchanged body prove the rejected history was not opened.
+    await expect(page.getByTestId('annotations-panel').getByRole('alert')).toHaveText('历史上下文不可用');
     await expect(page.getByTestId('reader-content')).toContainText('H2 current body');
+    await expect(page.getByTestId('annotations-panel')).not.toContainText('H1 local pending');
   });
 }
