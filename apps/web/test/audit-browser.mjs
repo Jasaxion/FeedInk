@@ -21,7 +21,7 @@ async function scenario(name, action) {
   catch (error) { failures.push({ name, error }); console.error(`FAIL ${name}`, await page.locator('body').innerText({ timeout: 2000 }).catch(() => 'unavailable')); await page.screenshot({ path: join(artifacts, `failure-${passed}.png`), timeout: 3000 }).catch(() => {}); }
   finally { await context.close(); await fixture.close(); }
 }
-const open = async (page, url, id = 'one') => { await page.goto(`${url}/?article=${id}`); await expect(page.getByTestId('reader-content')).toBeVisible(); };
+const open = async (page, url, id = 'one') => { if (page.url().startsWith(url)) await settledRequests(page); await page.goto(`${url}/?article=${id}`); await expect(page.getByTestId('reader-content')).toBeVisible(); };
 const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 const settledRequests = async page => {
   await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0);
@@ -102,6 +102,7 @@ try {
       await page.getByTestId('reader').getByRole('button', { name: '标记为未读', exact: true }).click();
       await expect.poll(() => control.articles.find(item => item.id === id).read).toBe(false);
     }
+    await settledRequests(page);
     control.listed = ['one']; await page.goto(url); await expect(page.getByTestId('article-card')).toHaveCount(1);
     page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: '全部标为已读', exact: true }).click();
     await expect.poll(() => control.articles.every(item => item.read)).toBe(true); await expect(page.getByRole('status').filter({ hasText: '已标记为已读' })).toBeVisible();
@@ -116,6 +117,7 @@ try {
       await card.click(); await expect(page.getByTestId('reader-content')).toContainText('第一篇持久存档');
       await page.getByTestId('reader').getByRole('button', { name: '稍后阅读', exact: true }).click();
       await page.screenshot({ path: join(artifacts, `audit-tablet-${width}.png`) });
+      await settledRequests(page);
     }
   });
   await scenario('09 essential toolbar bounds at 1100 oversized panes and 320 e-ink', async ({ page, url, control }) => {
