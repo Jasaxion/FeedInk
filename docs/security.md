@@ -20,7 +20,13 @@ Sanitize stored/imported HTML and client rendering. Archive images must be valid
 
 ## Offline and shared-device use
 
-PWA caches and pending mutations are private per-account data. Logout/account switching must clear the prior identity's article/image cache and queue. Do not use offline mode on an untrusted shared device; physical access to browser storage is outside server-session protection. Browser storage may be evicted, so offline caching is never disaster recovery.
+PWA caches and pending mutations are private per-account data. Logout/account switching must clear the prior active identity, ordinary article/image cache and reading-state queue. Unsynchronized annotation drafts are different: lock/quarantine them without silently deleting them, block another owner while recovery remains unresolved, and require verified same-owner recovery or explicit authorized discard. If persistence cannot be confirmed, keep the current tab open and export/recover before clearing site data. Do not use offline mode on an untrusted shared device; physical access to browser storage is outside server-session protection. Browser storage may be evicted, so offline caching is never disaster recovery.
+
+## Read-only AI access
+
+MCP uses HTTPS except direct trusted loopback development. Proxy deployments must preserve and validate the configured authority and Origin. Never put MCP credentials in a URL; missing/invalid credentials are rejected rather than recovered from query parameters. Tokens are high-entropy secrets shown once, stored as hashes, and checked for expiry, revocation and disabled owners on each request. Grant the minimum article/note scopes and revoke unused tokens. Demo accounts cannot issue tokens.
+
+Only owned data is returned. Source text, remarks and images are untrusted content, not tool instructions; clients must not expand permissions based on embedded prompts. Read-only note access can expose quotes, titles and source URLs. An AI client/model provider may retain content you choose to send; token scoping is not a promise about that provider’s storage policy.
 
 ## Reporting and response
 

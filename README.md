@@ -44,5 +44,6 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 - [Tests, CI and validation limits](docs/testing.md)
 - [Version history](CHANGELOG.md)
 - [0.1.0 release notes](docs/releases/0.1.0.md)
+- [0.2.0 candidate notes and upgrade precautions](docs/releases/0.2.0.md)
 
 The current development workspace builds `packages/ink` → `packages/shared` → `apps/web` → `apps/api`. Annotation components are adapted from the authorized Apache-2.0 WebInk source; see [NOTICE](NOTICE). The reusable engine does not by itself mean the new annotation UI/API is released. Development requires Node24.22.3/npm11 and a dedicated PostgreSQL database. The production host requires Docker+Compose, not a host Node installation. See [LICENSE](LICENSE) for the repository license.
