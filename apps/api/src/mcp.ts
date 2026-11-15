@@ -27,7 +27,7 @@ function safeFailure(error: unknown): CallToolResult {
   return { ...textResult({ error: failure }), isError: true };
 }
 export function createMcpServer(db: DB, store: Store, notes: Annotations, principal: McpPrincipal): McpServer {
-  const server = new McpServer({ name: 'FeedInk', version: '0.1.0' }, { instructions: UNTRUSTED });
+  const server = new McpServer({ name: 'FeedInk', version: '0.2.0' }, { instructions: UNTRUSTED });
   const register = <S extends z.ZodRawShape>(name: string, required: McpScope, description: string, inputSchema: S, read: (input: z.infer<z.ZodObject<S>>) => Promise<CallToolResult>) => {
     // Each server closes over one immutable principal and lives for one HTTP request only.
     const schema = z.object(inputSchema).strict();

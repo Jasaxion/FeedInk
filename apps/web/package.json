@@ -1,6 +1,6 @@
 {
   "name": "@feedink/web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,8 +17,8 @@
     "test:annotations": "node test/annotations-browser.mjs"
   },
   "dependencies": {
-    "@feedink/shared": "0.1.0",
-    "@feedink/ink": "0.1.0",
+    "@feedink/shared": "0.2.0",
+    "@feedink/ink": "0.2.0",
     "dompurify": "^3.3.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
