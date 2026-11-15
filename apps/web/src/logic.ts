@@ -65,6 +65,11 @@ export function ownedImageUrl(raw: string): string | null {
   return ownedAssetUrl(raw) || (/^\/api\/feed-icons\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw) ? raw : null);
 }
 
+export function newestArticleState<T extends ArticleSummary & { stateVersion?: number }>(incoming: T, known?: (ArticleSummary & { stateVersion?: number }) | null): T {
+  if (!known || known.id !== incoming.id || known.stateVersion === undefined || known.stateVersion <= (incoming.stateVersion ?? -1)) return incoming;
+  return { ...incoming, read: known.read, saved: known.saved, tags: known.tags, progress: known.progress, stateVersion: known.stateVersion };
+}
+
 export function formatDate(value: string, short = false): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '未知日期' : new Intl.DateTimeFormat('zh-CN', short ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);

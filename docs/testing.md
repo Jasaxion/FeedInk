@@ -19,31 +19,20 @@ for script in scripts/*.sh; do sh -n "$script"; done
 
 `npm test` runs workspace tests and the first-party upstream fixture self-tests when included in the root script. Inspect output for **skipped** database integration tests; a green no-database run is not integration evidence. Backend integration and browser suites must not mutate the same database concurrently. Never substitute real SMTP delivery for a mail fixture.
 
-For the parent-owned Playwright suite:
+For the browser and real-API suite, keep `TEST_DATABASE_URL` set to the dedicated test database:
 
 ```sh
-npx playwright install --with-deps chromium
-# In a separate shell, configure and start the built API.
-# DATABASE_URL, SESSION_SECRET, DATA_DIR and APP_URL are required for a production-like run.
-# These are test-only private-host permissions; keep production FETCH_ALLOW_HOSTS unset.
-export FETCH_ALLOW_HOSTS=127.0.0.1
-export APP_URL=http://127.0.0.1:3000
-node apps/api/dist/server.js
+npx playwright install --with-deps chromium webkit
+for project in api desktop mobile tablet webkit workflows; do
+  node tests/run-project.mjs "$project"
+done
 ```
 
-Then in the test shell:
+The runner starts a fresh owned loopback API process per project, uses a private temporary archive directory and test-only private-host permissions, then closes its own processes and removes its temporary data. It never implicitly reuses production `DATABASE_URL`. Build first: the runner executes the compiled server. Each project has a fresh rate-limit budget rather than weakened production limits.
 
-```sh
-BASE_URL=http://127.0.0.1:3000 \
-FEEDINK_FIXTURE_URL=http://127.0.0.1:8899 \
-npm run test:e2e -- --project=desktop
-```
+For WebKit, an owned loopback proxy is the browser origin. The test stops that origin’s actual listener and destroys its connections, verifies HTTP is unreachable, reloads cached shell/body/images, checks queued edits against the still-running upstream API, then restores the origin and verifies synchronization and logout isolation. This avoids WPE protocol/routing failures before service-worker handling without skipping any offline assertion. Chromium retains protocol-level offline coverage. Connectivity events are simulated test inputs; neither is a hardware airplane-mode certification. The proxy’s private control capability is temporary and never logged or published.
 
-Run `api`, `desktop`, `mobile`, `tablet`, `workflows`, and optionally `webkit` separately, restarting only your own API process between projects. Combined browser projects share the same loopback rate-limit identity and can legitimately exhaust a minute's budget; do not disable or raise production limits to hide this. CI starts `node apps/api/dist/server.js` directly per project, uses bounded readiness, and terminates/waits for only its captured child PID. It installs both Chromium and WebKit and sets `FEEDINK_TEST_WEBKIT=1`.
-
-For WebKit, the PWA test injects actual browser HTTP failures plus the corresponding connectivity event instead of using the WPE protocol offline toggle, which can fail navigation before a service worker runs. The test separately verifies that browser HTTP cannot reach the API, cached shell/body/images reload, the server has not received offline edits, and reconnect sends them. Chromium retains its protocol-level offline test. Neither method is a hardware airplane-mode certification; no offline assertion is skipped.
-
-Playwright starts `tests/fixtures/upstream.mjs` via `webServer`; do not launch a duplicate fixture. If the fixture port is occupied, choose your own free port and set **both** `FEEDINK_FIXTURE_PORT` and `FEEDINK_FIXTURE_URL` consistently; never kill an unknown listener. The API is started separately and must reach that fixture URL. Configure the API's allowlist before launching it. For optional WebKit coverage, install WebKit and set `FEEDINK_TEST_WEBKIT=1`; do not report WebKit coverage when only Chromium ran. Browser screenshots/traces are private diagnostic output, not committed source or proof that unrelated scenarios passed.
+Playwright starts `tests/fixtures/upstream.mjs`; do not start a duplicate. If a port is occupied, choose a free `FEEDINK_TEST_PORT` for the API, and set both `FEEDINK_FIXTURE_PORT` and `FEEDINK_FIXTURE_URL` for the upstream fixture. Never kill an unknown listener. WebKit’s proxy/control listeners use automatically allocated loopback ports. Screenshots and traces are private test output, not committed source or automatically uploaded artifacts.
 
 ## Container and recovery checks
 

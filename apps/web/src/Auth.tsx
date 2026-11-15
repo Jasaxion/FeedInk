@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import type { Session } from '@feedink/shared';
 import { mutate } from './api';
+import { assertAuthEpoch, beginAuthTransition, withAuthNetworkLock } from './authEpoch';
+import { checkAuthOperation, resetAuthCoordination } from './authCoordinator';
 import { Field, Icon, Logo } from './components';
 
 export function Auth({ onLogin, path, navigate }: { onLogin: (session: Session) => Promise<void>; path: string; navigate: (path: string) => void }) {
@@ -9,7 +11,16 @@ export function Auth({ onLogin, path, navigate }: { onLogin: (session: Session) 
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   async function submit(event?: FormEvent, demo = false) {
     event?.preventDefault(); setError(''); setBusy(true);
-    try { const session = await mutate<Session>(demo ? '/auth/demo' : register ? '/auth/register' : '/auth/login', 'POST', demo ? undefined : { email, password, ...(register ? { name } : {}) }); await onLogin(session); }
+    const epoch = beginAuthTransition();
+    try {
+      await withAuthNetworkLock(async () => {
+        assertAuthEpoch(epoch);
+        const session = await mutate<Session>(demo ? '/auth/demo' : register ? '/auth/register' : '/auth/login', 'POST', demo ? undefined : { email, password, ...(register ? { name } : {}) });
+        assertAuthEpoch(epoch);
+        // Keep the cross-tab lock through cache activation, marker cleanup and identity publication.
+        await checkAuthOperation(); assertAuthEpoch(epoch); await onLogin(session);
+      }, 'login');
+    }
     catch (error) { setError(error instanceof Error ? error.message : '登录失败，请重试'); }
     finally { setBusy(false); }
   }
@@ -22,6 +33,7 @@ export function Auth({ onLogin, path, navigate }: { onLogin: (session: Session) 
       <button className="primary full" disabled={busy}>{busy ? '正在连接…' : register ? '注册并开始阅读' : '登录'}</button>
       <button type="button" className="secondary full" disabled={busy} onClick={() => void submit(undefined, true)}>体验独立演示账号</button>
       <p className="auth-switch">{register ? '已有账号？' : '第一次使用？'} <button type="button" className="text-button" onClick={() => { setError(''); navigate(register ? '/login' : '/register'); }}>{register ? '登录' : '创建账号'}</button></p>
+      {!navigator.locks && <button type="button" className="text-button" onClick={() => { if (confirm('请先关闭其他正在登录或退出的标签页。确认后只重置账号操作协调，不删除阅读缓存或排队更改。')) void resetAuthCoordination().then(() => setError('')).catch(error => setError(error instanceof Error ? error.message : '账号操作协调仍不可用')); }}>恢复账号操作协调</button>}
       <small className="muted">演示空间不使用他人订阅或文章。正式账号可导入自己的 OPML 与存档。</small>
     </form></section></main>;
 }

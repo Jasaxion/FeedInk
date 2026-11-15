@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { DEFAULT_SETTINGS, type ArticleDetail, type ArticleMode, type ArticlePage, type ArticleStatePatch, type ArticleSummary, type FeedPreferences, type ReaderSettings, type Session } from '@feedink/shared';
 import { api, HttpError, mutate, setApiSession } from './api';
 import { Auth } from './Auth';
-import { assertAuthEpoch, authEpoch, beginAuthTransition, ObsoleteSessionError, withAuthNetworkLock } from './authEpoch';
+import { checkAuthOperation } from './authCoordinator';
+import { clearLogoutIntent, createLogoutIntent, isCurrentLogout, readLogoutIntent } from './logoutIntent';
+import { assertAuthEpoch, authEpoch, beginAuthTransition, mergeSessionMetadata, ObsoleteSessionError, withAuthNetworkLock } from './authEpoch';
 import { ObsoleteMutationError, OwnerMismatchError, queueState, synchronizeState } from './stateSync';
 import { AppContext, type AppContextValue } from './context';
 import { AssetImage, Empty, Icon, IconButton, Logo, Modal, ResizeHandle, SourceIcon } from './components';
-import { articleQuery, formatDate, ownedAssetUrl, ownedImageUrl, progressAt, queryString, safeExternalUrl, shortcutAction } from './logic';
-import { adjustCounts, applyState, CacheInvalidatedError, OfflineStore, type Library } from './offline';
+import { articleQuery, formatDate, ownedAssetUrl, ownedImageUrl, newestArticleState, progressAt, queryString, safeExternalUrl, shortcutAction } from './logic';
+import { adjustCounts, CacheInvalidatedError, OfflineStore, type Library, type VersionedArticle } from './offline';
 import { DiscoveryPanel, OrganizationPanel, SaveUrlPanel, TransferPanel, type OrganizationTarget } from './Panels';
 import { Reader } from './Reader';
 import { scopedCss } from './safety';
@@ -37,47 +39,59 @@ export function App() {
   }
   async function invalidate(reason = '登录已失效，请重新登录') {
     const owner = sessionRef.current?.user.id;
-    const epoch = beginAuthTransition(); commitSession(null, epoch); localStorage.setItem('feedink-logout-pending', '1');
-    channelRef.current?.postMessage({ type: 'logout' }); navigate('/login', true); notify(reason, true); await purge(epoch, owner);
+    const intent = createLogoutIntent(owner); const epoch = beginAuthTransition(); commitSession(null, epoch);
+    channelRef.current?.postMessage({ type: 'logout' }); navigate('/login', true); notify(reason, true);
+    await withAuthNetworkLock(async () => { assertAuthEpoch(epoch); if (isCurrentLogout(intent)) await purge(epoch, owner); });
   }
   async function login(value: Session) {
     const epoch = authEpoch();
-    try { await store.activate(value, () => assertAuthEpoch(epoch)); localStorage.removeItem('feedink-private-purge-pending'); }
+    await checkAuthOperation(); assertAuthEpoch(epoch);
+    try { await store.activate(value, () => assertAuthEpoch(epoch)); await checkAuthOperation(); assertAuthEpoch(epoch); localStorage.removeItem('feedink-private-purge-pending'); }
     catch (error) { assertAuthEpoch(epoch); localStorage.setItem('feedink-private-purge-pending', '1'); notify(`登录成功，但离线存储不可用：${message(error)}`, true); }
-    assertAuthEpoch(epoch); localStorage.removeItem('feedink-logout-pending'); commitSession(value, epoch); setOnline(true);
+    await checkAuthOperation(); assertAuthEpoch(epoch); localStorage.removeItem('feedink-logout-pending'); commitSession(value, epoch); setOnline(true);
     channelRef.current?.postMessage({ type: 'identity', userId: value.user.id });
     if (location.pathname !== '/share') navigate('/', true);
   }
   async function retryLogout() {
-    if (logoutInFlight.current || sessionRef.current || !navigator.onLine || !localStorage.getItem('feedink-logout-pending')) return;
+    const intent = readLogoutIntent();
+    if (logoutInFlight.current || sessionRef.current || !navigator.onLine || !intent) return;
     const epoch = authEpoch(); logoutInFlight.current = true;
     try {
       await withAuthNetworkLock(async () => {
-        assertAuthEpoch(epoch); let previous: Session;
-        try { previous = await api<Session>('/session'); }
-        catch (error) { assertAuthEpoch(epoch); if (error instanceof HttpError && error.status === 401) { localStorage.removeItem('feedink-logout-pending'); return; } throw error; }
-        assertAuthEpoch(epoch); if (sessionRef.current) throw new ObsoleteSessionError();
-        const response = await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': previous.csrfToken }, cache: 'no-store' });
         assertAuthEpoch(epoch);
-        if (!response.ok && response.status !== 401) throw new Error('服务器退出尚未完成，联网后会重试');
-        localStorage.removeItem('feedink-logout-pending'); notify('服务器会话已撤销');
-      });
+        if (sessionRef.current || !isCurrentLogout(intent) || !intent.owner) return;
+        let previous: Session;
+        try { previous = await api<Session>('/session'); }
+        catch (error) { assertAuthEpoch(epoch); if (error instanceof HttpError && error.status === 401) { clearLogoutIntent(intent); return; } throw error; }
+        assertAuthEpoch(epoch); if (sessionRef.current || !isCurrentLogout(intent)) return;
+        if (previous.user.id !== intent.owner) { clearLogoutIntent(intent); return; }
+        try { await api<void>('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': previous.csrfToken } }); }
+        catch (error) { if (!(error instanceof HttpError) || error.status !== 401) throw error; }
+        assertAuthEpoch(epoch); await checkAuthOperation(); assertAuthEpoch(epoch);
+        clearLogoutIntent(intent); notify('服务器会话已撤销');
+      }, 'revocation');
     } catch (error) { if (!(error instanceof ObsoleteSessionError)) notify(message(error), true); }
     finally { logoutInFlight.current = false; }
   }
   async function logout() {
-    const owner = sessionRef.current?.user.id;
-    localStorage.setItem('feedink-logout-pending', '1');
+    const owner = sessionRef.current?.user.id; const intent = createLogoutIntent(owner);
     const epoch = beginAuthTransition(); commitSession(null, epoch); navigate('/login', true); channelRef.current?.postMessage({ type: 'logout' });
-    // Neither operation depends on the other's success; quota/purge errors cannot prevent server revocation.
-    await Promise.all([purge(epoch, owner), retryLogout()]);
+    // Serialize each local handoff/revocation step, but a failed purge cannot suppress server revocation.
+    await Promise.all([withAuthNetworkLock(async () => { assertAuthEpoch(epoch); if (isCurrentLogout(intent)) await purge(epoch, owner); }), retryLogout()]);
     if (!navigator.onLine) notify('已退出；离线时无法撤销服务器会话，恢复联网后会自动重试');
   }
   useEffect(() => {
     let alive = true; const epoch = authEpoch();
     async function boot() {
       try {
-        if (localStorage.getItem('feedink-logout-pending') || localStorage.getItem('feedink-private-purge-pending')) { await Promise.all([purge(), retryLogout()]); return; }
+        const pendingLogout = readLogoutIntent(); const pendingPurge = localStorage.getItem('feedink-private-purge-pending');
+        if (pendingLogout || pendingPurge) {
+          await withAuthNetworkLock(async () => {
+            assertAuthEpoch(epoch);
+            if (pendingLogout ? isCurrentLogout(pendingLogout) : localStorage.getItem('feedink-private-purge-pending') === pendingPurge) await purge(epoch, pendingLogout?.owner || undefined);
+          });
+          await retryLogout(); return;
+        }
         const value = await api<Session>('/session'); if (!alive) return; assertAuthEpoch(epoch);
         try { await store.activate(value, () => assertAuthEpoch(epoch)); } catch (error) { assertAuthEpoch(epoch); localStorage.setItem('feedink-private-purge-pending', '1'); notify(`离线存储不可用：${message(error)}`, true); }
         if (!alive) return; assertAuthEpoch(epoch); commitSession(value, epoch); setOnline(true);
@@ -98,13 +112,13 @@ export function App() {
     window.addEventListener('popstate', pop); window.addEventListener('offline', offline); window.addEventListener('online', reconnect); window.addEventListener('focus', reconnect); window.addEventListener('feedink:unauthorized', unauthorized);
     if ('BroadcastChannel' in window) {
       const channel = new BroadcastChannel('feedink-auth'); channelRef.current = channel;
-      channel.onmessage = event => { if (event.data?.type === 'logout' || event.data?.type === 'identity') { const epoch = beginAuthTransition(); commitSession(null, epoch); navigate('/login', true); notify('账号在另一标签页已变更，请重新登录'); } };
+      channel.onmessage = event => { if (event.data?.type === 'logout' || event.data?.type === 'identity' || event.data?.type === 'coordination-reset') { const epoch = beginAuthTransition(); commitSession(null, epoch); navigate('/login', true); notify('账号在另一标签页已变更，请重新登录'); } };
     }
     return () => { window.removeEventListener('popstate', pop); window.removeEventListener('offline', offline); window.removeEventListener('online', reconnect); window.removeEventListener('focus', reconnect); window.removeEventListener('feedink:unauthorized', unauthorized); channelRef.current?.close(); };
   }, []);
   const renderEpoch = authEpoch();
   const path = locationKey.split('?')[0];
-  return <>{starting ? <main className="startup"><Logo text /><p role="status">正在打开你的阅读空间…</p></main> : session ? <Workspace key={session.user.id} session={session} epoch={renderEpoch} store={store} online={online} setOnline={setOnline} locationKey={locationKey} navigate={navigate} notify={notify} task={task} updateSession={value => { assertAuthEpoch(renderEpoch); if (sessionRef.current?.user.id !== value.user.id) throw new ObsoleteSessionError(); commitSession(value, renderEpoch); void store.updateIdentity(value, () => assertAuthEpoch(renderEpoch)).catch(error => { if (!(error instanceof ObsoleteSessionError)) notify(message(error), true); }); }} logout={logout} invalidate={invalidate} /> : <Auth onLogin={login} path={path} navigate={navigate} />}
+  return <>{starting ? <main className="startup"><Logo text /><p role="status">正在打开你的阅读空间…</p></main> : session ? <Workspace key={session.user.id} session={session} epoch={renderEpoch} store={store} online={online} setOnline={setOnline} locationKey={locationKey} navigate={navigate} notify={notify} task={task} updateSession={value => { assertAuthEpoch(renderEpoch); if (sessionRef.current?.user.id !== value.user.id) throw new ObsoleteSessionError(); const merged = mergeSessionMetadata(value, renderEpoch); commitSession(merged, renderEpoch); void store.updateIdentity(merged, () => assertAuthEpoch(renderEpoch)).catch(error => { if (!(error instanceof ObsoleteSessionError)) notify(message(error), true); }); }} logout={logout} invalidate={invalidate} /> : <Auth onLogin={login} path={path} navigate={navigate} />}
     {notice && <Notification notice={notice} close={() => setNotice(null)} />}
   </>;
 }
@@ -161,9 +175,11 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
   }, [userId]);
   async function updateSettings(patch: Partial<ReaderSettings>) {
     assertAuthEpoch(epoch); if (!online) throw new Error('设置需要联网保存；离线阅读状态仍可正常修改');
-    if (patch.offlineEnabled === false) { cacheEpoch.current++; cacheEnabled.current = false; setCachedIds(new Set()); }
+    const previousOffline = settings.offlineEnabled;
+    const changingPolicy = patch.offlineEnabled !== undefined && patch.offlineEnabled !== previousOffline;
+    if (changingPolicy && patch.offlineEnabled === false) { cacheEpoch.current++; cacheEnabled.current = false; setCachedIds(new Set()); }
     const result = await mutate<ReaderSettings>('/settings', 'PATCH', patch); assertAuthEpoch(epoch); updateSession({ ...session, settings: result });
-    if (patch.offlineEnabled !== undefined) await clearCache(result.offlineEnabled).catch(error => notify(`设置已保存；本地缓存清理失败：${message(error)}`, true));
+    if (result.offlineEnabled !== previousOffline) await clearCache(result.offlineEnabled).catch(error => notify(`设置已保存；本地缓存清理失败：${message(error)}`, true));
   }
   async function updateListPreference(patch: FeedPreferences) {
     if (subscription) await mutate(`/subscriptions/${subscription.id}`, 'PATCH', { settings: { ...subscription.settings, ...patch } });
@@ -215,8 +231,9 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
     } finally { syncLock.current = false; if (authEpoch() === epoch) setSyncing(false); }
   }
   async function patchArticle(summary: ArticleSummary, patch: ArticleStatePatch) {
-    const queued = await queueState(store, userId, summary, patch, online, epoch, text => notify(text, true)); assertAuthEpoch(epoch);
-    const update = <T extends ArticleSummary>(value: T): T => ({ ...value, ...patch, ...(patch.tagIds ? { tags: library.tags.filter(tag => patch.tagIds!.includes(tag.id)) } : {}) });
+    let confirmed: VersionedArticle | undefined;
+    const queued = await queueState(store, userId, summary, patch, online, epoch, text => notify(text, true), { onConfirmed: value => { confirmed = value; } }); assertAuthEpoch(epoch);
+    const update = <T extends ArticleSummary>(value: T): T => confirmed ? { ...value, read: confirmed.read, saved: confirmed.saved, tags: confirmed.tags, progress: confirmed.progress, stateVersion: confirmed.stateVersion } : ({ ...value, ...patch, ...(patch.tagIds ? { tags: library.tags.filter(tag => patch.tagIds!.includes(tag.id)) } : {}) });
     setArticles(old => old.map(item => item.id === summary.id ? update(item) : item));
     const readDelta = patch.read === undefined || patch.read === summary.read ? 0 : patch.read ? -1 : 1;
     if (readDelta) setLibrary(old => adjustCounts(old, summary, readDelta));
@@ -241,10 +258,10 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
         try { page = await api<ArticlePage>(`/articles?${queryString({ ...query, cursor: nextCursor })}`); }
         catch (error) { if (!isConnectionError(error)) throw error; setOnline(false); const items = await store.articles(userId, query); page = { items, nextCursor: null, total: items.length }; }
       } else { const items = await store.articles(userId, query); page = { items, nextCursor: null, total: items.length }; }
-      const queued = await store.pending(userId).catch(error => { if (!online) throw error; return []; });
-      page.items = page.items.map(item => { const state = queued.find(change => change.articleId === item.id)?.patch; return state ? { ...item, ...state, ...(state.tagIds ? { tags: library.tags.filter(tag => state.tagIds!.includes(tag.id)) } : {}) } : item; });
+      page.items = await store.reconcileArticles(userId, page.items).catch(error => { if (!online) throw error; return page.items; });
+      assertAuthEpoch(epoch);
       if (requestId !== listRequest.current) return;
-      setArticles(old => nextCursor ? [...old, ...page.items.filter(item => !old.some(existing => existing.id === item.id))] : page.items); setCursor(page.nextCursor); setTotal(page.total);
+      setArticles(old => { const incoming = page.items.map(item => newestArticleState(item, old.find(known => known.id === item.id))); return nextCursor ? [...old, ...incoming.filter(item => !old.some(existing => existing.id === item.id))] : incoming; }); setCursor(page.nextCursor); setTotal(page.total);
       if (!nextCursor) requestAnimationFrame(() => { if (listRef.current) listRef.current.scrollTop = listScrolls.current.get(queryKey) || 0; });
     } catch (error) { if (requestId === listRequest.current) notify(message(error), true); }
     finally { if (requestId === listRequest.current) setLoading(false); }
@@ -262,9 +279,9 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
       else detail = await store.article(userId, selectedId);
       if (!detail) throw new Error('此文章尚未缓存。请联网打开后再离线阅读。');
       if (requestId !== articleRequest.current) return;
-      const state = (await store.pending(userId).catch(error => { if (!online) throw error; return []; })).find(item => item.articleId === detail!.id)?.patch;
+      detail = await store.reconcileArticle(userId, detail).catch(error => { if (!online) throw error; return detail!; });
       assertAuthEpoch(epoch); if (requestId !== articleRequest.current || selectedIdRef.current !== detail.id) return;
-      if (state) detail = applyState(detail, state, library.tags);
+      detail = newestArticleState(detail, articleRef.current);
       const detailSub = library.subscriptions.find(item => item.id === detail!.subscriptionId); const detailFolder = library.folders.find(item => item.id === detailSub?.folderId);
       const preferred = detailSub?.settings.articleMode || detailFolder?.settings.articleMode || (settings.autoFulltext ? 'fulltext' : 'feed');
       opened = true; setMode(preferred); setDetail(detail); setLoadingArticle(false);

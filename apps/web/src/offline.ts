@@ -8,7 +8,8 @@ export interface PendingState { articleId: string; patch: ArticleStatePatch; rev
 export interface CacheTicket { generation: string; enabled: boolean }
 export type VersionedArticle = ArticleSummary & { stateVersion?: number };
 interface StoredImage { type: string; bytes: ArrayBuffer | Uint8Array }
-interface LocalState { patch: ArticleStatePatch; stateVersion?: number }
+interface LocalState { patch: ArticleStatePatch; stateVersion?: number; tags?: Tag[] }
+function stateOf(article: VersionedArticle): LocalState { return { patch: { read: article.read, saved: article.saved, progress: article.progress, tagIds: article.tags.map(tag => tag.id) }, stateVersion: article.stateVersion, tags: article.tags }; }
 interface Lease { token: string; expires: number; mode?: 'web' | 'fallback' }
 interface Row<T = unknown> { key: string; userId: string; kind: string; value: T }
 const request = <T>(req: IDBRequest<T>) => new Promise<T>((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
@@ -85,6 +86,22 @@ export class OfflineStore {
     const library = await this.library(userId);
     return applyState(article, { ...state?.patch, ...queued?.patch }, library?.tags || article.tags);
   }
+  async reconcileArticles<T extends ArticleSummary>(userId: string, incoming: T[]): Promise<T[]> {
+    return this.access(userId, 'readonly', async store => {
+      const library = (await request(store.get(`${userId}:library:`)) as Row<Library> | undefined)?.value;
+      const result: T[] = [];
+      for (const article of incoming) {
+        const state = (await request(store.get(`${userId}:state:${article.id}`)) as Row<LocalState> | undefined)?.value;
+        const pending = (await request(store.get(`${userId}:queue:${article.id}`)) as Row<PendingState> | undefined)?.value;
+        const newer = state?.stateVersion !== undefined && state.stateVersion > ((article as VersionedArticle).stateVersion ?? -1);
+        const tags = [...new Map([...article.tags, ...(state?.tags || []), ...(library?.tags || [])].map(tag => [tag.id, tag])).values()];
+        const value = newer ? { ...article, stateVersion: state.stateVersion } : article;
+        result.push(applyState(value, { ...(newer ? state.patch : {}), ...pending?.patch }, tags));
+      }
+      return result;
+    });
+  }
+  async reconcileArticle<T extends ArticleSummary>(userId: string, incoming: T): Promise<T> { return (await this.reconcileArticles(userId, [incoming]))[0]; }
   async saveArticle(userId: string, article: ArticleDetail, ticket?: CacheTicket): Promise<void> {
     return this.access(userId, 'readwrite', async store => {
       await this.checkCache(store, userId, ticket);
@@ -93,7 +110,7 @@ export class OfflineStore {
       const state = (await request(store.get(`${userId}:state:${article.id}`)) as Row<LocalState> | undefined)?.value;
       const version = (article as VersionedArticle).stateVersion;
       // A body fetch started before an acknowledged mutation must not erase its newer state overlay.
-      if (!queued && (!state || version !== undefined && (state.stateVersion === undefined || version >= state.stateVersion))) await request(store.delete(`${userId}:state:${article.id}`));
+      if (!queued && version !== undefined && (!state || state.stateVersion === undefined || version >= state.stateVersion)) await request(store.put(this.row(userId, 'state', article.id, stateOf(article))));
     });
   }
   async articles(userId: string, query: ArticleQuery) {
@@ -135,7 +152,8 @@ export class OfflineStore {
       const key = `${userId}:queue:${pending.articleId}`; const current = (await request(store.get(key)) as Row<PendingState> | undefined)?.value;
       if (current?.revision !== pending.revision) return;
       if (pending.patch.read !== undefined) await this.bumpCounts(store, userId);
-      if (result) await request(store.put(this.row(userId, 'state', pending.articleId, { patch: { read: result.read, saved: result.saved, progress: result.progress, tagIds: result.tags.map(tag => tag.id) }, stateVersion: result.stateVersion })));
+      const known = (await request(store.get(`${userId}:state:${pending.articleId}`)) as Row<LocalState> | undefined)?.value;
+      if (result && (known?.stateVersion === undefined || (result.stateVersion ?? -1) >= known.stateVersion)) await request(store.put(this.row(userId, 'state', pending.articleId, stateOf(result))));
       await request(store.delete(key));
     });
   }
@@ -191,7 +209,7 @@ export function adjustCounts(library: Library, article: ArticleSummary, delta: n
   const sub = library.subscriptions.find(item => item.id === article.subscriptionId);
   return { ...library, subscriptions: library.subscriptions.map(item => item.id === sub?.id ? { ...item, unreadCount: Math.max(0, item.unreadCount + delta) } : item), folders: library.folders.map(item => item.id === sub?.folderId ? { ...item, unreadCount: Math.max(0, item.unreadCount + delta) } : item) };
 }
-export function applyState<T extends ArticleDetail>(article: T, patch: ArticleStatePatch, tags: Tag[]): T { const { tagIds, ...state } = patch; return { ...article, ...state, ...(tagIds ? { tags: tags.filter(tag => tagIds.includes(tag.id)) } : {}) }; }
+export function applyState<T extends ArticleSummary>(article: T, patch: ArticleStatePatch, tags: Tag[]): T { const { tagIds, ...state } = patch; return { ...article, ...state, ...(tagIds ? { tags: tags.filter(tag => tagIds.includes(tag.id)) } : {}) }; }
 
 /** Identity guard is also checked after the last acknowledgement, before caller side effects. */
 export async function replayPending(store: OfflineStore, owner: string, verify: () => Promise<string>, send: (pending: PendingState) => Promise<VersionedArticle | void>, guard = () => {}): Promise<number> {

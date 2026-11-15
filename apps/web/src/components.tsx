@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { Children, cloneElement, isValidElement, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import { ArrowLeft, ArrowDown, ArrowUp, Bookmark, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, Download, ExternalLink, Folder, Grid2X2, HelpCircle, Home, Image, Inbox, List, LoaderCircle, LogOut, Menu, MoreHorizontal, Plus, RefreshCw, Rss, Search, Settings, Share2, SlidersHorizontal, Tag, Trash2, User, Volume2, WifiOff, X, PanelLeftClose, PanelLeftOpen, BookOpen, Archive, Sun, Mail, Play, Pause, Square, Pin, BellOff } from 'lucide-react';
 import { useApp } from './context';
 import { ownedImageUrl } from './logic';
@@ -19,8 +19,12 @@ export function Modal({ title, children, onClose, wide = false }: { title: strin
 }
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   const id = useId();
-  const control = isValidElement<Record<string, unknown>>(children) && ['input', 'select', 'textarea'].includes(String(children.type)) ? cloneElement(children, { 'aria-labelledby': id, 'aria-describedby': hint ? `${id}-hint` : undefined }) : children;
-  return <label className="field"><span id={id}>{label}</span>{control}{hint && <small id={`${id}-hint`}>{hint}</small>}</label>;
+  const labelControls = (nodes: ReactNode): ReactNode => Children.map(nodes, child => {
+    if (!isValidElement<Record<string, unknown>>(child)) return child;
+    if (['input', 'select', 'textarea'].includes(String(child.type))) return cloneElement(child, { 'aria-labelledby': id, 'aria-describedby': hint ? `${id}-hint` : undefined });
+    return child.props.children !== undefined ? cloneElement(child, { children: labelControls(child.props.children as ReactNode) }) : child;
+  });
+  return <label className="field"><span id={id}>{label}</span>{labelControls(children)}{hint && <small id={`${id}-hint`}>{hint}</small>}</label>;
 }
 export function Toggle({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (checked: boolean) => void; hint?: string }) { return <label className="toggle"><span>{label}{hint && <small>{hint}</small>}</span><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} /></label>; }
 export function Empty({ icon = 'inbox', title, children }: { icon?: IconName; title: string; children?: ReactNode }) { return <div className="empty"><Icon name={icon} size={32} /><h2>{title}</h2>{children}</div>; }

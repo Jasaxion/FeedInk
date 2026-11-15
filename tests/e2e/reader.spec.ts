@@ -72,6 +72,7 @@ test('PWA reads cached body/images offline, syncs changes and purges private dat
   test.setTimeout(100_000);
   const setOffline = await browserNetworkFault(page, browserName);
   const api = page.context().request;
+  const witnessOrigin = process.env.FEEDINK_API_WITNESS_URL;
   const session = await register(api);
   const sub = await subscribe(api, session);
   const list = await waitForArticles(api, sub.id, 2);
@@ -107,11 +108,11 @@ test('PWA reads cached body/images offline, syncs changes and purges private dat
   await expect.poll(async () => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true);
   await page.keyboard.press('y');
   await expect(page.getByTestId('offline-status')).toContainText(/待同步|等待同步/);
-  expect((await detail(api, item.id)).saved).toBe(false);
+  expect((await detail(api, item.id, witnessOrigin)).saved).toBe(false);
   await page.screenshot({ path: info.outputPath('reader-offline.png'), fullPage: true });
   await setOffline(false);
   expect(await page.evaluate(() => fetch('/api/health').then(response => response.ok))).toBe(true);
-  await expect.poll(async () => (await detail(api, item.id)).saved, { timeout: 30_000 }).toBe(true);
+  await expect.poll(async () => (await detail(api, item.id, witnessOrigin)).saved, { timeout: 30_000 }).toBe(true);
   await page.goto('/settings');
   await page.getByRole('button', { name: /退出登录/ }).click();
   await expect(page.getByTestId('app-shell')).toHaveCount(0);

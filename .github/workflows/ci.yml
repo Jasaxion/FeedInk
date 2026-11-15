@@ -68,38 +68,11 @@ jobs:
       - name: Browser and API end-to-end tests
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: |
-          mkdir -p "$DATA_DIR"
-          api_pid=
-          stop_api() {
-            if test -n "$api_pid"; then
-              kill "$api_pid" 2>/dev/null || true
-              for attempt in $(seq 1 20); do
-                kill -0 "$api_pid" 2>/dev/null || break
-                sleep 1
-              done
-              if kill -0 "$api_pid" 2>/dev/null; then kill -KILL "$api_pid" 2>/dev/null || true; fi
-              wait "$api_pid" 2>/dev/null || true
-              api_pid=
-            fi
-          }
-          trap stop_api EXIT
-          # Each project gets a fresh owned API process/rate-limit budget, not weaker limits.
           failed=0
           for project in api desktop mobile tablet webkit workflows; do
-            node apps/api/dist/server.js > "$RUNNER_TEMP/feedink-api-$project.log" 2>&1 &
-            api_pid=$!
-            ready=false
-            for attempt in $(seq 1 60); do
-              if curl --fail --silent "$BASE_URL/api/health" > /dev/null; then ready=true; break; fi
-              kill -0 "$api_pid" || exit 1
-              sleep 1
-            done
-            test "$ready" = true
-            # Playwright starts/stops its own upstream fixture for this invocation.
-            if ! PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" npm run test:e2e -- --project="$project" --output="test-results/$project"; then
+            if ! PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" node tests/run-project.mjs "$project"; then
               failed=1
             fi
-            stop_api
           done
           test "$failed" = 0
       # Raw browser traces, session data and machine logs are not uploaded.

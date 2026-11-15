@@ -1,17 +1,20 @@
 import type { ArticleStatePatch, ArticleSummary, Session } from '@feedink/shared';
 import { api, HttpError } from './api';
-import { assertAuthEpoch, updateCredentials } from './authEpoch';
+import { assertAuthEpoch, getApiSession, updateCredentials } from './authEpoch';
 import { OfflineStore, replayPending, type PendingState, type VersionedArticle } from './offline';
 
 export class OwnerMismatchError extends Error { constructor() { super('服务器账号与离线账号不一致'); } }
 export class ObsoleteMutationError extends Error { constructor() { super('更早的阅读状态已被新操作替代'); } }
+class StorageUnavailableError extends Error { constructor() { super('离线协调存储不可用'); } }
+const activeIntents = new Map<string, symbol>();
 export interface OwnerLockOptions { locks?: Pick<LockManager, 'request'> | null; leaseMs?: number; waitMs?: number }
 /** Web Locks serialize healthy tabs. A renewable IDB lease coordinates fallback tabs; HTTP If-Match fences late writes after takeover. */
 export async function withOwnerLock<T>(store: OfflineStore, owner: string, action: (check: () => Promise<void>) => Promise<T>, options: OwnerLockOptions = {}): Promise<T> {
   const locks = options.locks === undefined ? globalThis.navigator?.locks : options.locks;
   async function leased(mode: 'web' | 'fallback') {
     const token = crypto.randomUUID(); const duration = options.leaseMs ?? 15_000; const deadline = Date.now() + (options.waitMs ?? 20_000);
-    while (!await store.acquireLease(owner, token, Date.now(), duration, mode)) {
+    const acquire = async () => { try { return await store.acquireLease(owner, token, Date.now(), duration, mode); } catch { throw new StorageUnavailableError(); } };
+    while (!await acquire()) {
       if (Date.now() >= deadline) throw new Error('另一标签页正在同步，请稍后重试');
       await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -56,25 +59,67 @@ export async function synchronizeState(store: OfflineStore, owner: string, epoch
   }, options);
 }
 
-/** Optional quota failures cannot suppress a successful online mutation. Offline failures still reject. */
-export async function queueState(store: OfflineStore, owner: string, article: ArticleSummary, patch: ArticleStatePatch, online: boolean, epoch: number, warn: (message: string) => void): Promise<boolean> {
-  assertAuthEpoch(epoch);
-  try { await store.enqueue(owner, article.id, patch, article); assertAuthEpoch(epoch); return true; }
+export interface QueueStateOptions extends OwnerLockOptions { onConfirmed?: (state: VersionedArticle) => void }
+async function capturedState(article: VersionedArticle, patch: ArticleStatePatch, current: () => Promise<void>): Promise<VersionedArticle> {
+  await current();
+  if (!Number.isInteger(article.stateVersion)) throw new Error('无法安全同步旧版本文章，请联网重新打开文章后重试');
+  const result = await api<VersionedArticle>(`/articles/${article.id}/state`, { method: 'PATCH', headers: { 'If-Match': `"${article.stateVersion}"` }, body: JSON.stringify(patch) });
+  await current(); return result;
+}
+
+/** Optional IDB failure never grants an obsolete intent permission to fetch a newer version without coordination. */
+export async function queueState(store: OfflineStore, owner: string, article: ArticleSummary, patch: ArticleStatePatch, online: boolean, epoch: number, warn: (message: string) => void, options: QueueStateOptions = {}): Promise<boolean> {
+  const key = `${owner}:${article.id}`; const intent = Symbol(); activeIntents.set(key, intent);
+  const local = () => {
+    assertAuthEpoch(epoch);
+    if (getApiSession()?.user.id !== owner) throw new OwnerMismatchError();
+    if (activeIntents.get(key) !== intent) throw new ObsoleteMutationError();
+  };
+  local();
+  try { await store.enqueue(owner, article.id, patch, article); local(); return true; }
   catch (error) {
-    assertAuthEpoch(epoch); if (!online) throw error;
-    const identity = await store.identity(); assertAuthEpoch(epoch);
-    const run = async () => {
-      // Failed account-cache activation cannot make another owner's rows a prerequisite for online writes.
-      const pending = identity?.user.id === owner ? (await store.pending(owner)).find(item => item.articleId === article.id) : undefined;
-      await fencedState(article.id, { ...pending?.patch, ...patch }, async () => assertAuthEpoch(epoch), 0);
-      // Only a confirmed write supersedes the old queue entry. Deletes allocate no new state/body rows under quota pressure.
-      // Compare revisions so a newer intent queued during this network request survives.
-      if (pending) await store.discardPending(owner, article.id, pending.revision);
+    local(); if (!online) throw error;
+    let available = false; let snapshot: PendingState | undefined;
+    try {
+      const identity = await store.identity(); local();
+      if (identity?.user.id === owner) { snapshot = (await store.pending(owner)).find(item => item.articleId === article.id); local(); available = true; }
+    } catch { local(); }
+    const finish = (state: VersionedArticle) => { local(); options.onConfirmed?.(state); warn('阅读状态已保存到服务器，但此设备离线存储写入失败；请清理缓存后重试离线保存'); return false; };
+    if (available) {
+      let started = false;
+      try {
+        return await withOwnerLock(store, owner, async check => {
+          started = true;
+          const current = async () => {
+            local(); await check(); local();
+            const pending = (await store.pending(owner)).find(item => item.articleId === article.id); local();
+            if (pending?.revision !== snapshot?.revision) throw new ObsoleteMutationError();
+            await check(); local();
+          };
+          const result = await fencedState(article.id, { ...snapshot?.patch, ...patch }, current, 0);
+          await current(); if (snapshot) await store.discardPending(owner, article.id, snapshot.revision);
+          local(); await check(); return finish(result);
+        }, options);
+      } catch (failure) {
+        local(); if (started || !(failure instanceof StorageUnavailableError)) throw failure;
+      }
+    }
+    // No IDB access is required here. Native locking still orders this path with normal writers.
+    const locks = options.locks === undefined ? globalThis.navigator?.locks : options.locks;
+    const onlinePatch = { ...(available ? snapshot?.patch : {}), ...patch };
+    const current = async () => {
+      local();
+      if (available) { const pending = (await store.pending(owner)).find(item => item.articleId === article.id); local(); if (pending?.revision !== snapshot?.revision) throw new ObsoleteMutationError(); }
     };
-    // Web Locks do not depend on IDB allocation and still order this exceptional online path with normal replay.
-    if (globalThis.navigator?.locks) await navigator.locks.request(`feedink-state:${owner}`, { mode: 'exclusive' }, run);
-    else if (identity?.user.id === owner) await withOwnerLock(store, owner, async check => { await check(); await run(); });
-    else await run(); // No owned persistent queue exists; one-shot If-Match still rejects late competing writes.
-    assertAuthEpoch(epoch); warn('阅读状态已保存到服务器，但此设备离线存储写入失败；请清理缓存后重试离线保存'); return false;
+    const complete = async (result: VersionedArticle) => { local(); if (available && snapshot) await store.discardPending(owner, article.id, snapshot.revision); local(); return finish(result); };
+    if (locks) return locks.request(`feedink-state:${owner}`, { mode: 'exclusive' }, async () => {
+      local();
+      const result = Number.isInteger((article as VersionedArticle).stateVersion)
+        ? await capturedState(article, onlinePatch, current)
+        : await fencedState(article.id, onlinePatch, current, 0);
+      return complete(result);
+    });
+    // With neither storage nor an inter-tab lock, never GET a fresh version or retry a stale intent.
+    return complete(await capturedState(article, onlinePatch, current));
   }
 }

@@ -1,4 +1,5 @@
 import type { Session } from '@feedink/shared';
+import { coordinateAuthentication, type AuthOperation } from './authCoordinator';
 
 let epoch = 0;
 let session: Session | null = null;
@@ -14,11 +15,13 @@ export function setApiSession(value: Session | null, expected = epoch) {
   return epoch;
 }
 export function getApiSession() { return session; }
-let authNetworkTail: Promise<unknown> = Promise.resolve();
-export async function withAuthNetworkLock<T>(action: () => Promise<T>): Promise<T> {
-  if (globalThis.navigator?.locks) return navigator.locks.request('feedink-auth-network', action);
-  const result = authNetworkTail.then(action, action); authNetworkTail = result.then(() => undefined, () => undefined); return result;
+/** Metadata comes from React/server updates; credentials remain authoritative in this module. */
+export function mergeSessionMetadata(value: Session, expected: number): Session {
+  assertAuthEpoch(expected);
+  if (!session || session.user.id !== value.user.id) throw new ObsoleteSessionError();
+  return { ...value, csrfToken: session.csrfToken };
 }
+export async function withAuthNetworkLock<T>(action: () => Promise<T>, kind: AuthOperation = 'local'): Promise<T> { return coordinateAuthentication(action, kind); }
 export function updateCredentials(value: Session, expected: number) {
   assertAuthEpoch(expected);
   if (session?.user.id !== value.user.id) throw new ObsoleteSessionError();

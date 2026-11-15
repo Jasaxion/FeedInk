@@ -1,5 +1,6 @@
 import { expect, type APIRequestContext, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 import type { ArticleDetail, ArticlePage, Session, Subscription } from '../../packages/shared/src/index.js';
 
 export const upstream = process.env.FEEDINK_FIXTURE_URL || 'http://127.0.0.1:8899';
@@ -28,24 +29,29 @@ export async function waitForArticles(api: APIRequestContext, subscriptionId: st
   await expect.poll(async () => (await articles(api, subscriptionId)).items.length, { timeout: 45_000 }).toBeGreaterThanOrEqual(minimum);
   return articles(api, subscriptionId);
 }
-export async function detail(api: APIRequestContext, id: string): Promise<ArticleDetail> {
-  const response = await api.get(`/api/articles/${id}`);
+export async function detail(api: APIRequestContext, id: string, origin?: string): Promise<ArticleDetail> {
+  const path = `/api/articles/${id}`;
+  const response = await api.get(origin ? new URL(path, origin).href : path);
   expect(response.ok(), await response.text()).toBeTruthy();
   return response.json();
 }
 export async function browserNetworkFault(page: Page, browserName: 'chromium' | 'firefox' | 'webkit') {
   if (browserName !== 'webkit') return (offline: boolean) => page.context().setOffline(offline);
-  // WPE's protocol-level offline switch can fail navigation before a service worker runs.
-  // Abort actual browser HTTP traffic instead; APIRequestContext remains an independent witness.
+  // WPE's protocol switch and request routing do not reliably intercept worker-owned traffic.
+  // Stop the actual test-origin listener; the upstream API remains an independent witness.
+  const file = process.env.FEEDINK_NETWORK_CONTROL_FILE;
+  if (!file || (await stat(file)).size > 4096) throw new Error('Run the WebKit project through tests/run-project.mjs for a controlled offline origin');
+  const control = JSON.parse(await readFile(file, 'utf8')) as { controlUrl: string; token: string; publicUrl: string };
+  const endpoint = new URL(control.controlUrl);
+  if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.pathname !== '/state' || !/^[a-f0-9]{64}$/.test(control.token) || new URL(control.publicUrl).origin !== new URL(baseURL).origin) throw new Error('Invalid offline-origin test control');
   const marker = 'feedink-test-network-fault';
-  let blocked = false;
   await page.context().addInitScript(key => {
     const original = Object.getOwnPropertyDescriptor(Navigator.prototype, 'onLine')?.get;
     Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => localStorage.getItem(key) === '1' ? false : original?.call(navigator) ?? true });
   }, marker);
-  await page.context().route(/^https?:\/\//, route => blocked ? route.abort('internetdisconnected') : route.continue());
   return async (offline: boolean) => {
-    blocked = offline;
+    const response = await fetch(control.controlUrl, { method: 'POST', headers: { Authorization: `Bearer ${control.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ offline }), signal: AbortSignal.timeout(10_000) });
+    if (!response.ok || (await response.json() as { offline?: boolean }).offline !== offline) throw new Error('Test origin could not transition connectivity');
     await page.evaluate(({ key, value }) => {
       localStorage.setItem(key, value ? '1' : '0');
       window.dispatchEvent(new Event(value ? 'offline' : 'online'));
