@@ -20,6 +20,9 @@ export default defineConfig({
   },
   projects: [
     { name: 'api', testMatch: /api\.spec\.ts/ },
+    { name: 'mcp', testMatch: /mcp\.spec\.ts/ },
+    { name: 'annotations', testMatch: /annotations\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 900 }, launchOptions: { executablePath } } },
+    { name: 'annotations-mobile', testMatch: /annotations\.spec\.ts/, use: { ...devices['Pixel 5'], viewport: { width: 390, height: 844 }, launchOptions: { executablePath } } },
     { name: 'workflows', testMatch: /workflows\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, launchOptions: { executablePath } } },
     { name: 'desktop', testMatch: /reader\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, launchOptions: { executablePath } } },
     { name: 'mobile', testMatch: /reader\.spec\.ts/, use: { ...devices['Pixel 5'], viewport: { width: 390, height: 844 }, launchOptions: { executablePath } } },

@@ -1,3 +1,6 @@
+/** FeedInk modifications (Apache-2.0): bound creation/resolution to a supplied reader
+ * root and its stable context hash; never resolve raw page ink into application chrome.
+ * Adapted from WebInk; see packages/ink/LICENSE and repository NOTICE. */
 import { supportedBrush, identityFrame, inverse, multiply, transformPoint, validFrame, visibleBounds, type Clip, type FrameResolution, type Matrix, type RenderFrame } from './frames.ts';
 import type { Anchor, AttachmentMode, Point, Stroke } from './types.ts';
 import { segmentAtPoint, segmentRange, segmentText, findSegment, SEGMENT_LIMITS, type LocalSegment, type SegmentText, type SegmentMatch } from './segments.ts';
@@ -166,7 +169,7 @@ export class ContentAnchorResolver {
   private observed = new Set<Element>();
   private readonly win: Window;
   private readonly notice: (code: string) => void;
-  constructor(win: Window, notice: (code: string) => void = () => {}, changed: (entries: ResizeObserverEntry[]) => void = () => {}) {
+  constructor(win: Window, notice: (code: string) => void = () => {}, changed: (entries: ResizeObserverEntry[]) => void = () => {}, private readonly readerRoot?: HTMLElement) {
     this.win = win; this.notice = notice;
     if (typeof ResizeObserver !== 'undefined') this.resize = new ResizeObserver(entries => { this.beginFrame(); changed(entries); });
   }
@@ -206,6 +209,7 @@ export class ContentAnchorResolver {
     return value;
   }
   private stableIdentity(element: Element): string {
+    if (element === this.readerRoot) return this.readerIdentity();
     const title = element.querySelector('h1,h2,h3,h4,h5,h6');
     if (title) { const fingerprint = this.fingerprint(title); return fingerprint ? `stable:heading:${fingerprint}` : ''; }
     // No truncated leading-text identity for local segments in recycled entries.
@@ -213,6 +217,7 @@ export class ContentAnchorResolver {
     return text === null ? '' : `stable:text:${hash(text)}`;
   }
   private identity(element: Element): string {
+    if (element === this.readerRoot) return this.readerIdentity();
     let value = this.identities.get(element);
     if (value !== undefined) return value;
     const title = element.querySelector('h1,h2,h3,h4,h5,h6');
@@ -293,7 +298,13 @@ export class ContentAnchorResolver {
     if (uncertain(candidates)) return null;
     return candidates.filter(signature);
   }
+  private readerIdentity(): string {
+    const identity = this.readerRoot?.dataset.annotationContext;
+    if (!identity || !/^[a-f0-9]{64}$/.test(identity)) throw new Error('Missing reader context identity');
+    return `reader:${identity}`;
+  }
   private scopeElement(target: HTMLElement): HTMLElement | null {
+    if (this.readerRoot) return this.readerRoot.contains(target) ? this.readerRoot : null;
     let fallback: HTMLElement | null = null, dataScope: HTMLElement | null = null, headed: HTMLElement | null = null, headedData: HTMLElement | null = null, keyed: HTMLElement | null = null;
     for (let parent = target.parentElement, n = 0; parent && !ROOTS.has(parent.tagName) && n++ < DEPTH_LIMIT; parent = parent.parentElement) {
       // A structural #body/data wrapper must not terminate discovery before the
@@ -316,6 +327,7 @@ export class ContentAnchorResolver {
     return keyed ?? headedData ?? dataScope ?? headed ?? fallback;
   }
   private scopeContext(scope: Element): string {
+    if (this.readerRoot) return this.readerIdentity();
     const cached = this.contexts.get(scope);
     if (cached !== undefined) return cached;
     const tokens: Array<[string, [string, string][]]> = [];
@@ -410,13 +422,13 @@ export class ContentAnchorResolver {
       this.segmentContent(target)?.text.trim() === this.segmentContent(owner)?.text.trim();
   }
   private createSurface(point: Point): SurfaceAnchor {
-    const root = this.win.document.documentElement;
+    const root = this.readerRoot ?? this.win.document.documentElement;
     const hit = this.win.document.elementFromPoint(point.x - this.win.scrollX, point.y - this.win.scrollY);
-    if (!(hit instanceof HTMLElement) || hit.hasAttribute('data-webink-overlay') || ROOTS.has(hit.tagName)) throw new Error('No verified surface');
+    if (!(hit instanceof HTMLElement) || this.readerRoot && !this.readerRoot.contains(hit) || hit.hasAttribute('data-webink-overlay') || ROOTS.has(hit.tagName)) throw new Error('No verified surface');
     // Do not bypass unsupported contact geometry by selecting an outer safe box.
     this.geometry(hit, 'block');
     let owner: HTMLElement | null = null, target: HTMLElement | null = null, depth = 0;
-    for (let element: HTMLElement | null = hit; element && !ROOTS.has(element.tagName); element = element.parentElement) {
+    for (let element: HTMLElement | null = hit; element && (!this.readerRoot || this.readerRoot.contains(element)) && !ROOTS.has(element.tagName); element = element.parentElement) {
       if (++depth > DEPTH_LIMIT) throw new Error('Surface exceeds DOM depth limit');
       if (!target && scrolls(this.win.getComputedStyle(element))) target = element;
       if (this.surfaceOwner(element)) {
@@ -498,11 +510,11 @@ export class ContentAnchorResolver {
     return () => generation === this.identityGeneration;
   }
   private createContent(point: Point, smart = false): ContentAnchor {
-    const doc = this.win.document, root = doc.documentElement;
+    const doc = this.win.document, root = this.readerRoot ?? doc.documentElement;
     let hit = doc.elementFromPoint(point.x - this.win.scrollX, point.y - this.win.scrollY);
-    if (!hit || hit.hasAttribute('data-webink-overlay')) throw new Error('No structured content at the contact');
+    if (!hit || this.readerRoot && !this.readerRoot.contains(hit) || hit.hasAttribute('data-webink-overlay')) throw new Error('No structured content at the contact');
     let target: HTMLElement | null = null, fallback: HTMLElement | null = null, depth = 0;
-    while (hit && !ROOTS.has(hit.tagName) && depth++ < DEPTH_LIMIT) {
+    while (hit && (!this.readerRoot || this.readerRoot.contains(hit)) && !ROOTS.has(hit.tagName) && depth++ < DEPTH_LIMIT) {
       if (hit instanceof HTMLElement) {
         if (BLOCKS.has(hit.tagName)) { target = hit; break; }
         if (!fallback && /^(block|flex|grid|flow-root|list-item)$/.test(this.win.getComputedStyle(hit).display)) fallback = hit;
@@ -548,7 +560,7 @@ export class ContentAnchorResolver {
     let result: FrameResolution;
     const anchor = stroke.anchor;
     if (!supportedBrush(stroke)) result = { status: 'unresolved' };
-    else if (!anchor || isPageAnchor(anchor)) result = { status: 'visible', frame: identityFrame() };
+    else if (!anchor || isPageAnchor(anchor)) result = this.readerRoot ? { status: 'unresolved' } : { status: 'visible', frame: identityFrame() };
     else if (!isAttachedAnchor(anchor)) result = { status: 'unresolved' };
     else {
       try {
@@ -574,7 +586,7 @@ export class ContentAnchorResolver {
   private target(anchor: AttachedAnchor): { status: 'hidden' | 'unresolved' } | { status: 'found'; element: HTMLElement } {
     const cached = this.targets.get(anchor);
     if (cached) return cached;
-    const root = this.win.document.documentElement;
+    const root = this.readerRoot ?? this.win.document.documentElement;
     let scope: Element = root;
     let result: ReturnType<ContentAnchorResolver['target']>;
     if (anchor.scope) {
@@ -613,7 +625,7 @@ export class ContentAnchorResolver {
       const target = this.resolvedTarget(stroke);
       if (target && reader && !reader.contains(target)) return 'outside-reader';
       if (anchor.scope && anchor.scopeContext !== undefined) {
-        const matches = this.locate(this.win.document.documentElement, anchor.scope.locator, anchor.scope.identity, undefined, anchor.kind === 'surface-v1');
+        const matches = this.locate(this.readerRoot ?? this.win.document.documentElement, anchor.scope.locator, anchor.scope.identity, undefined, anchor.kind === 'surface-v1');
         if (matches?.length === 1 && this.scopeContext(matches[0]) !== anchor.scopeContext) return 'other-article';
       }
     } catch { /* Uncertain identity remains eligible for the unlocated appendix. */ }

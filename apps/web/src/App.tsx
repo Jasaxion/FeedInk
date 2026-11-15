@@ -14,6 +14,9 @@ import { DiscoveryPanel, OrganizationPanel, SaveUrlPanel, TransferPanel, type Or
 import { Reader } from './Reader';
 import { scopedCss } from './safety';
 import { SettingsPanel } from './Settings';
+import { PendingNotesOwnerError } from './offline';
+import { allAnnotationDrafts, discardLockedAnnotations, flushActiveNotes, freezeActiveNotes, guardLockedAnnotationLogin, recoverLockedAnnotations, synchronizeAnnotations } from './annotationSync';
+import { exportNotesJson } from './annotationExport';
 
 const emptyLibrary: Library = { subscriptions: [], folders: [], tags: [] };
 const scopeTitles = { all: '全部订阅源', unread: '未读文章', saved: '稍后阅读', archive: '全部存档' };
@@ -25,33 +28,40 @@ export function App() {
   const [session, setSession] = useState<Session | null>(null); const sessionRef = useRef<Session | null>(null);
   const [starting, setStarting] = useState(true); const [online, setOnline] = useState(navigator.onLine);
   const [locationKey, setLocationKey] = useState(location.pathname + location.search);
+  const locationRef = useRef(locationKey); locationRef.current = locationKey;
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
   const notify = useCallback((text: string, error = false) => setNotice({ text, error }), []);
-  const navigate = useCallback((path: string, replace = false) => { history[replace ? 'replaceState' : 'pushState']({}, '', path); setLocationKey(location.pathname + location.search); }, []);
+  const navigateNow = useCallback((path: string, replace = false) => { history[replace ? 'replaceState' : 'pushState']({}, '', path); setLocationKey(location.pathname + location.search); }, []);
+  const navigate = useCallback((path: string, replace = false) => { const epoch = authEpoch(); void flushActiveNotes().then(() => { assertAuthEpoch(epoch); navigateNow(path, replace); }).catch(error => notify(`未切换页面：${message(error)}。请先导出 JSON 或重试保存。`, true)); }, []);
+  const [notesLogout, setNotesLogout] = useState(false);
   const commitSession = useCallback((value: Session | null, epoch: number) => { assertAuthEpoch(epoch); sessionRef.current = value; setApiSession(value, epoch); setSession(value); }, []);
   const task = useCallback(async <T,>(action: () => Promise<T>): Promise<T | undefined> => { try { return await action(); } catch (error) { if (error instanceof ObsoleteSessionError || error instanceof ObsoleteMutationError) return; if (isConnectionError(error)) setOnline(false); notify(message(error), true); return undefined; } }, [notify]);
   const logoutInFlight = useRef(false);
   async function purge(epoch = authEpoch(), owner?: string) {
     localStorage.setItem('feedink-private-purge-pending', '1');
     try {
-      const outcome = await store.clear(() => assertAuthEpoch(epoch), owner); assertAuthEpoch(epoch);
+      const outcome = await store.clear(() => assertAuthEpoch(epoch), owner, true); assertAuthEpoch(epoch);
       if (outcome === 'cleared') localStorage.removeItem('feedink-private-purge-pending');
     }
     catch (error) { if (!(error instanceof ObsoleteSessionError)) notify(`本地数据清理失败：${message(error)}。请在浏览器中清除此网站数据。`, true); }
   }
   async function invalidate(reason = '登录已失效，请重新登录') {
     const owner = sessionRef.current?.user.id;
+    localStorage.setItem('feedink-private-purge-pending', '1');
+    const retiring = freezeActiveNotes(owner); setNotesLogout(false);
     const intent = createLogoutIntent(owner); const epoch = beginAuthTransition(); commitSession(null, epoch);
-    channelRef.current?.postMessage({ type: 'logout' }); navigate('/login', true); notify(reason, true);
+    channelRef.current?.postMessage({ type: 'logout' }); navigateNow('/login', true); notify(`${reason}；未同步笔记已锁定，请重新登录同一账号恢复。`, true);
+    try { await retiring; }
+    catch { notify('登录已锁定；本机笔记写入失败，请不要关闭此标签页，重新登录原账号后恢复。', true); return; }
     await withAuthNetworkLock(async () => { assertAuthEpoch(epoch); if (isCurrentLogout(intent)) await purge(epoch, owner); });
   }
   async function login(value: Session) {
     const epoch = authEpoch();
     await checkAuthOperation(); assertAuthEpoch(epoch);
     try { await store.activate(value, () => assertAuthEpoch(epoch)); await checkAuthOperation(); assertAuthEpoch(epoch); localStorage.removeItem('feedink-private-purge-pending'); }
-    catch (error) { assertAuthEpoch(epoch); localStorage.setItem('feedink-private-purge-pending', '1'); notify(`登录成功，但离线存储不可用：${message(error)}`, true); }
-    await checkAuthOperation(); assertAuthEpoch(epoch); localStorage.removeItem('feedink-logout-pending'); commitSession(value, epoch); setOnline(true);
+    catch (error) { assertAuthEpoch(epoch); if (error instanceof PendingNotesOwnerError) throw error; localStorage.setItem('feedink-private-purge-pending', '1'); notify(`登录成功，但离线存储不可用：${message(error)}`, true); }
+    await recoverLockedAnnotations(store, value.user.id); await checkAuthOperation(); assertAuthEpoch(epoch); localStorage.removeItem('feedink-logout-pending'); commitSession(value, epoch); setOnline(true);
     channelRef.current?.postMessage({ type: 'identity', userId: value.user.id });
     if (location.pathname !== '/share') navigate('/', true);
   }
@@ -77,8 +87,19 @@ export function App() {
     finally { logoutInFlight.current = false; }
   }
   async function logout() {
-    const owner = sessionRef.current?.user.id; const intent = createLogoutIntent(owner);
-    const epoch = beginAuthTransition(); commitSession(null, epoch); navigate('/login', true); channelRef.current?.postMessage({ type: 'logout' });
+    const owner = sessionRef.current?.user.id; if (!owner) return;
+    try { await flushActiveNotes(); if ((await allAnnotationDrafts(store, owner)).length) { setNotesLogout(true); return; } }
+    catch { setNotesLogout(true); return; }
+    await performLogout();
+  }
+  async function performLogout(discard = false) {
+    const owner = sessionRef.current?.user.id;
+    try { await freezeActiveNotes(owner); } catch (error) { if (!discard) throw error; }
+    if (discard && owner) { await withAuthNetworkLock(() => store.discardAnnotationDrafts(owner)); discardLockedAnnotations(owner); }
+    if (owner) discardLockedAnnotations(owner);
+    setNotesLogout(false);
+    const intent = createLogoutIntent(owner);
+    const epoch = beginAuthTransition(); commitSession(null, epoch); navigateNow('/login', true); channelRef.current?.postMessage({ type: 'logout' });
     // Serialize each local handoff/revocation step, but a failed purge cannot suppress server revocation.
     await Promise.all([withAuthNetworkLock(async () => { assertAuthEpoch(epoch); if (isCurrentLogout(intent)) await purge(epoch, owner); }), retryLogout()]);
     if (!navigator.onLine) notify('已退出；离线时无法撤销服务器会话，恢复联网后会自动重试');
@@ -96,7 +117,7 @@ export function App() {
           await retryLogout(); return;
         }
         const value = await api<Session>('/session'); if (!alive) return; assertAuthEpoch(epoch);
-        try { await store.activate(value, () => assertAuthEpoch(epoch)); } catch (error) { assertAuthEpoch(epoch); localStorage.setItem('feedink-private-purge-pending', '1'); notify(`离线存储不可用：${message(error)}`, true); }
+        try { await store.activate(value, () => assertAuthEpoch(epoch)); } catch (error) { assertAuthEpoch(epoch); if (error instanceof PendingNotesOwnerError) throw error; localStorage.setItem('feedink-private-purge-pending', '1'); notify(`离线存储不可用：${message(error)}`, true); }
         if (!alive) return; assertAuthEpoch(epoch); commitSession(value, epoch); setOnline(true);
       } catch (error) {
         if (!alive || error instanceof ObsoleteSessionError) return;
@@ -109,19 +130,20 @@ export function App() {
     return () => { alive = false; };
   }, []);
   useEffect(() => {
-    const pop = () => setLocationKey(location.pathname + location.search);
+    const pop = () => { void flushActiveNotes().then(() => setLocationKey(location.pathname + location.search)).catch(error => { history.pushState({}, '', locationRef.current); notify(`未切换页面：${message(error)}`, true); }); };
     const offline = () => setOnline(false); const reconnect = () => { setOnline(navigator.onLine); if (!sessionRef.current) void retryLogout(); };
     const unauthorized = () => void invalidate();
     window.addEventListener('popstate', pop); window.addEventListener('offline', offline); window.addEventListener('online', reconnect); window.addEventListener('focus', reconnect); window.addEventListener('feedink:unauthorized', unauthorized);
     if ('BroadcastChannel' in window) {
       const channel = new BroadcastChannel('feedink-auth'); channelRef.current = channel;
-      channel.onmessage = event => { if (event.data?.type === 'logout' || event.data?.type === 'identity' || event.data?.type === 'coordination-reset') { const epoch = beginAuthTransition(); commitSession(null, epoch); navigate('/login', true); notify('账号在另一标签页已变更，请重新登录'); } };
+      channel.onmessage = event => { if (event.data?.type === 'logout' || event.data?.type === 'identity' || event.data?.type === 'coordination-reset') { const owner = sessionRef.current?.user.id; const retiring = freezeActiveNotes(owner); const epoch = beginAuthTransition(); commitSession(null, epoch); navigateNow('/login', true); notify('账号在另一标签页已变更；未同步笔记锁定，请登录原账号恢复'); void retiring.catch(() => notify('未同步笔记暂未写入，请保留此标签页并重新登录原账号', true)); } };
     }
     return () => { window.removeEventListener('popstate', pop); window.removeEventListener('offline', offline); window.removeEventListener('online', reconnect); window.removeEventListener('focus', reconnect); window.removeEventListener('feedink:unauthorized', unauthorized); channelRef.current?.close(); };
   }, []);
   const renderEpoch = authEpoch();
   const path = locationKey.split('?')[0];
-  return <>{starting ? <main className="startup"><Logo text /><p role="status">正在打开你的阅读空间…</p></main> : session ? <Workspace key={session.user.id} session={session} epoch={renderEpoch} store={store} online={online} setOnline={setOnline} locationKey={locationKey} navigate={navigate} notify={notify} task={task} updateSession={value => { assertAuthEpoch(renderEpoch); if (sessionRef.current?.user.id !== value.user.id) throw new ObsoleteSessionError(); const merged = mergeSessionMetadata(value, renderEpoch); commitSession(merged, renderEpoch); void store.updateIdentity(merged, () => assertAuthEpoch(renderEpoch)).catch(error => { if (!(error instanceof ObsoleteSessionError)) notify(message(error), true); }); }} logout={logout} invalidate={invalidate} /> : <Auth onLogin={login} path={path} navigate={navigate} />}
+  return <>{starting ? <main className="startup"><Logo text /><p role="status">正在打开你的阅读空间…</p></main> : session ? <Workspace key={session.user.id} session={session} epoch={renderEpoch} store={store} online={online} setOnline={setOnline} locationKey={locationKey} navigate={navigate} notify={notify} task={task} updateSession={value => { assertAuthEpoch(renderEpoch); if (sessionRef.current?.user.id !== value.user.id) throw new ObsoleteSessionError(); const merged = mergeSessionMetadata(value, renderEpoch); commitSession(merged, renderEpoch); void store.updateIdentity(merged, () => assertAuthEpoch(renderEpoch)).catch(error => { if (!(error instanceof ObsoleteSessionError)) notify(message(error), true); }); }} logout={logout} invalidate={invalidate} /> : <Auth onLogin={login} beforeLogin={async (email, demo) => { guardLockedAnnotationLogin(email, demo); await store.guardAnnotationLogin(email, demo); }} path={path} navigate={navigate} />}
+    {notesLogout && session && <Modal title="退出前处理未同步笔记" onClose={() => setNotesLogout(false)}><p>本机或其他标签页有未同步笔记。请选择同步、导出后取消退出，或明确放弃。直接关闭网站可能丢失尚未写入的草稿。</p><div className="button-row"><button onClick={() => void task(async () => { await flushActiveNotes(); await synchronizeAnnotations(store, session.user.id, authEpoch()); if ((await allAnnotationDrafts(store, session.user.id)).length) throw new Error('仍有冲突或未同步笔记，请处理后再退出'); await performLogout(); })} disabled={!online}>同步并退出</button><button onClick={() => void task(async () => { for (const row of await allAnnotationDrafts(store, session.user.id)) exportNotesJson(row.document); })}>导出未同步笔记</button><button className="danger" onClick={() => void task(() => performLogout(true))}>放弃未同步更改</button><button onClick={() => setNotesLogout(false)}>取消退出</button></div></Modal>}
     {notice && <Notification notice={notice} close={() => setNotice(null)} />}
   </>;
 }
@@ -223,6 +245,7 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
     if (syncLock.current || !navigator.onLine) return; syncLock.current = true; setSyncing(true);
     try {
       await synchronizeState(store, userId, epoch); assertAuthEpoch(epoch);
+      if ((await store.pendingAnnotations(userId)).length) await synchronizeAnnotations(store, userId, epoch); assertAuthEpoch(epoch);
       const remaining = (await store.pending(userId)).length; assertAuthEpoch(epoch);
       setOnline(true); setPending(remaining);
       if (remaining) setTimeout(() => { if (authEpoch() === epoch) void sync(); }, 100);
@@ -287,10 +310,11 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
       detail = newestArticleState(detail, articleRef.current);
       const detailSub = library.subscriptions.find(item => item.id === detail!.subscriptionId); const detailFolder = library.folders.find(item => item.id === detailSub?.folderId);
       const preferred = detailSub?.settings.articleMode || detailFolder?.settings.articleMode || (settings.autoFulltext ? 'fulltext' : 'feed');
+      await flushActiveNotes(); assertAuthEpoch(epoch); if (requestId !== articleRequest.current) return;
       opened = true; setMode(preferred); setDetail(detail); setLoadingArticle(false);
       if (!detail.read) await patchArticle(detail, { read: true });
       if (preferred === 'fulltext' && !detail.fulltextHtml && online) {
-        try { const full = await mutate<ArticleDetail>(`/articles/${detail.id}/fulltext`, 'POST'); if (requestId === articleRequest.current) { detail = { ...full, read: articleRef.current?.read ?? true, saved: articleRef.current?.saved ?? full.saved, tags: articleRef.current?.tags ?? full.tags, progress: articleRef.current?.progress ?? full.progress }; receiveDetail(detail); } if (full.fulltextError) notify(full.fulltextError, true); }
+        try { const full = await mutate<ArticleDetail>(`/articles/${detail.id}/fulltext`, 'POST'); if (requestId === articleRequest.current) { await flushActiveNotes(); assertAuthEpoch(epoch); if (requestId !== articleRequest.current) return; detail = { ...full, read: articleRef.current?.read ?? true, saved: articleRef.current?.saved ?? full.saved, tags: articleRef.current?.tags ?? full.tags, progress: articleRef.current?.progress ?? full.progress }; receiveDetail(detail); } if (full.fulltextError) notify(full.fulltextError, true); }
         catch (error) { notify(`全文提取失败，保留 RSS 正文：${message(error)}`, true); }
       }
       if (requestId === articleRequest.current) await cacheArticle(detail);

@@ -65,11 +65,15 @@ jobs:
       - name: Install browser for existing end-to-end tests
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: npx playwright install --with-deps chromium webkit
+      - name: Install PDF verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk
       - name: Browser and API end-to-end tests
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: |
           failed=0
-          for project in api desktop mobile tablet webkit workflows; do
+          for project in api desktop mobile tablet webkit workflows mcp annotations annotations-mobile; do
             if ! PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" node tests/run-project.mjs "$project"; then
               failed=1
             fi

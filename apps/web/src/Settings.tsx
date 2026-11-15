@@ -4,8 +4,9 @@ import { useApp } from './context';
 import { api, mutate } from './api';
 import { Field, Icon, Toggle } from './components';
 import { scopedCss } from './safety';
+import { McpTokens } from './McpTokens';
 
-type Tab = 'appearance' | 'content' | 'listing' | 'ebook' | 'account' | 'offline' | 'admin';
+type Tab = 'appearance' | 'content' | 'listing' | 'ebook' | 'account' | 'offline' | 'admin' | 'mcp';
 export function SettingsPanel({ path }: { path: string }) {
   const app = useApp();
   const initial: Tab = path.includes('article-contents') ? 'content' : path.includes('article-listing') ? 'listing' : path.endsWith('ebook') ? 'ebook' : 'appearance';
@@ -19,9 +20,9 @@ export function SettingsPanel({ path }: { path: string }) {
   const number = (key: keyof ReaderSettings, label: string, min: number, max: number, step = 1) => <Field label={label}><input type="number" required min={min} max={max} step={step} value={Number(draft[key])} onChange={event => set(key, Number(event.target.value) as never)} /></Field>;
   async function save(event: FormEvent) { event.preventDefault(); setBusy(true); await app.task(async () => { scopedCss(draft.customCss); await app.updateSettings(draft); app.notify('设置已保存并同步'); }); setBusy(false); }
   return <div className="settings-layout"><nav className="settings-nav" aria-label="设置分类">{([
-    ['appearance', '外观与排版'], ['content', '文章内容'], ['listing', '文章列表'], ['ebook', '电子书与邮箱'], ['offline', '离线与安装'], ['account', '我的账号'], ...(app.session.user.isAdmin ? [['admin', '用户管理']] : []),
+    ['appearance', '外观与排版'], ['content', '文章内容'], ['listing', '文章列表'], ['ebook', '电子书与邮箱'], ['offline', '离线与安装'], ['account', '我的账号'], ['mcp', 'MCP 令牌'], ...(app.session.user.isAdmin ? [['admin', '用户管理']] : []),
   ] as [Tab, string][]).map(([key, label]) => <button key={key} aria-current={key === tab ? 'page' : undefined} onClick={() => setTab(key)}>{label}</button>)}<button type="button" className="danger" onClick={() => void app.logout()}>退出登录</button></nav>
-    {tab === 'account' ? <AccountPanel /> : tab === 'admin' ? <AdminPanel /> : <form className="settings-form" onSubmit={save}>
+    {tab === 'mcp' ? <McpTokens /> : tab === 'account' ? <AccountPanel /> : tab === 'admin' ? <AdminPanel /> : <form className="settings-form" onSubmit={save}>
       {tab === 'appearance' && <><h3>让阅读更合心意</h3><Field label="主题"><select value={draft.theme} onChange={event => set('theme', event.target.value as ReaderSettings['theme'])}><option value="system">跟随系统</option><option value="light">明亮</option><option value="dark">深色</option><option value="sepia">护眼纸张</option><option value="eink">墨水屏（纯黑白）</option></select></Field>
         <Field label="强调色"><input type="color" value={draft.accent} onChange={event => set('accent', event.target.value)} /></Field>
         <Field label="正文字体"><select value={draft.fontFamily} onChange={event => set('fontFamily', event.target.value as ReaderSettings['fontFamily'])}><option value="system">系统字体</option><option value="sans">无衬线</option><option value="serif">衬线 / 宋体</option></select></Field>
@@ -39,7 +40,7 @@ export function SettingsPanel({ path }: { path: string }) {
         <div className="field-grid">{number('ebookIntervalDays', '发送间隔（天）', 1, 365)}{number('ebookHour', '发送时间（服务器小时）', 0, 23)}{number('ebookMinArticles', '最少文章数', 1, 100)}{number('ebookMaxArticles', '最多文章数', 1, 100)}</div>
         <Field label="电子书语言"><select value={draft.ebookLanguage} onChange={event => set('ebookLanguage', event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></Field>{toggle('ebookKeepLinks', '保留原文链接')}
         <button type="button" className="secondary" onClick={() => app.navigate('/export')}>生成、下载与查看发送状态</button></>}
-      {tab === 'offline' && <><h3>离线阅读与 PWA</h3>{toggle('offlineEnabled', '在此设备保存读过的文章和图片', '离线数据仅属于当前账号。关闭后清除正文与图片缓存，但保留尚未同步的状态队列。')}
+      {tab === 'offline' && <><h3>离线阅读与 PWA</h3>{toggle('offlineEnabled', '在此设备保存读过的文章和图片', '离线数据仅属于当前账号。关闭后清除正文与图片缓存，但保留笔记、草稿及尚未同步的状态队列。')}
         <p>本地占用：{storage || '浏览器未提供存储统计'}</p><p className="muted">离线只显示已缓存文章，不代表全部服务器存档。服务器持久存档不受浏览器缓存清理影响。离线已读、收藏、标签和进度将在相同账号联网后同步。</p>
         <div className="button-row"><button type="button" className="secondary" onClick={() => void app.task(async () => { await app.clearCache(); app.notify('此设备的正文与图片缓存已清除，服务器存档未删除'); })}>清理正文缓存</button>
         <button type="button" className="secondary" onClick={() => void app.task(async () => { if (!navigator.storage?.persist) throw new Error('当前浏览器不支持持久存储授权'); const granted = await navigator.storage.persist(); app.notify(granted ? '浏览器已授予持久存储' : '浏览器未授予持久存储，缓存可能被系统回收', !granted); })}>申请保留离线数据</button></div>

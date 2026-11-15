@@ -1,3 +1,6 @@
+/** FeedInk modifications (Apache-2.0): explicit reader-scoped browser lifecycle,
+ * owned document identity, injectable transport, clipped paint and pen-click suppression.
+ * Adapted from WebInk; see packages/ink/LICENSE and repository NOTICE. */
 import { AttachmentRejectedError, ContentAnchorResolver } from './anchors.ts';
 import { validFrame, visibleBounds, type RenderFrame } from './frames.ts';
 import { InkDocument } from './document.ts';
@@ -27,6 +30,13 @@ function observeHistory(history: History, before: () => void, after: () => void)
     if (history.pushState === push) history.pushState = originalPush;
     if (history.replaceState === replace) history.replaceState = originalReplace;
   };
+}
+
+export interface ReaderOverlayOptions {
+  readerRoot: HTMLElement;
+  documentUrl: string;
+  title: string;
+  transport: (message: HostMessage) => boolean;
 }
 
 export class WebInkOverlay implements WebInkAPI {
@@ -83,9 +93,9 @@ export class WebInkOverlay implements WebInkAPI {
   private lastDimensions: { width: number; height: number } | null = null;
   private browserCapture: { target: Element; id: number } | null = null;
 
-  constructor(private readonly win: Window) {
+  constructor(private readonly win: Window, private readonly options?: ReaderOverlayOptions) {
     this.document = this.emptyDocument();
-    this.anchors = new ContentAnchorResolver(win, this.anchorNotice, this.onResizeObserved);
+    this.anchors = new ContentAnchorResolver(win, this.anchorNotice, this.onResizeObserved, options?.readerRoot);
     this.gestures = new GestureController(this.document, this.anchors);
     this.root = win.document.createElement('div');
     this.root.dataset.webinkOverlay = '1';
@@ -152,13 +162,14 @@ export class WebInkOverlay implements WebInkAPI {
       this.listen(this.win, 'pagehide', this.onPageHide);
       this.listen(this.win, 'pageshow', this.scheduleDraw);
       this.listen(doc, 'visibilitychange', this.onVisibility);
-      this.listen(this.win, 'popstate', this.checkRoute);
-      this.listen(this.win, 'hashchange', this.checkRoute);
+      if (!this.options) this.listen(this.win, 'popstate', this.checkRoute);
+      if (!this.options) this.listen(this.win, 'hashchange', this.checkRoute);
       if (this.win.visualViewport) {
         this.listen(this.win.visualViewport, 'resize', this.onViewport);
         this.listen(this.win.visualViewport, 'scroll', this.onScroll);
       }
-      this.cleanup.push(observeHistory(this.win.history, () => this.flush(), this.checkRoute));
+      if (!this.options) this.cleanup.push(observeHistory(this.win.history, () => this.flush(), this.checkRoute));
+      this.listen(this.win, 'click', this.suppressPenClick, { capture: true });
       this.mutation = new MutationObserver(records => {
         if (this.destroyed) return;
         const pageChanged = this.pageMutated(records), detached = !this.root.isConnected;
@@ -166,11 +177,11 @@ export class WebInkOverlay implements WebInkAPI {
         if (pageChanged) { this.invalidateContent(); this.warnLayout('content'); }
         if (pageChanged || detached) this.scheduleDraw();
       });
-      this.mutation.observe(doc, { childList: true, subtree: true, characterData: true, attributes: true });
+      this.mutation.observe(this.options?.readerRoot ?? doc, { childList: true, subtree: true, characterData: true, attributes: true });
       if (typeof ResizeObserver !== 'undefined') this.resize = new ResizeObserver(this.onResizeObserved);
       this.attach();
       // Also covers sites that replace History methods after injection.
-      this.routeTimer = this.win.setInterval(this.checkRoute, 500);
+      if (!this.options) this.routeTimer = this.win.setInterval(this.checkRoute, 500);
       this.draw();
       this.post({ type: 'ready', url: this.document.url });
       this.postState();
@@ -233,9 +244,9 @@ export class WebInkOverlay implements WebInkAPI {
     if (this.destroyed) return !this.saveDirty;
     if (!this.restored) return true;
     try {
-      if (this.win.location.href === this.document.url) this.document.setTitle(this.win.document.title);
+      if (this.win.location.href === this.document.url) this.document.setTitle(this.options?.title ?? this.win.document.title);
       this.clearSaveTimer();
-      if (!this.win.WebInkHost && !this.saveDirty) return true;
+      if (!this.saveDirty) return true;
       this.saveDirty = !this.post({ type: 'save', url: this.document.url, page: this.document.snapshot() });
       if (this.saveDirty) this.report(new Error('[save-transport] Ink was not handed to storage. Keep this page open and retry saving. 墨迹尚未交给存储，请保留页面并重试。'));
       return !this.saveDirty;
@@ -248,7 +259,7 @@ export class WebInkOverlay implements WebInkAPI {
   snapshot(): Page {
     if (!this.destroyed) this.checkRoute();
     if (!this.restored) throw new Error('Ink restore is not complete');
-    this.document.setTitle(this.win.document.title);
+    this.document.setTitle(this.options?.title ?? this.win.document.title);
     return this.document.snapshot();
   }
   private exportStrokeVersions = new WeakMap<object, number>();
@@ -266,7 +277,7 @@ export class WebInkOverlay implements WebInkAPI {
     this.cancel();
     this.checkRoute();
     if (!this.restored) throw new Error('Ink restore is not complete');
-    this.document.setTitle(this.win.document.title);
+    this.document.setTitle(this.options?.title ?? this.win.document.title);
     const inventory = includeInventory ? this.document.snapshot() : undefined;
     const page: Page = { ...this.document.metadata(), strokes: [] };
     this.anchors.invalidate();
@@ -598,13 +609,13 @@ export class WebInkOverlay implements WebInkAPI {
     this.canvas.width = this.canvas.height = this.activeCanvas.width = this.activeCanvas.height = 1;
     this.renderer.clear();
     this.anchors.destroy();
-    if (this.win.WebInk === this) delete this.win.WebInk;
+    if (!this.options && this.win.WebInk === this) delete this.win.WebInk;
   }
 
   private emptyDocument(): InkDocument {
-    return new InkDocument(pageUrl(this.win.location.href), this.win.document.title, this.layoutWidth());
+    return new InkDocument(pageUrl(this.options?.documentUrl ?? this.win.location.href), this.options?.title ?? this.win.document.title, this.layoutWidth());
   }
-  private layoutWidth(): number { return Math.max(1, this.win.document.documentElement?.clientWidth ?? this.win.innerWidth); }
+  private layoutWidth(): number { return Math.max(1, this.options?.readerRoot.clientWidth ?? this.win.document.documentElement?.clientWidth ?? this.win.innerWidth); }
   private canDraw(): boolean { return this.booted && this.restored && this.configuration.enabled && !this.exporting && !this.destroyed; }
   private handlePointer(type: 'down' | 'move' | 'up', id: number, point: Point, eraser: boolean, beginResolution = true): void {
     if (beginResolution) this.beginResolution();
@@ -620,12 +631,22 @@ export class WebInkOverlay implements WebInkAPI {
     if ((type === 'down' && erasedCount > 0) || (this.gestures.erasedIds?.size ?? 0) !== erasedCount) this.scheduleDraw();
     else if (this.nativeEpoch === null || this.nativeRenderer === 'browser') this.scheduleActiveDraw();
   }
+  private lastPen: { target: EventTarget | null; at: number } | null = null;
+  private suppressPenClick = (event: Event): void => {
+    if (!this.options || !(event.target instanceof Node) || !this.options.readerRoot.contains(event.target)) return;
+    if ((event as PointerEvent).pointerType === 'pen' && this.canDraw() ||
+      this.lastPen && Date.now() - this.lastPen.at < 800 && this.lastPen.target === event.target) {
+      event.preventDefault(); event.stopImmediatePropagation();
+    }
+  };
   private browserPointer = (event: PointerEvent): void => {
     if (this.destroyed || this.nativeInput || event.pointerType !== 'pen') return;
     this.checkRoute();
     if (!this.canDraw()) return;
+    if (event.type === 'pointerdown' && this.options && (!(event.target instanceof Element) || !this.options.readerRoot.contains(event.target) || event.target.closest('input,textarea,select,button,form,[contenteditable],dialog'))) return;
     if (event.type === 'pointerdown' && event.button !== 0 && event.button !== 5) return;
     if (event.type !== 'pointerdown' && this.gestures.pointerId !== event.pointerId) return;
+    this.lastPen = { target: event.target, at: Date.now() };
     if (event.cancelable) event.preventDefault();
     event.stopImmediatePropagation();
     if (event.type === 'pointercancel' || event.type === 'lostpointercapture') { this.cancel(); return; }
@@ -687,15 +708,16 @@ export class WebInkOverlay implements WebInkAPI {
   private postState(): void { this.post({ type: 'state', undo: this.document.canUndo, redo: this.document.canRedo }); }
   private post(message: HostMessage): boolean {
     try {
+      if (this.options) return this.options.transport(message);
       if (!this.win.WebInkHost) return false;
       this.win.WebInkHost.postMessage(JSON.stringify(message)); return true;
     }
-    catch (error) { console.error('[WebInk] Host message failed; committed ink is still available via snapshot()/flush()', error); return false; }
+    catch { return false; }
   }
   private report(error: unknown): void {
     if (error instanceof AttachmentRejectedError) { this.anchorNotice('attachment-rejected'); return; }
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[WebInk] ${message}`);
+    if (!this.options) console.warn(`[WebInk] ${message}`);
     this.post({ type: 'error', message: message.slice(0, 2048) });
   }
   private guard(action: () => void, cancelOnError = false): void {
@@ -704,7 +726,7 @@ export class WebInkOverlay implements WebInkAPI {
     catch (error) { if (cancelOnError) this.cancel(); this.report(error); }
   }
   private checkRoute = (): void => {
-    if (this.destroyed || this.win.location.href === this.document.url) return;
+    if (this.options || this.destroyed || this.win.location.href === this.document.url) return;
     this.guard(() => {
       const next = this.emptyDocument();
       // Native accepts a retiring save only for its active ready URL, before ready(next).
@@ -950,6 +972,7 @@ export class WebInkOverlay implements WebInkAPI {
   private draw(): void {
     this.checkRoute();
     this.attach();
+    if (this.options) this.root.style.setProperty('filter', this.win.document.documentElement.dataset.theme === 'eink' ? 'grayscale(1) contrast(100)' : 'none', 'important');
     const viewport = readViewport(this.win);
     const size = canvasSize(viewport.width, viewport.height, (this.win.devicePixelRatio || 1) * viewport.scale);
     for (const [property, value] of Object.entries({ left: viewport.offsetLeft, top: viewport.offsetTop,
@@ -969,9 +992,14 @@ export class WebInkOverlay implements WebInkAPI {
     }
     this.beginResolution();
     const prepare = (context: CanvasRenderingContext2D): void => {
+      context.restore(); context.save();
       context.setTransform(1, 0, 0, 1, 0, 0);
       context.clearRect(0, 0, size.width, size.height);
       context.setTransform(size.width / viewport.width, 0, 0, size.height / viewport.height, 0, 0);
+      if (this.options) {
+        const box = this.options.readerRoot.getBoundingClientRect();
+        context.beginPath(); context.rect(box.left - viewport.offsetLeft, box.top - viewport.offsetTop, box.width, box.height); context.clip();
+      }
     };
     if (this.committedDirty) {
       const retained = this.nativePresentation && this.nativeRenderer === 'native';

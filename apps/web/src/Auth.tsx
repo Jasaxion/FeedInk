@@ -5,15 +5,17 @@ import { assertAuthEpoch, beginAuthTransition, withAuthNetworkLock } from './aut
 import { checkAuthOperation, resetAuthCoordination } from './authCoordinator';
 import { Field, Icon, Logo } from './components';
 
-export function Auth({ onLogin, path, navigate }: { onLogin: (session: Session) => Promise<void>; path: string; navigate: (path: string) => void }) {
+export function Auth({ onLogin, beforeLogin, path, navigate }: { beforeLogin?: (email: string, demo: boolean) => Promise<void>; onLogin: (session: Session) => Promise<void>; path: string; navigate: (path: string) => void }) {
   const register = path === '/register';
   const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [name, setName] = useState('');
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   async function submit(event?: FormEvent, demo = false) {
     event?.preventDefault(); setError(''); setBusy(true);
-    const epoch = beginAuthTransition();
+
     try {
       await withAuthNetworkLock(async () => {
+        await beforeLogin?.(email, demo);
+        const epoch = beginAuthTransition();
         assertAuthEpoch(epoch);
         const session = await mutate<Session>(demo ? '/auth/demo' : register ? '/auth/register' : '/auth/login', 'POST', demo ? undefined : { email, password, ...(register ? { name } : {}) });
         assertAuthEpoch(epoch);

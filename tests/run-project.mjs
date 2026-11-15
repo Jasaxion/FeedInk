@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { createOfflineProxy } from './fixtures/offline-proxy.mjs';
 
 const project = process.argv[2];
-if (!['api', 'desktop', 'mobile', 'tablet', 'webkit', 'workflows'].includes(project)) throw new Error('Choose a configured test project');
+if (!['api', 'desktop', 'mobile', 'tablet', 'webkit', 'workflows', 'annotations', 'annotations-mobile', 'mcp'].includes(project)) throw new Error('Choose a configured test project');
 if (!process.env.TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL must identify a disposable test database; production DATABASE_URL is never reused implicitly');
 await access('apps/api/dist/server.js');
 const directory = await mkdtemp(join(tmpdir(), 'feedink-test-'));

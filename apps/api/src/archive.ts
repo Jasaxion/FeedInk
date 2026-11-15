@@ -12,6 +12,8 @@ import {
   ApiFailure,
 } from "./core.js";
 import { Articles } from "./articles.js";
+import { Annotations, annotationDocument, notesBackup } from './annotations.js';
+import { archivedAnnotationSchema, validateArchivedAnnotations, restoreArchivedAnnotations } from './annotation-archive.js';
 import {
   ARTICLE_HTML_MAX_LENGTH,
   cleanHtml,
@@ -40,7 +42,7 @@ const externalUrl = z
 const manifestSchema = z
   .object({
     format: z.literal("feedink-archive"),
-    version: z.union([z.literal(1), z.literal(2)]),
+    version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     exportedAt: date,
     folders: z
       .array(
@@ -108,6 +110,7 @@ const manifestSchema = z
               }),
             )
             .max(10),
+          annotations: z.array(archivedAnnotationSchema).max(1000).optional(),
           images: z
             .array(
               z.object({
@@ -151,7 +154,8 @@ export class Archives {
         UNION ALL SELECT octet_length(to_jsonb(s)::text)+128 FROM subscriptions s WHERE user_id=${userId}
         UNION ALL SELECT octet_length(to_jsonb(f)::text)+128 FROM folders f WHERE user_id=${userId}
         UNION ALL SELECT octet_length(to_jsonb(t)::text)+128 FROM tags t WHERE user_id=${userId}
-        UNION ALL SELECT 64 FROM article_tags at JOIN articles a ON a.id=at.article_id WHERE a.user_id=${userId}) sizes`;
+        UNION ALL SELECT 64 FROM article_tags at JOIN articles a ON a.id=at.article_id WHERE a.user_id=${userId}
+        UNION ALL SELECT octet_length((to_jsonb(n)-'search_text')::text)+512 FROM annotations n WHERE n.user_id=${userId}) sizes`;
         if (
           image_count + 1 > 6000 ||
           Number(article_bytes) +
@@ -199,8 +203,13 @@ export class Archives {
                 data: await this.store.get(image.file_key),
               });
             }
+          const noteRows = await db`SELECT * FROM annotations WHERE article_id=${row.id} AND user_id=${userId} ORDER BY mode,content_hash LIMIT 1001`;
+          if (noteRows.length > 1000) throw new ApiFailure(413, 'ARCHIVE_LIMIT', 'Article has too many annotated snapshots; use an operator backup');
+          const annotations = noteRows.map(n => ({ backup: notesBackup(annotationDocument(n)), contentHtml: n.content_html, revision: n.revision, updatedAt: iso(n.updated_at) }));
+          validateArchivedAnnotations(annotations, row.url, new Map(images.map(i => [i.id, i.original_url])));
           const record = {
             id: row.id,
+            annotations,
             feedId: row.feed_id,
             guid: row.guid,
             feedTitle: boundedText(row.feed_title, 1000),
@@ -258,7 +267,7 @@ export class Archives {
           );
         const manifest = {
           format: "feedink-archive",
-          version: 2,
+          version: 3,
           exportedAt: new Date().toISOString(),
           articles: articleRecords,
           feeds: feeds.map((f) => ({
@@ -310,7 +319,7 @@ export class Archives {
     const files = await readZip(buffer);
     let parsed: unknown;
     try {
-      parsed = JSON.parse(files.get("manifest.json")?.toString("utf8") || "");
+      parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(files.get('manifest.json') || Buffer.alloc(0)));
     } catch {
       throw new ApiFailure(
         422,
@@ -372,6 +381,8 @@ export class Archives {
         );
     const cached = new Map<string, { key: string; type: string }>();
     for (const article of manifest.articles) {
+      if (manifest.version !== 3 && article.annotations?.length) throw new ApiFailure(422, 'INVALID_ARCHIVE', 'Notes require archive version 3');
+      validateArchivedAnnotations(article.annotations ?? [], article.url, new Map(article.images.map(i => [i.id, i.originalUrl])));
       if (
         new Set(article.images.map((i) => i.originalUrl)).size !==
         article.images.length
@@ -448,14 +459,17 @@ export class Archives {
         for (const a of manifest.articles) {
           const feedId = a.feedId ? feeds.get(a.feedId)! : null;
           const duplicate = feedId
-            ? await tx`SELECT id FROM articles WHERE user_id=${userId} AND feed_id=${feedId} AND guid=${a.guid}`
-            : await tx`SELECT id FROM articles WHERE user_id=${userId} AND feed_id IS NULL AND url=${a.url}`;
-          if (duplicate.length) {
+            ? await tx`SELECT id,url FROM articles WHERE user_id=${userId} AND feed_id=${feedId} AND guid=${a.guid} FOR UPDATE`
+            : await tx`SELECT id,url FROM articles WHERE user_id=${userId} AND feed_id IS NULL AND url=${a.url} FOR UPDATE`;
+          if (duplicate.length && !a.annotations?.length) {
             skipped++;
             continue;
           }
-          const articleId = id(),
-            images = new Map(a.images.map((i) => [i.id, id()]));
+          if (duplicate.length && duplicate[0].url !== a.url) throw new ApiFailure(409, 'ANNOTATION_CONTEXT', 'Duplicate article source differs from archived notes');
+          const articleId = duplicate[0]?.id || id();
+          const existingImages = duplicate.length ? await tx`SELECT id,original_url FROM images WHERE article_id=${articleId}` : [];
+          if (new Set([...existingImages.map(i => i.original_url), ...a.images.map(i => i.originalUrl)]).size > 100) throw new ApiFailure(413, 'ARCHIVE_LIMIT', 'Restoring annotated snapshots would exceed the article image limit');
+          const images = new Map(a.images.map(i => [i.id, existingImages.find(existing => existing.original_url === i.originalUrl)?.id || id()]));
           const rewrite = (input: string) => {
             const $ = cheerio.load(input, {}, false);
             $("img").each((_, el) => {
@@ -471,8 +485,9 @@ export class Archives {
           const html = rewrite(a.contentHtml),
             fulltext = a.fulltextHtml ? rewrite(a.fulltextHtml) : null,
             body = htmlText(fulltext || html);
-          await tx`INSERT INTO articles(id,user_id,feed_id,guid,feed_title,title,url,author,published_at,archived_at,fetched_at,content_html,fulltext_html,fulltext_hash,content_text,content_hash,fulltext_error,summary,word_count,enclosures,read,saved,progress,fulltext_fetched_at,restored_at) VALUES(${articleId},${userId},${feedId},${a.guid},${a.feedTitle},${a.title},${a.url},${a.author},${a.publishedAt},${a.archivedAt},${a.fetchedAt},${html},${fulltext},${fulltext ? hash(fulltext) : null},${body},${hash(html)},${a.fulltextError},${body.slice(0, 400)},${countWords(body)},${tx.json(a.enclosures)},${a.read},${a.saved},${a.progress},${a.fulltextFetchedAt ?? null},now())`;
+          if (!duplicate.length) await tx`INSERT INTO articles(id,user_id,feed_id,guid,feed_title,title,url,author,published_at,archived_at,fetched_at,content_html,fulltext_html,fulltext_hash,content_text,content_hash,fulltext_error,summary,word_count,enclosures,read,saved,progress,fulltext_fetched_at,restored_at) VALUES(${articleId},${userId},${feedId},${a.guid},${a.feedTitle},${a.title},${a.url},${a.author},${a.publishedAt},${a.archivedAt},${a.fetchedAt},${html},${fulltext},${fulltext ? hash(fulltext) : null},${body},${hash(html)},${a.fulltextError},${body.slice(0, 400)},${countWords(body)},${tx.json(a.enclosures)},${a.read},${a.saved},${a.progress},${a.fulltextFetchedAt ?? null},now())`;
           for (const image of a.images) {
+            if (existingImages.some(existing => existing.original_url === image.originalUrl)) continue;
             let file = cached.get(image.id);
             if (image.status === "cached" && !file) {
               const { bytes, type } = await raster(files.get(image.path!)!);
@@ -481,9 +496,13 @@ export class Archives {
             }
             await tx`INSERT INTO images(id,article_id,original_url,status,content_type,file_key,content_hash,captured_at,last_error,restored_at) VALUES(${images.get(image.id)!},${articleId},${image.originalUrl},${file ? "cached" : image.status},${file?.type || null},${file?.key || null},${file?.key || null},${image.capturedAt ?? null},${image.lastError ?? null},now())`;
           }
-          for (const tagId of new Set(a.tagIds))
-            await tx`INSERT INTO article_tags(article_id,tag_id) VALUES(${articleId},${tags.get(tagId)!})`;
-          imported++;
+          await restoreArchivedAnnotations(tx, new Annotations(this.db), userId, articleId, a.url, a.annotations ?? [], rewrite);
+          if (duplicate.length) skipped++;
+          else {
+            for (const tagId of new Set(a.tagIds))
+              await tx`INSERT INTO article_tags(article_id,tag_id) VALUES(${articleId},${tags.get(tagId)!})`;
+            imported++;
+          }
         }
         return { imported, skipped, errors: [] as string[] };
       }),

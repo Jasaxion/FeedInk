@@ -1,44 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ArticleDetail, ArticleMode } from '@feedink/shared';
 import { useApp } from './context';
 import { download, downloadCachedImage, mutate } from './api';
 import { AssetImage, Empty, Field, Icon, IconButton, Modal, Toggle, SourceIcon } from './components';
 import { formatDate, ownedAssetUrl, progressAt, safeExternalUrl } from './logic';
-import { sanitizeArticle } from './safety';
+import { AnnotatedArticle } from './Annotations';
+import { flushActiveNotes } from './annotationSync';
 
 export function Reader({ article, mode, setMode, back, move, more, onDetail, scrollRef }: {
   article: ArticleDetail | null; mode: ArticleMode; setMode: (mode: ArticleMode) => void; back: () => void; move: (direction: number) => void; more: () => void; onDetail: (article: ArticleDetail) => void; scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const app = useApp(); const settings = app.session.settings;
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const changeMode = (value: ArticleMode) => { void app.task(async () => { await flushActiveNotes(); setMode(value); }); };
   const latestArticleId = useRef(article?.id); latestArticleId.current = article?.id;
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touch = useRef<{ x: number; y: number } | null>(null);
   const [image, setImage] = useState<string | null>(null); const [zoom, setZoom] = useState(1); const [toolbar, setToolbar] = useState(!settings.hideToolbar); const [speech, setSpeech] = useState(false); const [fetching, setFetching] = useState(false);
-  const html = useMemo(() => sanitizeArticle(article ? mode === 'fulltext' && article.fulltextHtml ? article.fulltextHtml : article.contentHtml : '', settings.lazyImages), [article?.contentHtml, article?.fulltextHtml, mode, settings.lazyImages]);
   useEffect(() => setToolbar(!settings.hideToolbar), [settings.hideToolbar]);
   useEffect(() => setZoom(1), [image]);
   useEffect(() => {
     const id = requestAnimationFrame(() => { const element = scrollRef.current; if (element && article) element.scrollTop = article.progress * Math.max(0, element.scrollHeight - element.clientHeight); });
     return () => { cancelAnimationFrame(id); if (progressTimer.current) clearTimeout(progressTimer.current); };
   }, [article?.id, mode]);
-  useEffect(() => {
-    let alive = true;
-    for (const img of bodyRef.current?.querySelectorAll<HTMLImageElement>('img[data-asset]') || []) {
-      img.loading = settings.lazyImages ? 'lazy' : 'eager'; img.tabIndex = 0; img.setAttribute('role', 'button'); img.setAttribute('aria-label', `放大图片：${img.alt || '文章图片'}`);
-      img.onclick = () => setImage(img.dataset.asset!); img.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setImage(img.dataset.asset!); } };
-      const originalTitle = img.title;
-      img.onerror = () => { img.classList.add('failed-image'); img.title = '图片不可用；可在文末查看状态并重试'; };
-      img.onload = () => { img.classList.remove('failed-image'); img.title = originalTitle; };
-      void app.store.imageSource(app.session.user.id, img.dataset.asset!).then(url => { if (url && alive) { img.loading = 'eager'; img.src = url; } }).catch(() => {});
-    }
-    return () => { alive = false; };
-  }, [html, app.session.user.id, settings.lazyImages]);
   async function extract() {
     if (!article) return; setFetching(true);
     await app.task(async () => {
       const detail = await mutate<ArticleDetail>(`/articles/${article.id}/fulltext`, 'POST');
-      if (latestArticleId.current === detail.id) { onDetail(detail); setMode('fulltext'); }
+      if (latestArticleId.current === detail.id) { await flushActiveNotes(); if (latestArticleId.current === detail.id) { onDetail(detail); setMode('fulltext'); } }
       await app.cacheArticle(detail);
       if (detail.fulltextError) app.notify(`全文提取未完成：${detail.fulltextError}`, true); else app.notify('全文与可用图片已持久归档');
     }); setFetching(false);
@@ -63,11 +51,11 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
         <article className="article-document"><div className="article-source"><SourceIcon subscriptionId={article.subscriptionId} /><span>{article.feedTitle || '网页存档'}</span></div>
           <h1><a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">{article.title || '无标题文章'}</a></h1>
           <div className="article-meta"><time dateTime={article.publishedAt}>{formatDate(article.publishedAt)}</time>{article.author && <span>· {article.author}</span>}<span>· 约 {Math.max(1, Math.ceil(article.wordCount / 400))} 分钟</span></div>
-          <div className="article-mode"><select aria-label="正文模式" value={mode} onChange={event => { const value = event.target.value as ArticleMode; setMode(value); if (value === 'fulltext' && !article.fulltextHtml && app.online) void extract(); }}><option value="feed">RSS 正文</option><option value="fulltext">归档全文</option><option value="webpage">原网页</option></select><button className="text-button" onClick={() => setSpeech(value => !value)}><Icon name="audio" size={16} />{speech ? '收起朗读' : '朗读'}</button></div>
+          <div className="article-mode"><select aria-label="正文模式" value={mode} onChange={event => { const value = event.target.value as ArticleMode; changeMode(value); if (value === 'fulltext' && !article.fulltextHtml && app.online) void extract(); }}><option value="feed">RSS 正文</option><option value="fulltext">归档全文</option><option value="webpage">原网页</option></select><button className="text-button" onClick={() => setSpeech(value => !value)}><Icon name="audio" size={16} />{speech ? '收起朗读' : '朗读'}</button></div>
           {speech && <SpeechPanel article={article} next={() => move(1)} />}
-          {mode === 'webpage' ? <section className="original-page"><div className="original-page-actions"><a className="secondary" href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">在新标签页打开原文</a><button className="text-button" onClick={() => setMode('feed')}>返回归档正文</button></div><p className="muted small">原网页在受限沙箱中显示。网站可能拒绝嵌入或需要脚本，此时请使用上方外部打开链接。页面不能导航本应用或读取账号。</p>{app.online && safeExternalUrl(article.url) ? <iframe key={article.url} className="original-frame" title={`原网页：${article.title}`} src={safeExternalUrl(article.url)!} sandbox="" referrerPolicy="no-referrer" /> : <p role="status">离线时原网页不可用，请返回已归档正文。</p>}</section> : <>
+          {mode === 'webpage' ? <section className="original-page"><div className="original-page-actions"><a className="secondary" href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">在新标签页打开原文</a><button className="text-button" onClick={() => changeMode('feed')}>返回归档正文</button></div><p className="muted small">原网页在受限沙箱中显示。网站可能拒绝嵌入或需要脚本，此时请使用上方外部打开链接。页面不能导航本应用或读取账号。</p>{app.online && safeExternalUrl(article.url) ? <iframe key={article.url} className="original-frame" title={`原网页：${article.title}`} src={safeExternalUrl(article.url)!} sandbox="" referrerPolicy="no-referrer" /> : <p role="status">离线时原网页不可用，请返回已归档正文。</p>}</section> : <>
             {mode === 'fulltext' && !article.fulltextHtml && <p className="notice">{article.fulltextError || (app.online ? '尚未取得全文，当前显示 RSS 正文。可点击上方“提取全文”重试。' : '此文章的全文尚未缓存，当前显示已缓存的 RSS 正文。')}</p>}
-            <div className="article-content" data-testid="reader-content" ref={bodyRef} dangerouslySetInnerHTML={{ __html: html }} onClick={event => { if (settings.tapToPage && !window.getSelection()?.toString() && !(event.target as HTMLElement).closest('a,img,button,summary,pre,code')) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />
+            <AnnotatedArticle key={`${article.id}:${mode}:${mode === 'fulltext' ? article.fulltextHtml : article.contentHtml}`} article={article} mode={mode === 'fulltext' && article.fulltextHtml ? 'fulltext' : 'feed'} onImage={setImage} onTap={() => { if (settings.tapToPage) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />
           </>}
           {article.enclosures.length > 0 && <section className="enclosures"><h3>播客与附件</h3>{article.enclosures.map((enclosure, index) => { const url = safeExternalUrl(enclosure.url); if (!url) return null; return <div key={index}>{enclosure.type.startsWith('audio/') ? <audio controls preload="none" src={url} aria-label={`播客音频 ${index + 1}`} /> : enclosure.type.startsWith('video/') ? <video controls preload="none" src={url} aria-label={`视频 ${index + 1}`} /> : <a href={url} target="_blank" rel="noopener noreferrer">打开附件 {index + 1} ({enclosure.type})</a>}<small className="muted">媒体由原站提供，未加入离线图片缓存。浏览器支持的格式才能播放。</small></div>; })}</section>}
           <details className="archive-details"><summary><Icon name="archive" size={16} />存档信息 · {article.images.filter(item => item.status === 'cached').length}/{article.images.length} 张图片已在服务器保存</summary><p>正文抓取：{formatDate(article.fetchedAt)}</p><p>首次归档：{formatDate(article.archivedAt)}</p><p className="hash">SHA-256: {article.contentHash}</p>{article.images.map(item => <div className="image-status" key={item.id}><span>{item.status === 'cached' ? '已归档' : item.status === 'failed' ? '抓取失败' : '等待抓取'}</span><span className="truncate">{item.originalUrl}</span>{item.status === 'cached' && ownedAssetUrl(item.url) && <button className="text-button" onClick={() => setImage(item.url)}>查看</button>}</div>)}<button className="secondary" disabled={!app.online} onClick={() => void app.task(async () => { const detail = await mutate<ArticleDetail>(`/articles/${article.id}/retry-images`, 'POST'); onDetail(detail); await app.cacheArticle(detail); const failed = detail.images.filter(item => item.status !== 'cached').length; app.notify(failed ? `重试完成，仍有 ${failed} 张图片未归档` : '所有图片已归档', failed > 0); })}>重新抓取图片</button><p className="muted small">服务器归档与此设备离线缓存不同。源站限制可能导致部分图片始终无法抓取。</p></details>

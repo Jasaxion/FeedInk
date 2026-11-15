@@ -7,7 +7,7 @@ export class ObsoleteSessionError extends Error { constructor() { super('账号�
 export function authEpoch() { return epoch; }
 export function assertAuthEpoch(expected: number) { if (epoch !== expected) throw new ObsoleteSessionError(); }
 /** Called synchronously before login, logout, revocation and cross-tab identity transitions. */
-export function beginAuthTransition() { session = null; return ++epoch; }
+export function beginAuthTransition() { session = null; if (typeof window !== 'undefined') window.dispatchEvent(new Event('feedink:identity-lock')); return ++epoch; }
 export function setApiSession(value: Session | null, expected = epoch) {
   assertAuthEpoch(expected);
   if (session?.user.id !== value?.user.id) epoch++;

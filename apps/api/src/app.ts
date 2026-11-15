@@ -37,6 +37,9 @@ import {
   statePatch,
 } from "./validation.js";
 import { ZIP_LIMIT } from "./zip.js";
+import { Annotations } from "./annotations.js";
+import { installAnnotationRoutes } from "./annotation-routes.js";
+import { installMcp } from "./mcp.js";
 
 export async function createApp(config: Config, providedDb?: DB) {
   const db = providedDb || connect(config);
@@ -49,11 +52,14 @@ export async function createApp(config: Config, providedDb?: DB) {
     feeds = new Feeds(db, fetcher, content),
     articles = new Articles(db),
     archives = new Archives(db, store, articles),
+    annotations = new Annotations(db),
     ebooks = new Ebooks(db, store);
   const app = Fastify({
     logger:
       process.env.NODE_ENV !== "test"
         ? {
+            // URLs may contain rejected credentials; never serialize raw paths/queries or bodies.
+            serializers: { req: (request: { method: string }) => ({ method: request.method }) },
             redact: [
               "req.headers.cookie",
               "req.headers.authorization",
@@ -73,7 +79,7 @@ export async function createApp(config: Config, providedDb?: DB) {
     max: 300,
     timeWindow: "1 minute",
     cache: 10000,
-    allowList: (request) => !request.url.startsWith("/api/"),
+    allowList: (request) => !request.url.startsWith("/api/") && request.url.split('?')[0] !== '/mcp',
     errorResponseBuilder: () =>
       new ApiFailure(429, "RATE_LIMIT", "Too many requests; retry later"),
   });
@@ -146,6 +152,8 @@ export async function createApp(config: Config, providedDb?: DB) {
   new Auth(db, config).install(app, (user) =>
     seedDemo(db, store, config, user),
   );
+  installAnnotationRoutes(app, annotations);
+  installMcp(app, config, db, store, annotations);
   const param = (request: { params: unknown }) =>
     uuid.parse((request.params as any).id);
   const user = (request: { account: Row | null }) =>
@@ -617,5 +625,5 @@ export async function createApp(config: Config, providedDb?: DB) {
     await working;
     if (!providedDb) await db.end({ timeout: 5 });
   });
-  return { app, db, store, feeds, articles, content, archives, ebooks, tick };
+  return { app, db, store, feeds, articles, content, archives, annotations, ebooks, tick };
 }

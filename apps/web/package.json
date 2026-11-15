@@ -13,10 +13,12 @@
     "test:shell": "node test/shell-update.mjs",
     "test:images": "node test/portable-images.mjs",
     "test:offline-origin": "node test/offline-origin.mjs",
-    "test:residual": "node test/residual-browser.mjs"
+    "test:residual": "node test/residual-browser.mjs",
+    "test:annotations": "node test/annotations-browser.mjs"
   },
   "dependencies": {
     "@feedink/shared": "0.1.0",
+    "@feedink/ink": "0.1.0",
     "dompurify": "^3.3.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",

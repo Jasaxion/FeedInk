@@ -18,6 +18,8 @@
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/static": "^10.1.11",
     "@feedink/shared": "0.1.0",
+    "@feedink/ink": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@mozilla/readability": "^0.6.0",
     "cheerio": "^1.1.2",
     "fastify": "^5.6.2",

@@ -1,3 +1,5 @@
+import type { AnnotationContext, AnnotationDocument } from '@feedink/shared';
+import { annotationKey, type StoredAnnotations } from './annotationData';
 import type { ArticleDetail, ArticleQuery, ArticleStatePatch, ArticleSummary, ReaderSettings, Session, Subscription, Folder, Tag, User } from '@feedink/shared';
 import { cachedImageSource, rasterImageSource } from './imageData';
 import { matchesArticle, ownedImageUrl, sortArticles, RASTER_IMAGE_MIME as rasterType, MAX_IMAGE_BYTES as maxImageBytes } from './logic';
@@ -15,6 +17,8 @@ interface Lease { token: string; expires: number; mode?: 'web' | 'fallback' }
 interface Row<T = unknown> { key: string; userId: string; kind: string; value: T }
 const request = <T>(req: IDBRequest<T>) => new Promise<T>((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
 const done = (tx: IDBTransaction) => new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = tx.onerror = () => reject(tx.error || new Error('离线存储事务失败')); });
+export class PendingNotesOwnerError extends Error { constructor() { super('此设备有另一账号未同步的笔记。请先重新登录原账号恢复、导出或明确放弃，再切换账号。'); } }
+export class LocalAnnotationConflict extends Error { constructor() { super('另一标签页已修改笔记。本页草稿仍保留，请导出后重新载入。'); } }
 export class CacheInvalidatedError extends Error { constructor() { super('缓存策略已变更，已取消旧缓存任务'); } }
 
 /** Owner, cache-policy and lease checks run in the same transaction as their writes. */
@@ -39,23 +43,50 @@ export class OfflineStore {
       const result = await work(store); await finished; return result;
     } catch (error) { try { tx.abort(); } catch { /* already complete */ } throw error; }
   }
+  private async noteRows(store: IDBObjectStore): Promise<Row[]> {
+    const keys = await request(store.getAllKeys()); const rows: Row[] = [];
+    for (const key of keys) if (typeof key === 'string' && /:(annotations|annotation-recovery|annotation-recovery-owner):/.test(key)) {
+      const row = await request(store.get(key)) as Row | undefined; if (row) rows.push(row);
+    }
+    return rows;
+  }
   private row<T>(userId: string, kind: string, id: string, value: T): Row<T> { return { key: `${userId}:${kind}:${id}`, userId, kind, value }; }
   async identity(): Promise<OfflineIdentity | undefined> { return this.access(null, 'readonly', async store => (await request(store.get('identity')) as Row<OfflineIdentity> | undefined)?.value); }
   async activate(session: Pick<Session, 'user' | 'settings'>, guard = () => {}): Promise<void> {
     return this.access(null, 'readwrite', async store => {
       guard(); const current = await request(store.get('identity')) as Row<OfflineIdentity> | undefined; guard();
-      if (current?.value.user.id !== session.user.id) await request(store.clear());
+      const all = await this.noteRows(store);
+      if (all.some(row => (row.kind === 'annotation-recovery' || row.kind === 'annotations' && (row.value as StoredAnnotations).pending) && row.userId !== session.user.id)) throw new PendingNotesOwnerError();
+      if (current?.value.user.id !== session.user.id) {
+        await request(store.clear());
+      }
+      for (const row of all) if (row.kind === 'annotation-recovery' && row.userId === session.user.id) {
+        const value = row.value as StoredAnnotations;
+        await request(store.put(this.row(row.userId, 'annotations', annotationKey(value.document.context), value)));
+        await request(store.delete(row.key));
+      }
+      for (const row of all) if (row.kind === 'annotation-recovery-owner' && row.userId === session.user.id) await request(store.delete(row.key));
       guard(); await request(store.put({ key: 'identity', userId: session.user.id, kind: 'identity', value: { user: session.user, settings: session.settings } }));
     });
   }
   async updateIdentity(session: Pick<Session, 'user' | 'settings'>, guard = () => {}): Promise<void> {
     return this.access(session.user.id, 'readwrite', async store => { guard(); await request(store.put({ key: 'identity', userId: session.user.id, kind: 'identity', value: { user: session.user, settings: session.settings } })); });
   }
-  async clear(guard = () => {}, owner?: string): Promise<ClearOutcome> {
+  async clear(guard = () => {}, owner?: string, preserveNotes = false): Promise<ClearOutcome> {
     return this.access<ClearOutcome>(null, 'readwrite', async store => {
       guard();
       if (owner) { const current = (await request(store.get('identity')) as Row<OfflineIdentity> | undefined)?.value; guard(); if (current && current.user.id !== owner) return 'ownership-skipped'; }
-      guard(); await request(store.clear()); return 'cleared';
+      guard();
+      const identity = (await request(store.get('identity')) as Row<OfflineIdentity> | undefined)?.value;
+      const retained = (await this.noteRows(store)).filter(row => row.kind === 'annotation-recovery-owner' || row.kind === 'annotation-recovery' || preserveNotes && row.kind === 'annotations' && (row.value as StoredAnnotations).pending);
+      guard(); await request(store.clear());
+      for (const row of retained) {
+        if (row.kind === 'annotation-recovery-owner') { await request(store.put(row)); continue; }
+        const value = row.value as StoredAnnotations;
+        await request(store.put(this.row(row.userId, 'annotation-recovery', annotationKey(value.document.context), value)));
+      }
+      if (identity && retained.some(row => row.userId === identity.user.id && row.kind !== 'annotation-recovery-owner')) await request(store.put(this.row(identity.user.id, 'annotation-recovery-owner', '', { email: identity.user.email })));
+      guard(); return 'cleared';
     });
   }
   private async get<T>(userId: string, kind: string, id = ''): Promise<T | undefined> { return this.access(userId, 'readonly', async store => (await request(store.get(`${userId}:${kind}:${id}`)) as Row<T> | undefined)?.value); }
@@ -187,6 +218,49 @@ export class OfflineStore {
       const old = (await request(store.get(`${userId}:policy:`)) as Row<CacheTicket> | undefined)?.value;
       await request(store.put(this.row(userId, 'policy', '', { generation: crypto.randomUUID(), enabled: enabled ?? old?.enabled ?? true })));
       for (const kind of ['article', 'image']) for (const key of await request(store.index('ownerKind').getAllKeys([userId, kind]))) await request(store.delete(key));
+    });
+  }
+  async guardAnnotationLogin(email: string, demo: boolean): Promise<void> {
+    return this.access(null, 'readonly', async store => {
+      const identity = (await request(store.get('identity')) as Row<OfflineIdentity> | undefined)?.value;
+      const rows = await this.noteRows(store);
+      const pending = rows.some(row => row.kind === 'annotations' && (row.value as StoredAnnotations).pending);
+      const markers = rows.filter(row => row.kind === 'annotation-recovery-owner');
+      if ((pending && (!identity || demo || identity.user.email.toLowerCase() !== email.toLowerCase())) || markers.some(row => demo || (row.value as { email: string }).email.toLowerCase() !== email.toLowerCase())) throw new PendingNotesOwnerError();
+    });
+  }
+  annotations(userId: string, context: AnnotationContext) { return this.get<StoredAnnotations>(userId, 'annotations', annotationKey(context)); }
+  async annotationDocuments(userId: string) { return (await this.rows<StoredAnnotations>(userId, 'annotations')).map(row => row.value); }
+  async pendingAnnotations(userId: string) { return (await this.annotationDocuments(userId)).filter(row => row.pending); }
+  async putAnnotations(userId: string, value: StoredAnnotations, expectedVersion: string | null): Promise<void> {
+    return this.access(userId, 'readwrite', async store => {
+      const id = annotationKey(value.document.context);
+      const old = (await request(store.get(`${userId}:annotations:${id}`)) as Row<StoredAnnotations> | undefined)?.value;
+      if ((old?.localVersion ?? null) !== expectedVersion) throw new LocalAnnotationConflict();
+      await request(store.put(this.row(userId, 'annotations', id, value)));
+    });
+  }
+  async acknowledgeAnnotations(userId: string, sent: StoredAnnotations, document: AnnotationDocument): Promise<StoredAnnotations | undefined> {
+    return this.access(userId, 'readwrite', async store => {
+      const id = annotationKey(document.context);
+      const old = (await request(store.get(`${userId}:annotations:${id}`)) as Row<StoredAnnotations> | undefined)?.value;
+      if (!old || old.document.revision !== sent.document.revision || old.conflict) return old;
+      const result: StoredAnnotations = old.localVersion === sent.localVersion
+        ? { document, localVersion: old.localVersion, pending: false }
+        : { ...old, document: { ...old.document, revision: document.revision, updatedAt: document.updatedAt, id: document.id } };
+      await request(store.put(this.row(userId, 'annotations', id, result))); return result;
+    });
+  }
+  async annotationConflict(userId: string, context: AnnotationContext, server: AnnotationDocument): Promise<void> {
+    return this.access(userId, 'readwrite', async store => {
+      const id = annotationKey(context), key = `${userId}:annotations:${id}`;
+      const old = (await request(store.get(key)) as Row<StoredAnnotations> | undefined)?.value;
+      if (old?.pending) await request(store.put(this.row(userId, 'annotations', id, { ...old, conflict: server })));
+    });
+  }
+  async discardAnnotationDrafts(userId: string): Promise<void> {
+    return this.access(userId, 'readwrite', async store => {
+      for (const row of await request(store.index('ownerKind').getAll([userId, 'annotations'])) as Row<StoredAnnotations>[]) if (row.value.pending) await request(store.delete(row.key));
     });
   }
   async acquireLease(owner: string, token: string, now: number, duration: number, mode: 'web' | 'fallback' = 'fallback'): Promise<boolean> {
