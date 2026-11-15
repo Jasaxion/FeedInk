@@ -412,9 +412,20 @@ test('forced expiry strictly blocks account switching until the original owner r
     expect((await getAnnotation(otherApi, otherArticles.first.id)).marks).toEqual([]);
     // An explicit owner-authorized discard, not a foreign login, resolves the next draft.
     const recovered = await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin);
+    const originalViewport = page.viewportSize()!;
+    // Isolate the save debounce from Reader's independent 700 ms scroll-progress sync.
+    await page.setViewportSize({ width: originalViewport.width, height: 4800 });
+    await page.waitForTimeout(1000);
+    await expect(page.getByTestId('offline-status')).not.toContainText('正在同步');
+    await expect.poll(() => page.getByTestId('reader').evaluate(root => { const scroll = root.querySelector('.reader-scroll')!; return scroll.scrollHeight <= scroll.clientHeight + 1; })).toBe(true);
     await saveFault.fail(first.id);
-    await addRemark(page, '明确放弃的未同步备注');
-    await expect.poll(async () => (await saveFault.status()).failed).toBeGreaterThan(0);
+    await page.getByRole('button', { name: '备注', exact: true }).click();
+    await page.getByTestId('note-editor').fill('明确放弃的未同步备注');
+    const failedOnce = { mode: 'fail', attempted: 1, held: 0, failed: 1, completed: 0, lastStatus: null };
+    await expect.poll(() => saveFault.status()).toEqual(failedOnce);
+    // A failed pass must remain stable beyond two annotation debounce periods.
+    await page.waitForTimeout(2200);
+    expect(await saveFault.status()).toEqual(failedOnce);
     await expect(page.getByTestId('annotation-status')).toContainText(pending);
     await expect(page.getByTestId('annotation-status')).not.toContainText(synchronized);
     const unchanged = await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin);
@@ -422,9 +433,11 @@ test('forced expiry strictly blocks account switching until the original owner r
     expect(unchanged.marks).toEqual(recovered.marks);
     await openSettings(page);
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    expect(await saveFault.status()).toEqual(failedOnce);
     await page.getByRole('button', { name: '放弃未同步更改', exact: true }).click();
     await expect(page.getByTestId('app-shell')).toHaveCount(0);
     await saveFault.reset();
+    await page.setViewportSize(originalViewport);
     await login(page, otherSession.user.email);
     await openAnnotations(page, otherArticles.first.id);
     await expect(page.getByTestId('annotations-panel')).not.toContainText(fixtureRemark);
