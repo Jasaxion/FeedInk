@@ -84,7 +84,8 @@ jobs:
       - name: Browser and API end-to-end tests
         id: e2e
         continue-on-error: true
-        if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
+        # All gates are still required; avoid rerunning the full matrix after a client-gate failure.
+        if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' && steps.client.outcome == 'success' }}
         run: |
           failed=0
           for project in api desktop mobile tablet webkit workflows mcp; do

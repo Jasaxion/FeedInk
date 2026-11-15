@@ -49,11 +49,22 @@ try {
     await page.evaluate(() => window.__audit.held.splice(0).forEach(release => release())); await settle(page); await expect(page.getByTestId('reader-content')).toContainText('第二篇独立'); await expect(page).toHaveURL(/article=two/);
   });
   await scenario('04 quota online/offline writes and failed-purge server revocation', async ({ page, url, control, setOffline }) => {
+    const settledRequests = async () => {
+      await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0);
+      await page.waitForLoadState('networkidle');
+      await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0);
+    };
     control.articles[0].read = false; await page.goto(url); await expect(page.getByTestId('article-card')).toHaveCount(2);
     await page.evaluate(() => { window.__audit.quota = true; window.__audit.bodyQuota = true; }); await page.getByTestId('article-card').first().click(); await expect(page.getByTestId('reader-content')).toBeVisible(); await expect.poll(() => control.articles[0].read).toBe(true);
     const saved = page.getByTestId('reader').getByRole('button', { name: '稍后阅读', exact: true }); await saved.click(); await expect.poll(() => control.articles[0].saved).toBe(true); await expect(page.getByRole('alert')).toContainText('存储');
     await setOffline(true); const writes = control.writes.length; await saved.click(); await expect(page.getByRole('alert')).toContainText('quota'); await expect(saved).toHaveAttribute('aria-pressed', 'true'); assert.equal(control.writes.length, writes);
-    await setOffline(false); await page.goto(`${url}/share`); await page.getByLabel('网页地址').fill(`${url}/original`); await page.evaluate(() => { window.__audit.bodyQuota = true; }); await page.getByRole('button', { name: '保存到稍后阅读', exact: true }).click(); await expect(page).toHaveURL(/scope=saved&article=one/); await expect(page.getByTestId('reader-content')).toBeVisible();
+    await setOffline(false);
+    // This case tests quota recovery, not cancellation by a full-document navigation.
+    // Wait for the actual native GETs as well as protocol-visible requests.
+    await expect(page.getByTestId('offline-status')).not.toContainText('正在同步');
+    await settledRequests();
+    await page.goto(`${url}/share`); await page.getByLabel('网页地址').fill(`${url}/original`); await page.evaluate(() => { window.__audit.bodyQuota = true; }); await page.getByRole('button', { name: '保存到稍后阅读', exact: true }).click(); await expect(page).toHaveURL(/scope=saved&article=one/); await expect(page.getByTestId('reader-content')).toBeVisible();
+    await settledRequests();
     await page.goto(`${url}/settings`); await page.evaluate(() => { window.__audit.clearFailure = true; }); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await expect.poll(() => control.logouts).toBe(1); await expect(page.getByTestId('app-shell')).toHaveCount(0); assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
   });
   await scenario('01+04 failed new-account cache activation never restores old private data offline', async ({ page, url, control, setOffline }) => {

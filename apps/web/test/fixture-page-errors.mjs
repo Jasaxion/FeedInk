@@ -84,7 +84,7 @@ export function installRuntimeWitness({ ownedOrigin, apiPaths, fixtureDocumentPa
   if (window.__fixtureRuntimeWitness?.document === document) return;
   const events = [], pendingReports = new Set(), pendingRequests = new Set();
   const generation = `${Date.now()}:${Math.random()}`;
-  Object.defineProperty(window, '__fixtureRuntimeWitness', { value: { document }, configurable: true });
+  Object.defineProperty(window, '__fixtureRuntimeWitness', { value: { document, pendingRequestCount: () => pendingRequests.size }, configurable: true });
   Object.defineProperty(window, '__fixtureRuntimeEvents', { value: events, configurable: true });
   Object.defineProperty(window, '__fixtureRuntimeFlush', { value: async () => {
     await Promise.all([...pendingReports]);
