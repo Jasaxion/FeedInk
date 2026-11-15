@@ -6,6 +6,7 @@ export interface OfflineIdentity { user: User; settings: ReaderSettings }
 export interface Library { subscriptions: Subscription[]; folders: Folder[]; tags: Tag[] }
 export interface PendingState { articleId: string; patch: ArticleStatePatch; revision: string }
 export interface CacheTicket { generation: string; enabled: boolean }
+export type ClearOutcome = 'cleared' | 'ownership-skipped';
 export type VersionedArticle = ArticleSummary & { stateVersion?: number };
 interface StoredImage { type: string; bytes: ArrayBuffer | Uint8Array }
 interface LocalState { patch: ArticleStatePatch; stateVersion?: number; tags?: Tag[] }
@@ -50,11 +51,11 @@ export class OfflineStore {
   async updateIdentity(session: Pick<Session, 'user' | 'settings'>, guard = () => {}): Promise<void> {
     return this.access(session.user.id, 'readwrite', async store => { guard(); await request(store.put({ key: 'identity', userId: session.user.id, kind: 'identity', value: { user: session.user, settings: session.settings } })); });
   }
-  async clear(guard = () => {}, owner?: string): Promise<void> {
-    return this.access(null, 'readwrite', async store => {
+  async clear(guard = () => {}, owner?: string): Promise<ClearOutcome> {
+    return this.access<ClearOutcome>(null, 'readwrite', async store => {
       guard();
-      if (owner) { const current = (await request(store.get('identity')) as Row<OfflineIdentity> | undefined)?.value; guard(); if (current && current.user.id !== owner) return; }
-      guard(); await request(store.clear());
+      if (owner) { const current = (await request(store.get('identity')) as Row<OfflineIdentity> | undefined)?.value; guard(); if (current && current.user.id !== owner) return 'ownership-skipped'; }
+      guard(); await request(store.clear()); return 'cleared';
     });
   }
   private async get<T>(userId: string, kind: string, id = ''): Promise<T | undefined> { return this.access(userId, 'readonly', async store => (await request(store.get(`${userId}:${kind}:${id}`)) as Row<T> | undefined)?.value); }

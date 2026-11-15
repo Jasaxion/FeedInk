@@ -4,7 +4,7 @@ import { api, HttpError } from '../src/api';
 import { assertAuthEpoch, authEpoch, beginAuthTransition, getApiSession, setApiSession, ObsoleteSessionError } from '../src/authEpoch';
 import { OfflineStore, replayPending } from '../src/offline';
 import { IDBFactory } from 'fake-indexeddb';
-import { session } from './fixtures';
+import { article, session } from './fixtures';
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(value => { resolve = value; }); return { promise, resolve }; }
 for (const status of [200, 401]) test(`auth epoch rejects delayed ${status} JSON and never invalidates a newer session`, async () => {
@@ -40,6 +40,13 @@ test('a delayed logout purge cannot clear a newer account cache', async () => {
   beginAuthTransition(); setApiSession(session('bob')); await db.activate(session('bob'));
   await assert.rejects(db.clear(() => assertAuthEpoch(epoch), 'alice'), ObsoleteSessionError);
   await db.clear(() => {}, 'alice'); assert.equal((await db.identity())?.user.id, 'bob');
+});
+
+test('clear distinguishes an ownership skip from confirmed deletion of private rows', async () => {
+  const store = new OfflineStore('clear-outcome', new IDBFactory()); await store.activate(session()); await store.saveArticle('alice', article()); await store.enqueue('alice', 'one', { saved: true });
+  assert.equal(await store.clear(() => {}, 'bob'), 'ownership-skipped');
+  assert.equal((await store.identity())?.user.id, 'alice'); assert.equal((await store.article('alice', 'one'))?.saved, true); assert.equal((await store.pending('alice')).length, 1);
+  assert.equal(await store.clear(() => {}, 'alice'), 'cleared'); assert.equal(await store.identity(), undefined);
 });
 
 test('same-account logout and relogin invalidate an earlier epoch too', () => {

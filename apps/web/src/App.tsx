@@ -34,7 +34,10 @@ export function App() {
   const logoutInFlight = useRef(false);
   async function purge(epoch = authEpoch(), owner?: string) {
     localStorage.setItem('feedink-private-purge-pending', '1');
-    try { await store.clear(() => assertAuthEpoch(epoch), owner); assertAuthEpoch(epoch); localStorage.removeItem('feedink-private-purge-pending'); }
+    try {
+      const outcome = await store.clear(() => assertAuthEpoch(epoch), owner); assertAuthEpoch(epoch);
+      if (outcome === 'cleared') localStorage.removeItem('feedink-private-purge-pending');
+    }
     catch (error) { if (!(error instanceof ObsoleteSessionError)) notify(`本地数据清理失败：${message(error)}。请在浏览器中清除此网站数据。`, true); }
   }
   async function invalidate(reason = '登录已失效，请重新登录') {

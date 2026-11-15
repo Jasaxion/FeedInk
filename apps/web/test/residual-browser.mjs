@@ -20,6 +20,27 @@ try {
     await expect.poll(() => control.discoveryQueries).toEqual(['technology']); await expect(page.getByRole('heading', { name: '发现结果订阅', exact: true })).toBeVisible();
     await page.goto(`${url}/?article=one`); await page.getByRole('button', { name: '朗读', exact: true }).click(); await expect(page.getByLabel('速度', { exact: true })).toHaveAttribute('type', 'range');
   });
+  await scenario('P1 skipped foreign-owner purge cannot restore Alice after Bob logs out in the same SPA', async ({ page, context, url, control }) => {
+    await open(page, url); await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+    const cachedIdentity = () => page.evaluate(() => new Promise((resolve, reject) => {
+      const open = indexedDB.open('feedink-private-v1'); open.onerror = () => reject(open.error);
+      open.onsuccess = () => { const read = open.result.transaction('rows').objectStore('rows').get('identity'); read.onsuccess = () => { resolve(read.result?.value.user.id ?? null); open.result.close(); }; read.onerror = () => reject(read.error); };
+    }));
+    assert.equal(await cachedIdentity(), 'alice');
+    await page.evaluate(() => { window.__audit.clearFailure = true; window.__audit.identityQuota = true; });
+    await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await expect.poll(() => control.logouts).toBe(1);
+    await page.getByRole('button', { name: '创建账号', exact: true }).click(); await page.getByLabel('昵称').fill('bob'); await page.getByLabel('邮箱', { exact: true }).fill('bob@example.test'); await page.getByLabel('密码', { exact: true }).fill(crypto.randomUUID()); await page.getByRole('button', { name: '注册并开始阅读', exact: true }).click(); await expect(page.getByTestId('app-shell')).toBeVisible();
+    assert.equal(control.user.id, 'bob'); assert.equal(await cachedIdentity(), 'alice'); assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
+    await page.evaluate(() => { window.__audit.clearFailure = false; window.__audit.identityQuota = false; });
+    // Deliberately stay in this SPA: reloading here would purge Alice before exercising Bob's skipped clear.
+    await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await expect.poll(() => control.logouts).toBe(2); await page.evaluate(() => navigator.locks.request('feedink-auth-network', () => {}));
+    assert.equal(control.loggedIn, false); assert.equal(await cachedIdentity(), 'alice');
+    const blockerAfterLogout = await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending'));
+    assert.equal(await page.evaluate(() => localStorage.getItem('feedink-logout-pending')), null);
+    await context.setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.locator('main.auth-page, [data-testid="app-shell"]').first().waitFor();
+    assert.deepEqual({ authenticatedShells: await page.getByTestId('app-shell').count(), cachedOwner: await cachedIdentity() }, { authenticatedShells: 0, cachedOwner: null }, 'offline reload must not restore the retained Alice account');
+    await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible(); assert.equal(blockerAfterLogout, '1'); await expect(page.getByText('第一篇持久存档', { exact: true })).toHaveCount(0);
+  });
   await scenario('R1 ordinary full settings save preserves both cached articles and images', async ({ page, context, url }) => {
     await open(page, url, 'two'); await open(page, url);
     await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByLabel('字号 (px)', { exact: true }).fill('21'); await page.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(page.getByRole('status').filter({ hasText: '设置已保存并同步' })).toBeVisible();

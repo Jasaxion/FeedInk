@@ -59,6 +59,22 @@ export async function browserNetworkFault(page: Page, browserName: 'chromium' | 
   };
 }
 
+export async function openSettings(page: Page) {
+  const settings = page.getByRole('button', { name: '设置', exact: true });
+  const reachable = await settings.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    return box.width > 0 && box.height > 0 && Boolean(hit && element.contains(hit));
+  }).catch(() => false);
+  if (!reachable) {
+    const back = page.getByTestId('reader').getByRole('button', { name: '返回', exact: true });
+    if (await back.isVisible()) await back.click();
+    await page.getByRole('button', { name: '打开侧栏', exact: true }).click();
+  }
+  await settings.click();
+  await expect(page.getByRole('dialog', { name: '设置', exact: true })).toBeVisible();
+}
+
 export async function assertNoHorizontalOverflow(page: Page) {
   const dimensions = await page.evaluate(() => ({ width: window.innerWidth, content: document.documentElement.scrollWidth }));
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.width + 1);

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { assertNoHorizontalOverflow, browserNetworkFault, csrf, detail, register, resetUpstream, subscribe, waitForArticles } from './helpers.js';
+import { assertNoHorizontalOverflow, browserNetworkFault, csrf, detail, openSettings, register, resetUpstream, subscribe, waitForArticles } from './helpers.js';
 
 test.beforeEach(async ({ request }) => { await resetUpstream(request); });
 test.afterEach(async ({ request }) => { await resetUpstream(request); });
@@ -113,8 +113,14 @@ test('PWA reads cached body/images offline, syncs changes and purges private dat
   await setOffline(false);
   expect(await page.evaluate(() => fetch('/api/health').then(response => response.ok))).toBe(true);
   await expect.poll(async () => (await detail(api, item.id, witnessOrigin)).saved, { timeout: 30_000 }).toBe(true);
-  await page.goto('/settings');
-  await page.getByRole('button', { name: /退出登录/ }).click();
+  await openSettings(page);
+  const settings = page.getByRole('dialog', { name: '设置', exact: true });
+  for (const size of [20, 22]) {
+    await settings.getByLabel('字号 (px)', { exact: true }).fill(String(size));
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect.poll(async () => (await (await api.get('/api/settings')).json()).fontSize).toBe(size);
+  }
+  await settings.getByRole('button', { name: /退出登录/ }).click();
   await expect(page.getByTestId('app-shell')).toHaveCount(0);
   await setOffline(true);
   await page.reload({ waitUntil: 'domcontentloaded' });
