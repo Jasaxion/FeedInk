@@ -6,7 +6,7 @@ import { useApp } from './context';
 import { api, HttpError } from './api';
 import { assertAuthEpoch, authEpoch, withAuthNetworkLock } from './authEpoch';
 import { withOwnerLock } from './stateSync';
-import { annotationKey, assertContext, markColors, markLabels, validateAnnotations, type StoredAnnotations } from './annotationData';
+import { annotationKey, assertContext, markColors, markLabels, sameAnnotationPayload, validateAnnotations, type StoredAnnotations } from './annotationData';
 import { annotationPath, fetchAnnotations, registerNotes, synchronizeAnnotations } from './annotationSync';
 import { exportNotesJson, exportNotesMarkdown, printNotes } from './annotationExport';
 import { captureQuote, matchQuote, quoteRange, quoteStream } from './textAnchors';
@@ -110,7 +110,11 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
       assertContext(document, { articleId: article.id, mode, sourceUrl: article.url, contentHash });
       const local = await app.store.annotations(owner, document.context); assertAuthEpoch(epoch); if (!alive.current) return;
       let next: StoredAnnotations = cachedHistory ? local || cachedHistory : local?.pending ? local : { document, pending: false, localVersion: crypto.randomUUID() };
-      if (!cachedHistory && local?.pending && app.online && local.document.revision !== document.revision) next = { ...local, conflict: document };
+      if (!cachedHistory && local?.pending && app.online && local.document.revision !== document.revision) {
+        next = !local.conflict && document.revision > local.document.revision && sameAnnotationPayload(local.document, document)
+          ? { document, pending: false, localVersion: local.localVersion }
+          : { ...local, conflict: document };
+      }
       await check(); assertAuthEpoch(epoch);
       await app.store.putAnnotations(owner, next, local?.localVersion ?? null); assertAuthEpoch(epoch); if (!alive.current) return;
       setLoadGeneration(value => value + 1); setTool('text'); setEditor(null);

@@ -8,7 +8,7 @@ export async function annotationRegressions(browser, expect) {
     const fixture = await auditFixture(), context = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
     const page = await context.newPage(); context.setDefaultTimeout(15000);
     const article = fixture.control.articles[0], hash = 'a'.repeat(64);
-    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, failure: 0, hold: null, ackHold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT', loadHold: null, loads: 0 };
+    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, preconditionFailures: 0, failure: 0, hold: null, ackHold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT', loadHold: null, loads: 0 };
     fixture.route(/^\/api\/articles\/one\/annotations(?:\/import)?$/, async ({ request, url, body, json }) => {
       if (url.pathname.endsWith('/import')) {
         assert.equal(url.search, '', 'import context is carried by the backup');
@@ -16,8 +16,8 @@ export async function annotationRegressions(browser, expect) {
         const backup = await body(); state.document = { ...state.document, ink: backup.ink, marks: backup.marks, revision: state.document.revision + 1 };
       } else if (request.method === 'PUT') {
         assert.deepEqual([...url.searchParams.keys()], ['mode'], 'PUT hash is carried by the payload');
-        assert.equal(request.headers['if-match'], `"${state.document.revision}"`);
         const payload = await body();
+        if (request.headers['if-match'] !== `"${state.document.revision}"`) { state.preconditionFailures++; return json({ error: { code: 'ANNOTATION_CONFLICT', message: '版本冲突' } }, 412); }
         state.writes++; if (state.hold) await state.hold.promise;
         if (state.failure) return json({ error: { code: 'UNAVAILABLE', message: '受控保存失败' } }, state.failure);
         state.document = { ...state.document, ...payload, revision: state.document.revision + 1 };
@@ -163,6 +163,21 @@ export async function annotationRegressions(browser, expect) {
     await expect(page.getByTestId('annotation-status')).not.toContainText('冲突');
     assert.equal(state.writes, 1);
     await expect(page.getByTestId('annotations-panel')).toContainText('committed while acknowledgement is held');
+  });
+  await scenario('lost acknowledgement is confirmed by exact server data without a duplicate write', async ({ page, state }) => {
+    await page.setViewportSize({ width: 1280, height: 2400 });
+    const heldAck = deferred(); state.ackHold = heldAck;
+    await newNote(page, 'durable note with lost response');
+    await page.getByRole('button', { name: '保存备注', exact: true }).click();
+    await expect.poll(() => state.document.revision).toBe(1);
+    // Destroy the old document while its server response is withheld: IDB has no ACK.
+    await page.reload(); heldAck.resolve(); state.ackHold = null;
+    await expect.poll(() => state.preconditionFailures).toBe(1);
+    await page.getByTestId('annotation-toggle').click();
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    await expect(page.getByTestId('annotation-status')).not.toContainText('冲突');
+    await expect(page.getByTestId('annotations-panel')).toContainText('durable note with lost response');
+    assert.equal(state.document.revision, 1); assert.equal(state.writes, 1);
   });
   await scenario('retirement freezes edits and keeps latest B on local failure', async ({ page }) => {
     await page.evaluate(() => window.dispatchEvent(new Event('offline')));

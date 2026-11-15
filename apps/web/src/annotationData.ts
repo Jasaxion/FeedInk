@@ -40,6 +40,21 @@ export function validateAnnotations(document: AnnotationDocument): AnnotationDoc
 export function payloadOf(document: AnnotationDocument): AnnotationPayload {
   return { schemaVersion: 1, contentHash: document.contentHash, ink: document.ink, marks: document.marks };
 }
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameJson(a[i] ?? null, b[i] ?? null)) return false;
+    return true;
+  }
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = a as Record<string, unknown>, right = b as Record<string, unknown>;
+  // Optional undefined object fields are absent from the actual JSON request.
+  const keys = Object.keys(left).filter(key => left[key] !== undefined), otherKeys = Object.keys(right).filter(key => right[key] !== undefined);
+  return keys.length === otherKeys.length && keys.every(key => Object.hasOwn(right, key) && sameJson(left[key], right[key]));
+}
+/** Exact validated JSON state only: object-key order is irrelevant, array order is not. */
+export function sameAnnotationPayload(a: AnnotationDocument, b: AnnotationDocument): boolean { return sameJson(payloadOf(a), payloadOf(b)); }
 export function backupOf(document: AnnotationDocument): NotesBackup {
   validateAnnotations(document);
   const { sourceUrl: url, title, mode, contentHash } = document.context;

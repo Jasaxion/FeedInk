@@ -55,7 +55,7 @@ function AccountPanel() {
   return <form className="settings-form" onSubmit={event => { event.preventDefault(); void app.task(async () => { const user = await mutate<User>('/account', 'PATCH', { name, ...(password ? { currentPassword, password } : {}) }); app.updateSession({ ...app.session, user }); setPassword(''); setCurrentPassword(''); app.notify('账号资料已保存'); }); }}>
     <h3>我的账号 {app.session.user.isDemo && <span className="badge">演示</span>}</h3><p>{app.session.user.email}</p><Field label="昵称"><input required value={name} maxLength={80} onChange={event => setName(event.target.value)} /></Field>
     <h4>修改密码</h4><Field label="当前密码"><input type="password" autoComplete="current-password" required={Boolean(password)} value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} /></Field><Field label="新密码" hint="至少 10 个字符；留空不修改。修改后会撤销其他设备的会话。"><input type="password" autoComplete="new-password" minLength={10} value={password} onChange={event => setPassword(event.target.value)} /></Field>
-    <button className="primary" disabled={!app.online}>保存账号资料</button><hr /><p className="muted">使用左侧“退出登录”会清除此设备的私有正文、图片与待同步更改。</p>
+    <button className="primary" disabled={!app.online}>保存账号资料</button><hr /><p className="muted">退出时会处理本机私有缓存；未同步笔记需先同步、导出、锁定保留或明确放弃，不会因普通缓存清理自动删除。</p>
   </form>;
 }
 function AdminPanel() {

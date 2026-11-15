@@ -433,8 +433,8 @@ test('forced expiry strictly blocks account switching until the original owner r
     const unchanged = await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin);
     expect(unchanged.revision).toBe(recovered.revision);
     expect(unchanged.marks).toEqual(recovered.marks);
-    await openSettings(page);
-    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    // The visible sidebar logout avoids a separate navigation-triggered retry.
+    await page.locator('.sidebar-footer').getByRole('button', { name: '退出登录', exact: true }).click();
     expect(await saveFault.status()).toEqual(failedOnce);
     await page.getByRole('button', { name: '放弃未同步更改', exact: true }).click();
     await expect(page.getByTestId('app-shell')).toHaveCount(0);

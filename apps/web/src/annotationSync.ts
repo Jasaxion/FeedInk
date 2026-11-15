@@ -2,7 +2,7 @@ import type { AnnotationContext, AnnotationDocument, AnnotationMode, Session } f
 import { flushSync } from 'react-dom';
 import { api, HttpError } from './api';
 import { assertAuthEpoch, authEpoch, getApiSession, updateCredentials, withAuthNetworkLock } from './authEpoch';
-import { annotationKey, assertContext, payloadOf, validateAnnotations, type StoredAnnotations } from './annotationData';
+import { annotationKey, assertContext, payloadOf, sameAnnotationPayload, validateAnnotations, type StoredAnnotations } from './annotationData';
 import type { OfflineStore } from './offline';
 import { withOwnerLock, OwnerMismatchError } from './stateSync';
 
@@ -31,7 +31,12 @@ export async function synchronizeAnnotations(store: OfflineStore, owner: string,
         await guard();
         if (!(error instanceof HttpError) || error.status !== 412) throw error;
         const server = await fetchAnnotations(row.document.context.articleId, row.document.context.mode, row.document.contentHash); await guard();
-        await store.annotationConflict(owner, row.document.context, server); await guard();
+        assertContext(server, row.document.context);
+        // A lost response may leave an already-committed payload pending locally.
+        // Read-confirm exact equality without another write or blind revision rebasing.
+        if (server.revision > row.document.revision && sameAnnotationPayload(row.document, server)) await store.acknowledgeAnnotations(owner, row, server);
+        else await store.annotationConflict(owner, row.document.context, server);
+        await guard();
       }
     }
     window.dispatchEvent(new Event('feedink:annotations-synced'));

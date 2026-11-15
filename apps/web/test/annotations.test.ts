@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory } from 'fake-indexeddb';
 import type { AnnotationDocument, TextQuoteAnchor } from '@feedink/shared';
-import { annotationKey, backupOf, validateAnnotations, type StoredAnnotations } from '../src/annotationData';
+import { annotationKey, backupOf, sameAnnotationPayload, validateAnnotations, type StoredAnnotations } from '../src/annotationData';
 import { OfflineStore, LocalAnnotationConflict, PendingNotesOwnerError } from '../src/offline';
 import { matchQuote } from '../src/textAnchors';
 import { article, session } from './fixtures';
@@ -48,6 +48,23 @@ test('annotationData JSON backup preserves every plain-text note and raw stroke,
   source.ink.strokes[0].anchor = { kind: 'render-v1', matrix: [1, 0, 0, 1, 0, 0], clips: [] };
   assert.throws(() => backupOf(source), /投影/);
 });
+test('read confirmation requires exact note payload, not metadata or object-key order', () => {
+  const original = document(), server = structuredClone(original);
+  server.id = 'server'; server.revision = 7; server.updatedAt = new Date(1).toISOString();
+  server.marks = server.marks.map(mark => Object.fromEntries(Object.entries(mark).reverse()) as typeof mark);
+  assert.equal(sameAnnotationPayload(original, server), true);
+  server.marks[0].text += 'remote edit'; assert.equal(sameAnnotationPayload(original, server), false);
+  server.marks = structuredClone(original.marks); server.contentHash = 'b'.repeat(64); assert.equal(sameAnnotationPayload(original, server), false);
+  const ink = { version: 1 as const, url: original.context.sourceUrl, title: '', layoutWidth: 800, updatedAt: 1, strokes: [{ id: 'pen', tool: 'pen' as const, color: '#000000', width: 2, opacity: 1, points: [{ x: 1, y: 2, p: 0.2 }] }] };
+  original.ink = ink;
+  const wire = structuredClone(original); original.ink.strokes[0].brush = undefined;
+  assert.equal(sameAnnotationPayload(original, wire), true);
+  const different = structuredClone(original); different.ink!.strokes[0].points[0].p = 0.8;
+  assert.equal(sameAnnotationPayload(original, different), false);
+  original.marks.push({ ...original.marks[0], id: 'second' }); const reordered = structuredClone(original); reordered.marks.reverse();
+  assert.equal(sameAnnotationPayload(original, reordered), false);
+});
+
 test('annotationData rejects duplicate IDs, invalid Unicode, unanchored highlight and nonfinite ink atomically', () => {
   const source = document(); source.marks.push({ ...source.marks[0] }); assert.throws(() => validateAnnotations(source)); source.marks.pop();
   source.marks[0].text = '\ud800'; assert.throws(() => validateAnnotations(source)); source.marks[0].text = 'valid';
