@@ -44,11 +44,21 @@ export function fixtureOrigin(server) {
 }
 
 export function fixtureOffline(context, origin) {
+  const marker = 'feedink-fixture-network-offline';
+  const install = key => {
+    const original = Object.getOwnPropertyDescriptor(Navigator.prototype, 'onLine')?.get;
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => localStorage.getItem(key) === '1' ? false : original?.call(navigator) ?? true });
+  };
+  const prepared = process.env.FEEDINK_BROWSER === 'webkit' ? context.addInitScript(install, marker) : Promise.resolve();
   return async offline => {
     if (process.env.FEEDINK_BROWSER !== 'webkit') return context.setOffline(offline);
+    await prepared;
     if (offline) await origin.pauseOrigin(); else await origin.resumeOrigin();
-    // Listener shutdown supplies the network failure; this supplies the browser
-    // connectivity notification for tests that stay in the current document.
-    for (const page of context.pages()) await page.evaluate(offline => window.dispatchEvent(new Event(offline ? 'offline' : 'online')), offline);
+    // Keep the observable connection state consistent with the real listener
+    // fault, including focus events and cached-shell document replacement.
+    for (const page of context.pages()) {
+      await page.evaluate(install, marker);
+      await page.evaluate(({ key, value }) => { localStorage.setItem(key, value ? '1' : '0'); window.dispatchEvent(new Event(value ? 'offline' : 'online')); }, { key: marker, value: offline });
+    }
   };
 }

@@ -22,6 +22,11 @@ async function scenario(name, action) {
 }
 const open = async (page, url, id = 'one') => { await page.goto(`${url}/?article=${id}`); await expect(page.getByTestId('reader-content')).toBeVisible(); };
 const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const settledRequests = async page => {
+  await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0);
+  await page.waitForLoadState('networkidle');
+  await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0);
+};
 try {
   await verifyRuntimeErrorWitness(browser);
   await scenario('03 native keyboard +16 owned source icons', async ({ page, url, control, context }) => {
@@ -49,11 +54,6 @@ try {
     await page.evaluate(() => window.__audit.held.splice(0).forEach(release => release())); await settle(page); await expect(page.getByTestId('reader-content')).toContainText('第二篇独立'); await expect(page).toHaveURL(/article=two/);
   });
   await scenario('04 quota online/offline writes and failed-purge server revocation', async ({ page, url, control, setOffline }) => {
-    const settledRequests = async () => {
-      await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0);
-      await page.waitForLoadState('networkidle');
-      await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0);
-    };
     control.articles[0].read = false; await page.goto(url); await expect(page.getByTestId('article-card')).toHaveCount(2);
     await page.evaluate(() => { window.__audit.quota = true; window.__audit.bodyQuota = true; }); await page.getByTestId('article-card').first().click(); await expect(page.getByTestId('reader-content')).toBeVisible(); await expect.poll(() => control.articles[0].read).toBe(true);
     const saved = page.getByTestId('reader').getByRole('button', { name: '稍后阅读', exact: true }); await saved.click(); await expect.poll(() => control.articles[0].saved).toBe(true); await expect(page.getByRole('alert')).toContainText('存储');
@@ -62,9 +62,9 @@ try {
     // This case tests quota recovery, not cancellation by a full-document navigation.
     // Wait for the actual native GETs as well as protocol-visible requests.
     await expect(page.getByTestId('offline-status')).not.toContainText('正在同步');
-    await settledRequests();
+    await settledRequests(page);
     await page.goto(`${url}/share`); await page.getByLabel('网页地址').fill(`${url}/original`); await page.evaluate(() => { window.__audit.bodyQuota = true; }); await page.getByRole('button', { name: '保存到稍后阅读', exact: true }).click(); await expect(page).toHaveURL(/scope=saved&article=one/); await expect(page.getByTestId('reader-content')).toBeVisible();
-    await settledRequests();
+    await settledRequests(page);
     await page.goto(`${url}/settings`); await page.evaluate(() => { window.__audit.clearFailure = true; }); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await expect.poll(() => control.logouts).toBe(1); await expect(page.getByTestId('app-shell')).toHaveCount(0); assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
   });
   await scenario('01+04 failed new-account cache activation never restores old private data offline', async ({ page, url, control, setOffline }) => {
@@ -80,7 +80,7 @@ try {
     await setOffline(true); await page.evaluate(() => { window.__audit.imageHold = true; }); await page.locator('.article-content img[alt="归档图片"]').click(); await page.waitForFunction(() => window.__audit.held.length > 0); assert.equal(await page.locator('.image-preview img').count(), 0);
     await page.evaluate(() => { window.__audit.imageHold = false; window.__audit.held.splice(0).forEach(release => release()); }); const image = page.locator('.image-preview img'); await expect.poll(() => image.evaluate(image => image.src.startsWith('data:image/') && image.complete && image.naturalWidth > 0)).toBe(true);
     await page.getByRole('button', { name: '关闭对话框' }).focus(); await page.keyboard.press('Enter'); await expect(page.locator('dialog')).toHaveCount(0);
-    await setOffline(false); await page.goto(`${url}/settings?article=one`); await expect(page.getByTestId('offline-status')).toContainText('离线可用'); await page.getByRole('button', { name: '离线与安装', exact: true }).click(); await page.getByRole('button', { name: '清理正文缓存', exact: true }).click(); await expect(page.getByRole('status').filter({ hasText: '此设备的正文与图片缓存已清除' })).toBeVisible(); await expect(page.getByTestId('offline-status')).not.toContainText('离线可用');
+    await setOffline(false); await settledRequests(page); await page.goto(`${url}/settings?article=one`); await expect(page.getByTestId('offline-status')).toContainText('离线可用'); await page.getByRole('button', { name: '离线与安装', exact: true }).click(); await page.getByRole('button', { name: '清理正文缓存', exact: true }).click(); await expect(page.getByRole('status').filter({ hasText: '此设备的正文与图片缓存已清除' })).toBeVisible(); await expect(page.getByTestId('offline-status')).not.toContainText('离线可用');
   });
   await scenario('10 delayed deep-link preferences +15 sandbox/original fallback', async ({ page, url, control, setOffline }) => {
     control.subscriptions[0].settings.articleMode = 'webpage'; const held = deferred(); control.holdLibrary = held; await page.goto(`${url}/?article=one`); await expect(page.getByTestId('app-shell')).toBeVisible(); assert.equal(await page.locator('iframe').count(), 0);
