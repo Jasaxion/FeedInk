@@ -87,10 +87,25 @@ jobs:
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: |
           failed=0
-          for project in api desktop mobile tablet webkit workflows mcp annotations annotations-mobile annotations-webkit; do
+          for project in api desktop mobile tablet webkit workflows mcp; do
             if ! PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" node tests/run-project.mjs "$project"; then
               failed=1
             fi
+          done
+          # Each batch owns a fresh API/rate budget; one worker keeps shared fixture controls isolated.
+          # Keep every shard result, even after an earlier failure; raw reports stay ephemeral.
+          for project in annotations annotations-mobile annotations-webkit; do
+            for shard in 1 2 3; do
+              batch="$project-shard-$shard-of-3"
+              echo "::group::$batch"
+              if PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$batch" node tests/run-project.mjs "$project" "--shard=$shard/3"; then
+                echo "$batch: passed" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "$batch: failed" >> "$GITHUB_STEP_SUMMARY"
+                failed=1
+              fi
+              echo '::endgroup::'
+            done
           done
           test "$failed" = 0
       - name: Require both browser acceptance gates

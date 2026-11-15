@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 import { expect, type APIRequestContext } from '@playwright/test';
 import type {
   AnnotationContext, AnnotationDocument, AnnotationPayload, InkStroke, NotesBackup,
   Session, TextAnnotation, TextMarkKind,
 } from '../../packages/shared/src/index.js';
-import { csrf, detail, subscribe, waitForArticles } from '../e2e/helpers.js';
+import { baseURL, csrf, detail, subscribe, waitForArticles } from '../e2e/helpers.js';
 
 // Only first-party upstream.mjs content and generated notes belong in this fixture.
 export const fixturePassword = 'FeedInk-annotation-fixture-2026!';
@@ -46,12 +47,46 @@ export async function getAnnotation(api: APIRequestContext, articleId: string, m
   return response.json();
 }
 
-export async function putAnnotation(api: APIRequestContext, session: Session, document: AnnotationDocument, payload: AnnotationPayload): Promise<AnnotationDocument> {
-  const response = await api.put(annotationPath(document.context.articleId, document.context.mode), {
+export async function putAnnotation(api: APIRequestContext, session: Session, document: AnnotationDocument, payload: AnnotationPayload, origin?: string): Promise<AnnotationDocument> {
+  const path = annotationPath(document.context.articleId, document.context.mode);
+  const response = await api.put(origin ? new URL(path, origin).href : path, {
     headers: { ...csrf(session), 'If-Match': `"${document.revision}"` }, data: payload,
   });
   expect(response.status(), 'owned conditional annotation PUT status').toBe(200);
   return response.json();
+}
+
+interface AnnotationSaveStatus {
+  mode: 'hold' | 'fail' | 'pass'; attempted: number; held: number; failed: number;
+  completed: number; lastStatus: number | null;
+}
+
+/** Node-only capability: service-worker traffic crosses the owned HTTP proxy, not Playwright routes. */
+export async function annotationSaveFault() {
+  const file = process.env.FEEDINK_NETWORK_CONTROL_FILE;
+  if (!file) throw new Error('Run annotation projects through tests/run-project.mjs for owned save controls');
+  const metadata = await stat(file);
+  if (!metadata.isFile() || metadata.size > 4096 || (metadata.mode & 0o077) !== 0) throw new Error('Invalid private annotation control file');
+  const control = JSON.parse(await readFile(file, 'utf8')) as { saveControlUrl: string; upstreamUrl: string; publicUrl: string; token: string };
+  const endpoint = new URL(control.saveControlUrl), upstream = new URL(control.upstreamUrl);
+  if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.pathname !== '/annotation-save' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash ||
+    upstream.protocol !== 'http:' || upstream.hostname !== '127.0.0.1' || upstream.origin !== process.env.FEEDINK_API_WITNESS_URL || upstream.origin === new URL(baseURL).origin ||
+    !/^[a-f0-9]{64}$/.test(control.token) || new URL(control.publicUrl).origin !== new URL(baseURL).origin) throw new Error('Invalid owned annotation save control');
+  async function command(action: 'hold' | 'fail' | 'release' | 'reset' | 'status', path?: string): Promise<AnnotationSaveStatus> {
+    try {
+      const response = await fetch(control.saveControlUrl, { method: 'POST', headers: { Authorization: `Bearer ${control.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...(path ? { path } : {}) }), signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error();
+      return await response.json() as AnnotationSaveStatus;
+    } catch { throw new Error('Owned annotation save control failed'); }
+  }
+  return {
+    // Direct authenticated witnesses bypass only this transport fault, never API authorization or rate limits.
+    witnessOrigin: upstream.origin,
+    hold: (articleId: string) => command('hold', annotationPath(articleId)),
+    fail: (articleId: string) => command('fail', annotationPath(articleId)),
+    release: () => command('release'), reset: () => command('reset'), status: () => command('status'),
+  };
 }
 
 export function textMark(kind: TextMarkKind, text = '', quote = fixtureQuote): TextAnnotation {

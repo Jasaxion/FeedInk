@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_SETTINGS } from '@feedink/shared';
+import { fixtureOrigin } from './fixture-origin.mjs';
 export function deferred() { let resolve; const promise = new Promise(value => { resolve = value; }); return { promise, resolve }; }
 export async function auditFixture() {
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
@@ -11,16 +12,26 @@ export async function auditFixture() {
   const article = id => ({ id, stateVersion: 0, feedId: '12345678-abcd-1234-abcd-123456789abc', subscriptionId: 'sub', feedTitle: '测试订阅', title: id === 'one' ? '第一篇持久存档' : '第二篇独立阅读', url: '', author: null, publishedAt: '2026-01-01T00:00:00Z', summary: '原创测试摘要', thumbnailUrl: '/api/assets/image-one', read: true, saved: false, tags: [], wordCount: 20, archivedAt: '2026-01-01T00:00:00Z', progress: 0, enclosures: [], contentHtml: `<p>${id === 'one' ? '第一篇持久存档正文' : '第二篇独立阅读正文'}</p><img alt="归档图片" src="/api/assets/image-one">`, fulltextHtml: null, contentText: '原创测试正文', fetchedAt: '2026-01-01T00:00:00Z', contentHash: 'a'.repeat(64), images: [{ id: 'image-one', url: '/api/assets/image-one', originalUrl: 'https://example.test/image.png', status: 'cached', contentType: 'image/png' }], fulltextError: null });
   const control = { user: user('alice'), loggedIn: true, settings: { ...DEFAULT_SETTINGS }, articles: [article('one'), article('two')], folders: [{ id: 'folder', name: '文件夹', position: 0, unreadCount: 0, settings: {} }], subscriptions: [{ id: 'sub', feedId: '12345678-abcd-1234-abcd-123456789abc', title: '测试订阅', url: 'https://example.test/feed', siteUrl: 'https://example.test', description: '', iconUrl: '/api/feed-icons/12345678-abcd-1234-abcd-123456789abc', folderId: 'folder', unreadCount: 0, totalCount: 2, settings: {}, status: 'ok', lastFetchedAt: null, lastError: null, position: 0 }], tags: [], writes: [], logouts: 0, sessionCalls: 0, holdSession: null, holdLibrary: null, holdMutation: null, mutationHeld: false, iconStatus: 200, listed: null, assets: 0, holdList: null, listCaptured: false, holdDetail: null, detailCaptured: false, rejectedCsrf: 0, discoveryQueries: [] };
   const counts = () => { const unread = control.articles.filter(item => !item.read).length; control.subscriptions[0].unreadCount = unread; control.folders[0].unreadCount = unread; };
+  const routes = [], routeErrors = [];
+  const route = (pathname, handler) => routes.unshift({ pathname, handler });
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://127.0.0.1');
       const json = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
       const body = async () => { let text = ''; for await (const chunk of req) text += chunk; return text ? JSON.parse(text) : {}; };
       if (url.pathname.startsWith('/api/')) {
-        if (['/api/auth/login', '/api/auth/register', '/api/auth/demo'].includes(url.pathname)) { const data = await body(); control.user = user(data.name || 'bob'); control.loggedIn = true; return json({ user: control.user, settings: control.settings, csrfToken: `csrf-${control.user.id}` }); }
+        const login = ['/api/auth/login', '/api/auth/register', '/api/auth/demo'].includes(url.pathname);
         if (url.pathname === '/api/session') { control.sessionCalls++; if (control.holdSession) await control.holdSession.promise; }
-        if (!control.loggedIn) return json({ error: { code: 'UNAUTHORIZED', message: '请登录' } }, 401);
-        if (req.method !== 'GET' && req.headers['x-csrf-token'] !== `csrf-${control.user.id}`) { control.rejectedCsrf++; return json({ error: { code: 'CSRF_INVALID', message: 'CSRF token required' } }, 403); }
+        if (!login && !control.loggedIn) return json({ error: { code: 'UNAUTHORIZED', message: '请登录' } }, 401);
+        if (!login && req.method !== 'GET' && req.headers['x-csrf-token'] !== `csrf-${control.user.id}`) { control.rejectedCsrf++; return json({ error: { code: 'CSRF_INVALID', message: 'CSRF token required' } }, 403); }
+        // HTTP dispatch also covers service-worker-controlled WebKit requests.
+        // Overrides retain the fixture's authentication and mutation CSRF guards.
+        const matched = routes.find(route => typeof route.pathname === 'string' ? route.pathname === url.pathname : route.pathname.test(url.pathname));
+        if (matched) {
+          try { return await matched.handler({ request: req, url, body, json }); }
+          catch (error) { routeErrors.push(String(error)); throw error; }
+        }
+        if (login) { const data = await body(); control.user = user(data.name || 'bob'); control.loggedIn = true; return json({ user: control.user, settings: control.settings, csrfToken: `csrf-${control.user.id}` }); }
         if (url.pathname === '/api/session') return json({ user: control.user, settings: control.settings, csrfToken: `csrf-${control.user.id}` });
         if (url.pathname === '/api/auth/logout') { control.logouts++; control.loggedIn = false; res.writeHead(204); res.end(); return; }
         if (url.pathname === '/api/discover') { control.discoveryQueries.push(url.searchParams.get('q')); return json({ feeds: [{ title: '发现结果订阅', url: 'https://example.test/discovered-feed', siteUrl: 'https://example.test', description: '发现结果夹具' }] }); }
@@ -52,7 +63,8 @@ export async function auditFixture() {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}`; control.articles.forEach(item => { item.url = `${url}/original`; });
-  return { url, control, close: async () => { control.holdSession?.resolve(); control.holdLibrary?.resolve(); control.holdMutation?.resolve(); control.holdList?.resolve(); control.holdDetail?.resolve(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
+  const origin = fixtureOrigin(server);
+  return { url, control, route, routeErrors, ...origin, close: async () => { control.holdSession?.resolve(); control.holdLibrary?.resolve(); control.holdMutation?.resolve(); control.holdList?.resolve(); control.holdDetail?.resolve(); await origin.pauseOrigin(); } };
 }
 
 export function instrumentStorage() {

@@ -13,25 +13,25 @@ const context = await browser.newContext({ viewport: { width: 1280, height: 900 
 context.setDefaultTimeout(15000);
 const page = await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(error.message));
 const docs = new Map(); let conflict = false; let writes = 0;
-await context.route('**/api/articles/*/annotations?*', async route => {
-  const request = route.request(), url = new URL(request.url()), id = url.pathname.split('/')[3], mode = url.searchParams.get('mode') || 'feed';
+fixture.route(/^\/api\/articles\/[^/]+\/annotations$/, async ({ request, url, body, json }) => {
+  const id = url.pathname.split('/')[3], mode = url.searchParams.get('mode') || 'feed';
   const article = fixture.control.articles.find(item => item.id === id), key = `${id}:${mode}`;
   if (!docs.has(key)) docs.set(key, { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: 'a'.repeat(64), context: { articleId: id, mode, contentHash: 'a'.repeat(64), sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] });
-  if (!fixture.control.loggedIn) return route.fulfill({ status: 401, json: { error: { code: 'UNAUTHORIZED', message: '请登录' } } });
   const current = docs.get(key);
-  if (request.method() === 'PUT') {
+  if (request.method === 'PUT') {
     writes++;
-    assert.equal(request.headers()['x-csrf-token'], `csrf-${fixture.control.user.id}`);
-    if (conflict || request.headers()['if-match'] !== `"${current.revision}"`) return route.fulfill({ status: 412, json: { error: { code: 'ANNOTATION_CONFLICT', message: '版本冲突' } } });
-    docs.set(key, { ...current, ...request.postDataJSON(), id: key, revision: current.revision + 1, updatedAt: new Date().toISOString() });
+    assert.equal(request.headers['x-csrf-token'], `csrf-${fixture.control.user.id}`);
+    if (conflict || request.headers['if-match'] !== `"${current.revision}"`) return json({ error: { code: 'ANNOTATION_CONFLICT', message: '版本冲突' } }, 412);
+    docs.set(key, { ...current, ...await body(), id: key, revision: current.revision + 1, updatedAt: new Date().toISOString() });
   }
-  return route.fulfill({ json: docs.get(key) });
+  return json(docs.get(key));
 });
 async function selectText() {
   await page.getByTestId('reader-content').evaluate(root => { const text = root.querySelector('p').firstChild; const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, Math.min(text.length, 8)); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); });
 }
 try {
   await page.goto(`${fixture.url}/?article=one`); await expect(page.getByTestId('reader-content')).toBeVisible();
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
   // An existing host is not used or overwritten by browser annotation persistence.
   await page.evaluate(() => { window.__hostCalls = 0; window.__existingHost = { postMessage() { window.__hostCalls++; } }; window.WebInkHost = window.__existingHost; });
   await page.getByTestId('annotation-toggle').click(); await expect(page.getByTestId('annotation-toolbar')).toBeVisible(); await expect(page.getByTestId('annotations-panel')).toBeVisible();
@@ -72,7 +72,7 @@ try {
   await page.getByTestId('annotations-panel').getByRole('button', { name: '重试同步', exact: true }).click();
   await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible(); await expect(page.getByTestId('reader-content')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => new Promise(resolve => { const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => { const request = open.result.transaction('rows').objectStore('rows').getAll(); request.onsuccess = () => { const rows = request.result; resolve({ identity: rows.some(row => row.key === 'identity'), recovery: rows.some(row => row.kind === 'annotation-recovery' && row.value.document.marks.some(mark => mark.text === '冲突草稿')), article: rows.some(row => row.kind === 'article') }); open.result.close(); }; }; }))).toEqual({ identity: false, recovery: true, article: false });
-  assert.deepEqual(errors, []);
+  assert.deepEqual(errors, []); assert.deepEqual(fixture.routeErrors, []); assert.equal(fixture.control.rejectedCsrf, 0);
   console.log('PASS annotations-browser: text/pressure/CAS/export/print/forced-auth client fixtures');
   await annotationRegressions(browser, expect);
 } finally { await context.close(); await fixture.close(); await browser.close(); }

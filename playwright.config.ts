@@ -6,6 +6,7 @@ export default defineConfig({
   testDir: './tests/e2e',
   timeout: 60_000,
   expect: { timeout: 15_000 },
+  // Annotation CI batches opt into test-level sharding via run-project.mjs; shared controls stay serial.
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),

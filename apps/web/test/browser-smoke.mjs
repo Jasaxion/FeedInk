@@ -9,6 +9,7 @@ const { chromium, webkit, expect } = await import(process.env.FEEDINK_PLAYWRIGHT
 const engine = process.env.FEEDINK_BROWSER === 'webkit' ? webkit : chromium;
 const executablePath = process.env.FEEDINK_BROWSER === 'webkit' ? undefined : process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
 import { DEFAULT_SETTINGS } from '@feedink/shared';
+import { fixtureOrigin, fixtureOffline } from './fixture-origin.mjs';
 
 const dist = fileURLToPath(new URL('../dist/', import.meta.url));
 const artifacts = process.env.FEEDINK_BROWSER_ARTIFACTS || await mkdtemp(join(tmpdir(), 'feedink-web-smoke-'));
@@ -50,6 +51,7 @@ const server = createServer(async (req, res) => {
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const url = `http://127.0.0.1:${server.address().port}`;
+const origin = fixtureOrigin(server);
 let browser;
 let page;
 let stage = 'launch';
@@ -57,6 +59,7 @@ const step = name => { stage = name; console.log(`SMOKE ${name}`); };
 try {
   browser = await engine.launch({ executablePath, headless: true, timeout: 20_000 });
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const setOffline = fixtureOffline(context, origin);
   context.setDefaultTimeout(10_000); context.setDefaultNavigationTimeout(15_000);
   // Deterministic browser-API seam: verifies continuous-play UI logic, not actual voice/audio quality.
   await context.addInitScript(() => {
@@ -100,11 +103,11 @@ try {
   await page.evaluate(async () => { await Promise.race([navigator.serviceWorker.ready, new Promise((_, reject) => setTimeout(() => reject(new Error('service worker readiness exceeded 10s')), 10_000))]); }); await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
   await page.screenshot({ path: join(artifacts, 'reader-desktop.png') });
   step('offline body and image reload');
-  await context.setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByTestId('reader-content').waitFor();
+  await setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByTestId('reader-content').waitFor();
   await page.waitForFunction(() => { const image = document.querySelector('.article-content img[alt="归档图片"]'); return image?.src.startsWith('data:image/') && image.complete && image.naturalWidth > 0; });
   await page.locator('.reader-scroll').focus(); await page.keyboard.press('y'); await page.waitForFunction(() => document.querySelector('[data-testid="offline-status"]').textContent.includes('待同步'));
   step('reconnect state replay');
-  assert.equal(article.saved, true); await context.setOffline(false);
+  assert.equal(article.saved, true); await setOffline(false);
   await page.waitForFunction(() => !document.querySelector('[data-testid="offline-status"]').textContent.includes('待同步') && !document.querySelector('[data-testid="offline-status"]').textContent.includes('同步…'));
   await expect.poll(() => article.saved).toBe(false);
   step('tablet and phone geometry');
@@ -130,7 +133,7 @@ try {
   assert.deepEqual(style, ['rgb(0, 0, 0)', '22px', 'none', 'none']);
   step('logout and purge');
   await page.goto(`${url}/settings`); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.getByRole('heading', { name: '欢迎回来' }).waitFor();
-  await context.setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByRole('heading', { name: '欢迎回来' }).waitFor(); assert.equal(await page.getByTestId('reader-content').count(), 0);
+  await setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByRole('heading', { name: '欢迎回来' }).waitFor(); assert.equal(await page.getByTestId('reader-content').count(), 0);
   assert.deepEqual(errors, []); await context.close();
   console.log('PASS browser fixture: sanitized reader, desktop/tablet/phone no overflow, offline body+image reload, queued state reconnect, continuous TTS browser-API seam, late fulltext isolation, scoped CSS success/rejection, e-ink, logout purge; no page errors.');
 } catch (error) {
@@ -141,4 +144,4 @@ try {
     await page.screenshot({ path: join(artifacts, 'failure.png'), timeout: 3_000 }).catch(() => {});
   }
   throw error;
-} finally { await browser?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+} finally { await browser?.close(); await origin.pauseOrigin(); }

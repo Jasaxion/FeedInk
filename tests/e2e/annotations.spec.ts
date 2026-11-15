@@ -8,7 +8,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import type { AnnotationDocument, NotesBackup } from '../../packages/shared/src/index.js';
 import { assertNoHorizontalOverflow, baseURL, browserNetworkFault, csrf, openSettings, resetUpstream } from './helpers.js';
 import {
-  annotationFixture, annotationPath, assertAllStrokeColors, createAnnotationUser, fixtureLiteralNote,
+  annotationFixture, annotationPath, annotationSaveFault, assertAllStrokeColors, createAnnotationUser, fixtureLiteralNote,
   fixturePassword, fixtureQuote, fixtureRemark, fixtureTitle, fixtureUnlocatedQuote, getAnnotation,
   notesBackup, parsePpm, pngDimensions, putAnnotation, seedAnnotationArticles, textMark, type Raster,
 } from '../fixtures/annotation-fixtures.js';
@@ -335,22 +335,20 @@ test('a delayed backend save stays locally pending and a real 412 preserves both
   const session = await createAnnotationUser(api);
   const { first } = await seedAnnotationArticles(api, session);
   await openAnnotations(page, first.id);
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  let attempted = false;
-  const pattern = `**/api/articles/${first.id}/annotations*`;
-  await context.route(pattern, async route => {
-    if (route.request().method() === 'PUT') { attempted = true; await gate; }
-    await route.continue();
-  });
+  const saveFault = await annotationSaveFault();
   try {
+    await saveFault.hold(first.id);
     await addRemark(page, '本地冲突草稿');
-    await expect.poll(() => attempted).toBe(true);
+    await expect.poll(async () => (await saveFault.status()).held).toBe(1);
     await expect(page.getByTestId('annotation-status')).toContainText(pending);
     await expect(page.getByTestId('annotation-status')).not.toContainText(synchronized);
-    const empty = await getAnnotation(api, first.id);
-    const winner = await putAnnotation(api, session, empty, { schemaVersion: 1, contentHash: empty.contentHash, ink: null, marks: [textMark('note', '服务器另一设备版本')] });
-    release();
+    const empty = await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin);
+    expect(empty.revision).toBe(0);
+    const winner = await putAnnotation(api, session, empty, { schemaVersion: 1, contentHash: empty.contentHash, ink: null, marks: [textMark('note', '服务器另一设备版本')] }, saveFault.witnessOrigin);
+    expect(winner.revision).toBe(1);
+    expect((await saveFault.status()).held, 'independent API winner bypassed the held browser PUT').toBe(1);
+    await saveFault.release();
+    await expect.poll(async () => (await saveFault.status()).lastStatus).toBe(412);
     await expect(page.getByTestId('annotation-status')).toContainText(/冲突/);
     await expect(page.getByTestId('annotations-panel')).toContainText('本地冲突草稿');
     expect((await getAnnotation(api, first.id)).marks).toEqual(winner.marks);
@@ -361,7 +359,7 @@ test('a delayed backend save stays locally pending and a real 412 preserves both
     await showAnnotations(page);
     await expect(page.getByTestId('annotations-panel')).toContainText('本地冲突草稿');
     await expect(page.getByTestId('annotation-status')).toContainText(/冲突/);
-  } finally { release(); await context.unroute(pattern); }
+  } finally { await saveFault.reset(); }
 });
 
 test('forced expiry strictly blocks account switching until the original owner recovers and resolves drafts', async ({ page, context, playwright, browserName }) => {
@@ -369,8 +367,9 @@ test('forced expiry strictly blocks account switching until the original owner r
   const api = context.request;
   const session = await createAnnotationUser(api);
   const { first } = await seedAnnotationArticles(api, session);
-  const otherApi = await playwright.request.newContext({ baseURL });
+  const saveFault = await annotationSaveFault();
   const setOffline = await browserNetworkFault(page, browserName);
+  const otherApi = await playwright.request.newContext({ baseURL });
   try {
     const otherSession = await createAnnotationUser(otherApi);
     const otherArticles = await seedAnnotationArticles(otherApi, otherSession);
@@ -381,6 +380,8 @@ test('forced expiry strictly blocks account switching until the original owner r
     // Revoke the real server session without invoking the application's voluntary-logout flow.
     const revoked = await api.post(new URL('/api/auth/logout', process.env.FEEDINK_API_WITNESS_URL || baseURL).href, { headers: csrf(session) });
     expect(revoked.status()).toBe(204);
+    const denied = await api.get(new URL(annotationPath(first.id), saveFault.witnessOrigin).href);
+    expect(denied.status(), 'revoked owner cannot read server annotations').toBe(401);
     await setOffline(false);
     await expect(page.getByTestId('app-shell')).toHaveCount(0);
     await expect(page.getByText(fixtureRemark, { exact: false })).toHaveCount(0);
@@ -410,22 +411,29 @@ test('forced expiry strictly blocks account switching until the original owner r
     await expect(page.getByTestId('annotation-status')).toContainText(synchronized);
     expect((await getAnnotation(otherApi, otherArticles.first.id)).marks).toEqual([]);
     // An explicit owner-authorized discard, not a foreign login, resolves the next draft.
-    const pattern = `**/api/articles/${first.id}/annotations?*`;
-    await context.route(pattern, route => route.request().method() === 'PUT'
-      ? route.fulfill({ status: 503, json: { error: { code: 'UNAVAILABLE', message: '受控保存失败' } } }) : route.continue());
+    const recovered = await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin);
+    await saveFault.fail(first.id);
     await addRemark(page, '明确放弃的未同步备注');
+    await expect.poll(async () => (await saveFault.status()).failed).toBeGreaterThan(0);
     await expect(page.getByTestId('annotation-status')).toContainText(pending);
+    await expect(page.getByTestId('annotation-status')).not.toContainText(synchronized);
+    const unchanged = await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin);
+    expect(unchanged.revision).toBe(recovered.revision);
+    expect(unchanged.marks).toEqual(recovered.marks);
     await openSettings(page);
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByRole('button', { name: '放弃未同步更改', exact: true }).click();
     await expect(page.getByTestId('app-shell')).toHaveCount(0);
-    await context.unroute(pattern);
+    await saveFault.reset();
     await login(page, otherSession.user.email);
     await openAnnotations(page, otherArticles.first.id);
     await expect(page.getByTestId('annotations-panel')).not.toContainText(fixtureRemark);
     await expect(page.getByTestId('annotations-panel')).not.toContainText('明确放弃的未同步备注');
     expect((await getAnnotation(otherApi, otherArticles.first.id)).marks).toEqual([]);
-  } finally { await setOffline(false); await otherApi.dispose(); }
+  } finally {
+    try { await saveFault.reset(); }
+    finally { try { await setOffline(false); } finally { await otherApi.dispose(); } }
+  }
 });
 
 test('manual logout offers cancellation and explicit export/discard for unsynchronized notes', async ({ page, context, browserName }) => {

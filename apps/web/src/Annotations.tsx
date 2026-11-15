@@ -24,7 +24,7 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
   const [historyState, setHistoryState] = useState({ undo: false, redo: false }), [editor, setEditor] = useState<string | null>(null);
   const [versions, setVersions] = useState<AnnotationVersion[]>([]), [nextVersion, setNextVersion] = useState<number | null>(0);
   const [historical, setHistorical] = useState(false), [syncing, setSyncing] = useState(false);
-  const pauses = useRef(0), syncBusy = useRef(false);
+  const pauses = useRef(0), syncBusy = useRef(false), syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [paused, setPaused] = useState(false), [loadGeneration, setLoadGeneration] = useState(0), [syncAgain, setSyncAgain] = useState(0);
   const [configurationGeneration, setConfigurationGeneration] = useState(0);
   const readOnly = loading || paused;
@@ -164,7 +164,10 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     present(saved); setStatus(pendingLabel(saved));
   }
   async function sync() {
-    if (syncBusy.current || frozen.current || pauses.current) return; syncBusy.current = true; setSyncing(true); setError('');
+    if (syncBusy.current || frozen.current || pauses.current) return;
+    // A manual save consumes the pending debounce too; a failed pass must not retry itself.
+    if (syncTimer.current !== null) { clearTimeout(syncTimer.current); syncTimer.current = null; }
+    syncBusy.current = true; setSyncing(true); setError('');
     try {
       if (writeError.current && current.current) persist(current.current);
       await flush();
@@ -179,7 +182,9 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
   }
   useEffect(() => {
     if (!row?.pending || row.conflict || !app.online || readOnly) return;
-    const timer = setTimeout(() => void sync(), 1000); return () => clearTimeout(timer);
+    const timer = setTimeout(() => { syncTimer.current = null; void sync(); }, 1000);
+    syncTimer.current = timer;
+    return () => { clearTimeout(timer); if (syncTimer.current === timer) syncTimer.current = null; };
   }, [row?.localVersion, app.online, syncAgain, readOnly]);
   useEffect(() => {
     const refreshed = () => { void refreshLocal().catch(() => {}); };

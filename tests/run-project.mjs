@@ -7,8 +7,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOfflineProxy } from './fixtures/offline-proxy.mjs';
 
-const project = process.argv[2];
+const [project, shard, ...extra] = process.argv.slice(2);
 if (!['api', 'desktop', 'mobile', 'tablet', 'webkit', 'workflows', 'annotations', 'annotations-mobile', 'annotations-webkit', 'mcp'].includes(project)) throw new Error('Choose a configured test project');
+const annotations = project.startsWith('annotations');
+// Three four-test batches get separate API processes and unchanged production rate budgets.
+const shardIndex = shard?.match(/^--shard=([1-3])\/3$/)?.[1];
+if (extra.length || (shard !== undefined && (!annotations || !shardIndex))) throw new Error('Optional annotation batch must be --shard=1/3, --shard=2/3 or --shard=3/3');
+const batch = shardIndex ? `${project}-shard-${shardIndex}-of-3` : project;
 if (!process.env.TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL must identify a disposable test database; production DATABASE_URL is never reused implicitly');
 await access('apps/api/dist/server.js');
 const directory = await mkdtemp(join(tmpdir(), 'feedink-test-'));
@@ -32,7 +37,7 @@ const cancel = () => { interrupted = true; runner?.kill('SIGTERM'); api?.kill('S
 process.once('SIGINT', cancel);
 process.once('SIGTERM', cancel);
 try {
-  if (project.endsWith('webkit')) proxy = await createOfflineProxy(upstreamUrl);
+  if (annotations || project.endsWith('webkit')) proxy = await createOfflineProxy(upstreamUrl);
   const origin = proxy?.publicUrl || upstreamUrl;
   const env = {
     ...process.env,
@@ -44,6 +49,7 @@ try {
     WORKER_ENABLED: 'false', REGISTRATION_ENABLED: 'true', FETCH_ALLOW_HOSTS: '127.0.0.1',
     FEEDINK_TEST_WEBKIT: project.endsWith('webkit') ? '1' : process.env.FEEDINK_TEST_WEBKIT || '0',
     FEEDINK_API_WITNESS_URL: upstreamUrl,
+    PLAYWRIGHT_HTML_OUTPUT_DIR: process.env.PLAYWRIGHT_HTML_OUTPUT_DIR || `playwright-report/${batch}`,
   };
   if (proxy) {
     const path = join(directory, 'network-control.json');
@@ -64,7 +70,7 @@ try {
     if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
   }
   if (!ready) throw new Error('Test API did not become ready before its deadline');
-  runner = spawn(process.execPath, ['node_modules/@playwright/test/cli.js', 'test', `--project=${project}`, '--global-timeout=360000', `--output=test-results/${project}`], { env, stdio: 'inherit' });
+  runner = spawn(process.execPath, ['node_modules/@playwright/test/cli.js', 'test', `--project=${project}`, '--global-timeout=360000', `--output=test-results/${batch}`, ...(shard ? [shard, '--fully-parallel', '--workers=1'] : [])], { env, stdio: 'inherit' });
   const timeout = setTimeout(() => runner.kill('SIGTERM'), 390_000);
   let code;
   try { [code] = await once(runner, 'exit'); } finally { clearTimeout(timeout); }
