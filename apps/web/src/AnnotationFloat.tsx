@@ -40,6 +40,7 @@ export function AnnotationFloat({ root, anchor, kind, children, onClose, onInvis
       const box = node.getBoundingClientRect();
       const position = placeAnnotation(bounds, box, target);
       if (kind === 'drawer') { position.top = window.innerWidth < 700 ? bounds.bottom - Math.min(box.height, heightLimit) : bounds.top; }
+      if (kind === 'notice') position.top = bounds.bottom - Math.min(box.height, heightLimit);
       setStyle({ ...position, maxWidth, maxHeight: heightLimit, visibility: maxWidth > 0 && maxHeight > 0 ? 'visible' : 'hidden' });
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(position); };

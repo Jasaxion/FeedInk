@@ -163,6 +163,12 @@ test('browser pen preserves pressure, scopes input to the reader, and whole-stro
   const outside = await page.getByTestId('annotation-toggle').boundingBox();
   if (!outside) throw new Error('Annotation status must have visible geometry');
   await penPath(page, [{ x: outside.x + 4, y: outside.y + 4, pressure: 0.2 }, { x: outside.x + 20, y: outside.y + 5, pressure: 0.8 }]);
+  // A pen tap on the note icon is a real toolbar action, not a body stroke.
+  await expect(page.getByTestId('annotations-panel')).toBeVisible();
+  expect((await getAnnotation(api, first.id)).ink?.strokes ?? []).toEqual([]);
+  await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+  await page.getByTestId('ink-toggle').click();
+  await expect(toolbar.getByRole('button', { name: '钢笔', exact: true })).toHaveAttribute('aria-pressed', 'true');
   const paragraph = page.getByTestId('reader-content').locator('p').filter({ hasText: fixtureQuote }).first();
   async function paragraphPoints() {
     // Toolbar clicks can scroll the narrow reader; CDP requires current viewport coordinates.
