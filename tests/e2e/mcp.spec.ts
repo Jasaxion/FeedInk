@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { createHash } from 'node:crypto';
 import type { CreatedMcpToken, McpScope, TextAnnotation } from '../../packages/shared/src/index.js';
 import { baseURL, csrf, resetUpstream } from './helpers.js';
 import {
@@ -201,7 +202,10 @@ test('real initialize/list/call searches owned articles/notes and returns bounde
   const asset = first.images.find(image => image.status === 'cached');
   if (!asset) throw new Error('Owned RSS fixture image was not archived');
   const original = await client.call('get_article_image', { imageId: asset.id });
-  expect(structured(original)).toMatchObject({ imageId: asset.id, articleId: first.id, contentHash: first.contentHash });
+  const capturedImage = await request.get(asset.url);
+  expect(capturedImage.status()).toBe(200);
+  const capturedHash = createHash('sha256').update(await capturedImage.body()).digest('hex');
+  expect(structured(original)).toMatchObject({ imageId: asset.id, articleId: first.id, contentHash: capturedHash });
   const originalImage = original.content.find(block => block.type === 'image');
   expect(originalImage?.mimeType).toBe('image/png'); expect(Boolean(originalImage?.data)).toBe(true);
   pngDimensions(Buffer.from(originalImage!.data!, 'base64'));
