@@ -10,6 +10,7 @@ const engine = process.env.FEEDINK_BROWSER === 'webkit' ? webkit : chromium;
 const executablePath = process.env.FEEDINK_BROWSER === 'webkit' ? undefined : process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
 import { DEFAULT_SETTINGS } from '@feedink/shared';
 import { fixtureOrigin, fixtureOffline } from './fixture-origin.mjs';
+import { fixturePageErrors, verifyRuntimeErrorWitness } from './fixture-page-errors.mjs';
 
 const dist = fileURLToPath(new URL('../dist/', import.meta.url));
 const artifacts = process.env.FEEDINK_BROWSER_ARTIFACTS || await mkdtemp(join(tmpdir(), 'feedink-web-smoke-'));
@@ -58,7 +59,9 @@ let stage = 'launch';
 const step = name => { stage = name; console.log(`SMOKE ${name}`); };
 try {
   browser = await engine.launch({ executablePath, headless: true, timeout: 20_000 });
+  await verifyRuntimeErrorWitness(browser);
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: url, apiPaths: ['/api/session', '/api/articles'], origin });
   const setOffline = fixtureOffline(context, origin);
   context.setDefaultTimeout(10_000); context.setDefaultNavigationTimeout(15_000);
   // Deterministic browser-API seam: verifies continuous-play UI logic, not actual voice/audio quality.
@@ -67,7 +70,7 @@ try {
     Object.defineProperty(window, 'speechSynthesis', { value: speech, configurable: true });
     window.__feedinkSpeech = speech;
   });
-  page = await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(error.message));
+  page = await context.newPage();
   step('reader and sanitization');
   await page.goto(url); await page.getByTestId('article-card').first().click();
   await page.getByTestId('reader-content').waitFor();
@@ -134,8 +137,8 @@ try {
   step('logout and purge');
   await page.goto(`${url}/settings`); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.getByRole('heading', { name: '欢迎回来' }).waitFor();
   await setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByRole('heading', { name: '欢迎回来' }).waitFor(); assert.equal(await page.getByTestId('reader-content').count(), 0);
-  assert.deepEqual(errors, []); await context.close();
-  console.log('PASS browser fixture: sanitized reader, desktop/tablet/phone no overflow, offline body+image reload, queued state reconnect, continuous TTS browser-API seam, late fulltext isolation, scoped CSS success/rejection, e-ink, logout purge; no page errors.');
+  await errors.assertClean(); await context.close();
+  console.log('PASS browser fixture: sanitized reader, desktop/tablet/phone no overflow, offline body+image reload, queued state reconnect, continuous TTS browser-API seam, late fulltext isolation, scoped CSS success/rejection, e-ink, logout purge; no unexpected page errors or runtime errors.');
 } catch (error) {
   console.error(`FAIL browser fixture at stage: ${stage}`);
   if (page && !page.isClosed()) {

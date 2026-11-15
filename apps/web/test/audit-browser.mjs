@@ -7,20 +7,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { auditFixture, deferred, instrumentStorage } from './audit-fixture.mjs';
 import { fixtureOffline } from './fixture-origin.mjs';
+import { fixturePageErrors, verifyRuntimeErrorWitness } from './fixture-page-errors.mjs';
 
 const artifacts = process.env.FEEDINK_BROWSER_ARTIFACTS || await mkdtemp(join(tmpdir(), 'feedink-audit-')); await mkdir(artifacts, { recursive: true });
 const browser = await engine.launch({ executablePath, headless: true, timeout: 20_000 });
 let passed = 0;
 async function scenario(name, action) {
   console.log(`AUDIT ${name}`); const fixture = await auditFixture(); const context = await browser.newContext({ viewport: { width: 1280, height: 800 } }); context.setDefaultTimeout(10_000); context.setDefaultNavigationTimeout(15_000); await context.addInitScript(instrumentStorage);
-  const page = await context.newPage(); const errors = []; page.on('pageerror', error => errors.push(error.message));
-  try { await action({ ...fixture, page, context, setOffline: fixtureOffline(context, fixture) }); assert.deepEqual(errors, []); passed++; console.log(`PASS ${name}`); }
+  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: fixture.url, apiPaths: ['/api/session', '/api/articles'], origin: fixture });
+  const page = await context.newPage();
+  try { await action({ ...fixture, page, context, setOffline: fixtureOffline(context, fixture) }); await errors.assertClean(); passed++; console.log(`PASS ${name}`); }
   catch (error) { console.error(`FAIL ${name}`, await page.locator('body').innerText({ timeout: 2000 }).catch(() => 'unavailable')); await page.screenshot({ path: join(artifacts, `failure-${passed}.png`), timeout: 3000 }).catch(() => {}); throw error; }
   finally { await context.close(); await fixture.close(); }
 }
 const open = async (page, url, id = 'one') => { await page.goto(`${url}/?article=${id}`); await expect(page.getByTestId('reader-content')).toBeVisible(); };
 const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 try {
+  await verifyRuntimeErrorWitness(browser);
   await scenario('03 native keyboard +16 owned source icons', async ({ page, url, control }) => {
     await open(page, url);
     const icon = page.locator('.article-source img'); await expect(icon).toHaveAttribute('src', control.subscriptions[0].iconUrl); await expect.poll(() => icon.evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
