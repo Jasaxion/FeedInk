@@ -6,7 +6,7 @@ MCP（Model Context Protocol）让兼容客户端查询当前令牌所属账号�
 
 ## 准备与连接
 
-1. 部署支持该阶段的 FeedInk 版本，使用 HTTPS 和正确的公开 `APP_URL`。只有可信本机回环开发可使用 HTTP。代理须保留认证与协议头，支持 Streamable HTTP；不要为排查问题关闭 Host/Origin/CSRF 校验。
+1. 部署支持该阶段的 FeedInk 版本，使用 HTTPS 和正确的公开 `APP_URL`。只有直接连接的可信本机回环开发可使用 HTTP。Docker 端口转发通常让 API 看到网桥地址而非回环地址，应按 [部署说明](deployment.md) 使用 HTTPS 反向代理，并将 `TRUST_PROXY` 限定到实际代理地址。代理须保留认证与协议头，支持 Streamable HTTP；不要为排查问题关闭 Host/Origin/CSRF 校验。
 2. 使用自己的普通登录会话管理令牌。演示账号不能创建令牌。选择最小权限、可识别名称和有限有效期。
 3. 新令牌仅在创建响应中显示一次。存进客户端的安全凭据存储；丢失时撤销并重建，不通过列表接口找回明文。
 4. 在支持 **Streamable HTTP** 和自定义认证头的客户端中配置：地址 `https://YOUR_FEEDINK_HOST/mcp`，认证头 `Authorization: Bearer <YOUR_MCP_TOKEN>`。
