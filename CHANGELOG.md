@@ -2,6 +2,19 @@
 
 Version records describe FeedInk changes and verified behavior. Development checkpoints are not production releases.
 
+## Unreleased — annotations and read-only AI access
+
+Development candidate; the full release gates are still pending.
+
+- Add reader-scoped text highlights, straight and wavy underlines, remarks, and pressure-aware browser handwriting adapted from Apache-2.0 WebInk.
+- Preserve versioned article/mode contexts, including verified contexts opened before an offline draft's first save; use conditional writes and explicit conflict handling.
+- Retain unsynchronized drafts during forced authentication loss and non-destructive locked exit. Require verified same-owner recovery and protect notes from legacy browser-cache writers.
+- Add restorable JSON, portable Markdown/PNG/JSON archives, and printable annotation reports with raw/unlocated stroke inventories.
+- Add archive version 3 note/context restoration, idempotent duplicate handling and missing-image repair while retaining v1/v2 import support.
+- Add authenticated Streamable HTTP MCP with seven read-only article/note/image tools, separate scopes, one-time token display, revocation, expiry and disabled-account checks.
+- Extend hosted checks with real SDK interoperability, HTTP-level browser fault witnesses, annotation shards, PDF text/raster checks, and note/token persistence through HTTPS deployment recovery.
+- Publish hash-inventoried runtime code with required licenses/notices only after all CI gates pass; exclude environment files, archives, credentials and raw diagnostics.
+
 ## 0.1.0 — base reader — 2026-11-15
 
 - Implement a multi-user Web reader and installable PWA with desktop, tablet, phone and e-ink layouts.
