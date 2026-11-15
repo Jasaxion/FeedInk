@@ -14,7 +14,7 @@ const browser = await engine.launch({ executablePath, headless: true, timeout: 2
 let passed = 0;
 async function scenario(name, action) {
   console.log(`AUDIT ${name}`); const fixture = await auditFixture(); const context = await browser.newContext({ viewport: { width: 1280, height: 800 } }); context.setDefaultTimeout(10_000); context.setDefaultNavigationTimeout(15_000); await context.addInitScript(instrumentStorage);
-  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: fixture.url, apiPaths: ['/api/session', '/api/articles'], origin: fixture });
+  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: fixture.url, apiPaths: ['/api/session', '/api/articles', '/api/subscriptions', '/api/folders', '/api/tags'], fixtureDocumentPaths: ['/original', '/denied'], origin: fixture });
   const page = await context.newPage();
   try { await action({ ...fixture, page, context, setOffline: fixtureOffline(context, fixture) }); await errors.assertClean(); passed++; console.log(`PASS ${name}`); }
   catch (error) { console.error(`FAIL ${name}`, await page.locator('body').innerText({ timeout: 2000 }).catch(() => 'unavailable')); await page.screenshot({ path: join(artifacts, `failure-${passed}.png`), timeout: 3000 }).catch(() => {}); throw error; }
@@ -24,12 +24,20 @@ const open = async (page, url, id = 'one') => { await page.goto(`${url}/?article
 const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 try {
   await verifyRuntimeErrorWitness(browser);
-  await scenario('03 native keyboard +16 owned source icons', async ({ page, url, control }) => {
+  await scenario('03 native keyboard +16 owned source icons', async ({ page, url, control, context }) => {
+    // The shared /original intentionally escapes top.location in the sandbox
+    // scenario below. Test keyboard activation against a scriptless original
+    // site instead, outside the application's SW scope. This avoids racing an
+    // escape into a second FeedInk app against popup.close(); no app errors are
+    // waived. The sandbox scenario retains its real escape script/assertions.
+    const originalURL = 'https://original.example.test/reading';
+    control.articles[0].url = originalURL;
+    await context.route(originalURL, route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<h1>原文链接键盘夹具</h1>' }));
     await open(page, url);
     const icon = page.locator('.article-source img'); await expect(icon).toHaveAttribute('src', control.subscriptions[0].iconUrl); await expect.poll(() => icon.evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
     const saved = page.getByTestId('reader').getByRole('button', { name: '稍后阅读', exact: true }); await saved.focus(); await page.keyboard.press('Space'); await expect.poll(() => control.articles[0].saved).toBe(true);
     await saved.focus(); await page.keyboard.press('Enter'); await expect.poll(() => control.articles[0].saved).toBe(false);
-    const popupPromise = page.waitForEvent('popup'); await page.locator('.article-document>h1 a').focus(); await page.keyboard.press('Enter'); const popup = await popupPromise; await popup.close();
+    const popupPromise = page.waitForEvent('popup'); await page.locator('.article-document>h1 a').focus(); await page.keyboard.press('Enter'); const popup = await popupPromise; await expect(popup).toHaveURL(originalURL); await expect(popup.getByRole('heading')).toHaveText('原文链接键盘夹具'); await popup.close();
     await page.getByRole('button', { name: '返回', exact: true }).focus(); await page.keyboard.press('Enter'); await expect(page).not.toHaveURL(/article=/);
     await page.getByTestId('article-card').first().focus(); await page.keyboard.press('Enter'); await expect(page.getByTestId('reader-content')).toBeVisible();
     control.subscriptions[0].iconUrl = 'https://untrusted.invalid/tracker.png'; let tracked = false; page.on('request', request => { if (request.url().includes('untrusted.invalid')) tracked = true; }); await page.reload(); await expect(page.getByTestId('reader-content')).toBeVisible(); await settle(page); assert.equal(tracked, false); assert.equal(await page.locator('.article-source img').count(), 0); await expect(page.locator('.article-source .source-icon svg')).toBeVisible();

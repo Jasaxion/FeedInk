@@ -8,7 +8,7 @@ export function fixtureOrigin(server) {
   const failureWindows = [];
   const pauseOrigin = async () => {
     if (!server.listening) return;
-    const window = { id: failureWindows.length, startedAt: performance.now(), endedAt: null, verifiedUnreachable: false };
+    const window = { id: failureWindows.length, startedAt: Date.now(), endedAt: null, verifiedUnreachable: false };
     failureWindows.push(window);
     const closed = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     server.closeAllConnections();
@@ -28,7 +28,7 @@ export function fixtureOrigin(server) {
   const resumeOrigin = async () => {
     if (server.listening) return;
     const window = failureWindows.at(-1);
-    if (window) window.endedAt = performance.now();
+    if (window) window.endedAt = Date.now();
     await new Promise((resolve, reject) => {
       const failed = error => reject(error);
       server.once('error', failed);
@@ -36,7 +36,11 @@ export function fixtureOrigin(server) {
     });
   };
   const failureWindowAt = at => failureWindows.find(window => at >= window.startedAt && (window.endedAt === null || at < window.endedAt));
-  return { pauseOrigin, resumeOrigin, failureWindowAt };
+  const failureWindowOverlapping = (startedAt, endedAt) => {
+    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) return null;
+    return failureWindows.find(window => window.verifiedUnreachable && endedAt >= window.startedAt && (window.endedAt === null || startedAt < window.endedAt)) || null;
+  };
+  return { pauseOrigin, resumeOrigin, failureWindowAt, failureWindowOverlapping };
 }
 
 export function fixtureOffline(context, origin) {
