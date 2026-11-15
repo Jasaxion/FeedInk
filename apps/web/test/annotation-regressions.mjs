@@ -8,7 +8,7 @@ export async function annotationRegressions(browser, expect) {
     const fixture = await auditFixture(), context = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
     const page = await context.newPage(); context.setDefaultTimeout(15000);
     const article = fixture.control.articles[0], hash = 'a'.repeat(64);
-    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, failure: 0, hold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT', loadHold: null, loads: 0 };
+    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, failure: 0, hold: null, ackHold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT', loadHold: null, loads: 0 };
     fixture.route(/^\/api\/articles\/one\/annotations(?:\/import)?$/, async ({ request, url, body, json }) => {
       if (url.pathname.endsWith('/import')) {
         assert.equal(url.search, '', 'import context is carried by the backup');
@@ -21,6 +21,7 @@ export async function annotationRegressions(browser, expect) {
         state.writes++; if (state.hold) await state.hold.promise;
         if (state.failure) return json({ error: { code: 'UNAVAILABLE', message: '受控保存失败' } }, state.failure);
         state.document = { ...state.document, ...payload, revision: state.document.revision + 1 };
+        if (state.ackHold) await state.ackHold.promise;
       } else if (url.searchParams.has('contentHash') && url.searchParams.get('contentHash') !== state.document.contentHash) return json({ error: { code: state.historyCode, message: '历史上下文不可用' } }, state.historyStatus);
       if (request.method === 'GET') { state.loads++; if (state.loadHold) await state.loadHold.promise; }
       return json(state.document);
@@ -37,7 +38,7 @@ export async function annotationRegressions(browser, expect) {
       await run({ page, context, fixture, state });
       assert.deepEqual(fixture.routeErrors, []); assert.equal(fixture.control.rejectedCsrf, 0);
       console.log(`PASS annotation regression: ${name}`);
-    } finally { state.hold?.resolve(); state.loadHold?.resolve(); await context.close(); await fixture.close(); }
+    } finally { state.hold?.resolve(); state.ackHold?.resolve(); state.loadHold?.resolve(); await context.close(); await fixture.close(); }
   }
   async function newNote(page, text) {
     await page.getByRole('button', { name: '备注', exact: true }).click();
@@ -142,6 +143,25 @@ export async function annotationRegressions(browser, expect) {
     await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
     assert.equal(state.document.revision, 0);
     await expect(page.getByTestId('annotations-panel')).toContainText('manual save must not retry itself');
+  });
+  await scenario('reload waits for its own server commit acknowledgement without a false conflict', async ({ page, state }) => {
+    await page.setViewportSize({ width: 1280, height: 2400 });
+    state.ackHold = deferred();
+    await newNote(page, 'committed while acknowledgement is held');
+    await page.getByRole('button', { name: '保存备注', exact: true }).click();
+    await expect.poll(() => state.document.revision).toBe(1);
+    await page.getByText('正文版本 · 当前正文', { exact: true }).click();
+    const loads = state.loads;
+    const reload = page.getByRole('button', { name: '返回最新正文版本', exact: true });
+    await reload.click(); await expect(reload).toBeDisabled();
+    await page.waitForTimeout(1300);
+    assert.equal(state.loads, loads, 'GET/local reconciliation cannot overtake the pending acknowledgement');
+    state.ackHold.resolve(); state.ackHold = null;
+    await expect.poll(() => state.loads).toBe(loads + 1);
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    await expect(page.getByTestId('annotation-status')).not.toContainText('冲突');
+    assert.equal(state.writes, 1);
+    await expect(page.getByTestId('annotations-panel')).toContainText('committed while acknowledgement is held');
   });
   await scenario('retirement freezes edits and keeps latest B on local failure', async ({ page }) => {
     await page.evaluate(() => window.dispatchEvent(new Event('offline')));

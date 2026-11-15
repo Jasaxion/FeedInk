@@ -94,24 +94,23 @@ export async function fixturePageErrors(context, options) {
 // Real browser sensitivity, on a separate non-application page: neither a throw
 // nor an unhandled rejection may disappear, even with the native diagnostic text.
 export async function verifyRuntimeErrorWitness(browser) {
-  const context = await browser.newContext();
-  try {
-    const witness = await fixturePageErrors(context, { browserName: 'webkit', ownedOrigin: 'http://127.0.0.1:1', apiPaths: ['/api/session'], origin: { failureWindowAt: () => null } });
-    const page = await context.newPage();
-    await page.goto('data:text/html,<title>Runtime witness sensitivity</title>');
-    await page.evaluate(() => {
-      setTimeout(() => { throw new Error('fixture runtime throw'); }, 0);
-      void Promise.reject(new Error('fixture unhandled rejection'));
-    });
-    await page.waitForFunction(() => window.__fixtureRuntimeEvents.includes('error') && window.__fixtureRuntimeEvents.includes('unhandledrejection'));
-    await page.reload();
-    await assert.rejects(() => witness.assertClean(), /Independent ErrorEvent\/unhandledrejection witness/);
-    await page.evaluate(() => {
-      const fakeNative = () => Object.assign(new Error('/127.0.0.1:1/api/session due to access control checks.'), { name: 'Fetch API cannot load http', stack: '' });
-      setTimeout(() => { throw fakeNative(); }, 0);
-      void Promise.reject(fakeNative());
-    });
-    await page.waitForFunction(() => window.__fixtureRuntimeEvents.includes('error') && window.__fixtureRuntimeEvents.includes('unhandledrejection'));
-    await assert.rejects(() => witness.assertClean(), /Independent ErrorEvent\/unhandledrejection witness/);
-  } finally { await context.close(); }
+  for (const lookalike of [false, true]) {
+    const context = await browser.newContext();
+    try {
+      const witness = await fixturePageErrors(context, { browserName: 'webkit', ownedOrigin: 'http://127.0.0.1:1', apiPaths: ['/api/session'], origin: { failureWindowAt: () => null } });
+      const page = await context.newPage();
+      await page.goto('data:text/html,<title>Runtime witness sensitivity</title>');
+      await witness.assertClean();
+      await page.evaluate(lookalike => {
+        const error = () => lookalike
+          ? Object.assign(new Error('/127.0.0.1:1/api/session due to access control checks.'), { name: 'Fetch API cannot load http', stack: '' })
+          : new Error('fixture runtime failure');
+        setTimeout(() => { throw error(); }, 0);
+        void Promise.reject(error());
+      }, lookalike);
+      await page.waitForFunction(() => window.__fixtureRuntimeEvents.includes('error') && window.__fixtureRuntimeEvents.includes('unhandledrejection'));
+      await page.reload();
+      await assert.rejects(() => witness.assertClean(), /Independent ErrorEvent\/unhandledrejection witness/);
+    } finally { await context.close(); }
+  }
 }

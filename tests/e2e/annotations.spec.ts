@@ -413,14 +413,16 @@ test('forced expiry strictly blocks account switching until the original owner r
     // An explicit owner-authorized discard, not a foreign login, resolves the next draft.
     const recovered = await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin);
     const originalViewport = page.viewportSize()!;
-    // Isolate the save debounce from Reader's independent 700 ms scroll-progress sync.
-    await page.setViewportSize({ width: originalViewport.width, height: 4800 });
+    // Use one fixed layout for fault counts: compact navigation otherwise retires/resumes
+    // the reader and intentionally requests another synchronization. Mobile layout has its own case.
+    await page.setViewportSize({ width: 1280, height: 4800 });
     await page.waitForTimeout(1000);
     await expect(page.getByTestId('offline-status')).not.toContainText('正在同步');
     await expect.poll(() => page.getByTestId('reader').evaluate(root => { const scroll = root.querySelector('.reader-scroll')!; return scroll.scrollHeight <= scroll.clientHeight + 1; })).toBe(true);
     await saveFault.fail(first.id);
     await page.getByRole('button', { name: '备注', exact: true }).click();
     await page.getByTestId('note-editor').fill('明确放弃的未同步备注');
+    expect(await page.locator('.reader-scroll').evaluate(scroll => scroll.scrollHeight <= scroll.clientHeight + 1)).toBe(true);
     const failedOnce = { mode: 'fail', attempted: 1, held: 0, failed: 1, completed: 0, lastStatus: null };
     await expect.poll(() => saveFault.status()).toEqual(failedOnce);
     // A failed pass must remain stable beyond two annotation debounce periods.

@@ -4,7 +4,8 @@ import { WebInkOverlay } from '@feedink/ink/overlay';
 import type { HostMessage, Tool } from '@feedink/ink/types';
 import { useApp } from './context';
 import { api, HttpError } from './api';
-import { assertAuthEpoch, authEpoch } from './authEpoch';
+import { assertAuthEpoch, authEpoch, withAuthNetworkLock } from './authEpoch';
+import { withOwnerLock } from './stateSync';
 import { annotationKey, assertContext, markColors, markLabels, validateAnnotations, type StoredAnnotations } from './annotationData';
 import { annotationPath, fetchAnnotations, registerNotes, synchronizeAnnotations } from './annotationSync';
 import { exportNotesJson, exportNotesMarkdown, printNotes } from './annotationExport';
@@ -85,6 +86,9 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     setLoading(true); setError('');
     try {
       await flush(); assertAuthEpoch(epoch);
+      // A context reload must not mistake our own in-flight save for a remote conflict.
+      await withAuthNetworkLock(() => withOwnerLock(app.store, owner, async check => {
+      await check(); assertAuthEpoch(epoch);
       let document: AnnotationDocument, cachedHistory: StoredAnnotations | undefined;
       const localDocuments = (await app.store.annotationDocuments(owner)).filter(item => item.document.context.articleId === article.id && item.document.context.mode === mode);
       assertAuthEpoch(epoch);
@@ -107,9 +111,11 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
       const local = await app.store.annotations(owner, document.context); assertAuthEpoch(epoch); if (!alive.current) return;
       let next: StoredAnnotations = cachedHistory ? local || cachedHistory : local?.pending ? local : { document, pending: false, localVersion: crypto.randomUUID() };
       if (!cachedHistory && local?.pending && app.online && local.document.revision !== document.revision) next = { ...local, conflict: document };
+      await check(); assertAuthEpoch(epoch);
       await app.store.putAnnotations(owner, next, local?.localVersion ?? null); assertAuthEpoch(epoch); if (!alive.current) return;
       setLoadGeneration(value => value + 1); setTool('text'); setEditor(null);
       storedVersion.current = next.localVersion; present(next); setStatus(`${cachedHistory ? '本机历史快照 · ' : ''}${pendingLabel(next)}`); setHistorical(!!contentHash || !app.online); setVersions([...new Map([...(document.versions || []), ...localDocuments.map(item => ({ contentHash: item.document.contentHash, revision: item.document.revision, updatedAt: item.document.updatedAt || '', markCount: item.document.marks.length, strokeCount: item.document.ink?.strokes.length || 0 }))].map(item => [item.contentHash, item])).values()]); setNextVersion(0);
+      }));
     } catch (reason) { if (alive.current) { setError(errorText(reason)); setStatus('载入失败 · 未启用书写'); } }
     finally { resume(); if (alive.current) setLoading(false); }
   }
