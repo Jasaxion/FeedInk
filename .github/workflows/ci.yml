@@ -75,7 +75,18 @@ jobs:
             fi
           done
           test "$failed" = 0
-      # Raw browser traces, session data and machine logs are not uploaded.
+      - name: Package reviewed runtime code
+        run: |
+          node --test scripts/package-runtime.test.mjs
+          node scripts/package-runtime.mjs
+      - name: Publish code-only runtime bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedink-runtime-${{ github.sha }}
+          path: .artifacts/runtime/
+          retention-days: 7
+          if-no-files-found: error
+      # Only checked runtime code is uploaded, never traces, sessions, environment files or data.
 
   container:
     runs-on: ubuntu-24.04

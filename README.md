@@ -33,6 +33,7 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 
 - [Architecture and trust boundaries](docs/architecture.md)
 - [API/shared contract](docs/api.md)
+- [Annotation and MCP development contract](docs/annotations-api.md)
 - [Product requirements and acceptance](docs/requirements.md)
 - [Deployment, HTTPS and PWA](docs/deployment.md)
 - [Consistent backup and empty-target restore](docs/backup.md)
@@ -41,4 +42,4 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 - [Version history](CHANGELOG.md)
 - [0.1.0 release notes](docs/releases/0.1.0.md)
 
-The core workspace layout is `packages/shared` → `apps/web` → `apps/api`; `npm run build` follows that order. Development requires Node24.22.3/npm11 and a dedicated PostgreSQL database. The production host requires Docker+Compose, not a host Node installation. See [LICENSE](LICENSE) for the repository license.
+The current development workspace builds `packages/ink` → `packages/shared` → `apps/web` → `apps/api`. Annotation components are adapted from the authorized Apache-2.0 WebInk source; see [NOTICE](NOTICE). The reusable engine does not by itself mean the new annotation UI/API is released. Development requires Node24.22.3/npm11 and a dedicated PostgreSQL database. The production host requires Docker+Compose, not a host Node installation. See [LICENSE](LICENSE) for the repository license.

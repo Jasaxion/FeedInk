@@ -9,6 +9,13 @@ test('credential-like values are reported without echoing them', () => {
   assert.equal(JSON.stringify(findings).includes(value), false);
 });
 
+test('application access tokens are caught without embedding one in source', () => {
+  const token = 'fi_mcp_' + 'x'.repeat(43);
+  const findings = inspectPublicText('sample.txt', token);
+  assert.equal(findings[0].rule, 'feedink-access-token');
+  assert.equal(JSON.stringify(findings).includes(token), false);
+});
+
 test('machine-specific paths and private environment files are rejected', () => {
   const path = ['', 'Users', 'example', 'notes.txt'].join('/');
   assert.equal(inspectPublicText('sample.txt', path)[0].rule, 'machine-path');

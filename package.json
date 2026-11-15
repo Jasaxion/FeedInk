@@ -11,7 +11,7 @@
     "node": ">=24.22.1 <25"
   },
   "scripts": {
-    "build": "npm run build -w @feedink/shared && npm run build -w @feedink/web && npm run build -w @feedink/api",
+    "build": "npm run build -w @feedink/ink && npm run build -w @feedink/shared && npm run build -w @feedink/web && npm run build -w @feedink/api",
     "typecheck": "npm run typecheck --workspaces --if-present && tsc -p tsconfig.tests.json",
     "test": "npm run test --workspaces --if-present && npm run test:fixtures",
     "test:fixtures": "node --test tests/fixtures/*.test.mjs",

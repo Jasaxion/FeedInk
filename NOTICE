@@ -1,0 +1,13 @@
+FeedInk
+
+This product includes portable annotation components adapted from WebInk,
+licensed under the Apache License, Version 2.0. WebInk is a project by Jasaxion:
+https://github.com/Jasaxion/WebInk
+
+FeedInk-specific adapters and modifications integrate those components with
+reader-scoped content, account-isolated persistence and browser input.
+Applicable license text is retained in packages/ink/LICENSE.
+
+WebInk describes early drawing inspiration from pencil-annotation:
+https://github.com/BUGdefender404/pencil-annotation
+No Android application, private configuration or user data is included.

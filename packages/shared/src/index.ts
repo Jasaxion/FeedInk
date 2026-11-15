@@ -109,3 +109,4 @@ export interface DiscoveryResult { feeds: DiscoveryFeed[] }
 export interface Ebook { id: string; title: string; createdAt: string; articleCount: number; downloadUrl: string; sentAt: string | null; error: string | null }
 export interface ApiError { error: { code: string; message: string; details?: unknown } }
 export const API_VERSION = 1;
+export * from './annotations.js';

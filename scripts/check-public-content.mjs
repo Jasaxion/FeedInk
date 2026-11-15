@@ -5,6 +5,7 @@ const rules = [
   ['machine-path', /\/(?:Users|home)\/(?!(?:runner|node|app)(?:\/|$))[^\s/"'<>]+\/|\/mnt\/(?:public|shared|private)\//],
   ['github-token', /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/],
   ['provider-token', /\bsk-[A-Za-z0-9_-]{20,}\b/],
+  ['feedink-access-token', /\bfi_mcp_[A-Za-z0-9_-]{40,}\b/],
   ['cloud-access-key', /\bAKIA[0-9A-Z]{16}\b/],
   ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/],
   ['private-analysis-reference', /\bev_[a-f0-9]{64}\b/],
