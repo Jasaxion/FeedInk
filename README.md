@@ -4,11 +4,11 @@ An independently implemented RSS reader for **multi-user self-hosted Web and ins
 
 FeedInk is independently developed and ships original demonstration content. The [product requirements](docs/requirements.md) describe its own behavior. Install the PWA through a compatible browser; no native platform packages are included.
 
-## Status
+## Version 0.1.0 — base reader
 
-**Development checkpoint — for review and testing, not a production release. Blocking browser lifecycle/compatibility and failure-recovery validation is still in progress.**
+The base reader passed its [complete hosted verification](https://github.com/Jasaxion/FeedInk/actions/runs/43682875301): 122 automated checks and 20 real API/browser end-to-end cases, plus production Docker startup, administrator bootstrap, restart and paired database/file recovery.
 
-This is the initial `0.1.0` implementation line. The reference/API documents describe the required behavior; they are not a promise that all feature-parity, security, browser or recovery scenarios have passed. Read [testing and evidence limits](docs/testing.md) and [CHANGELOG.md](CHANGELOG.md) before deploying publicly. Do not rely on untested archives as your only copy.
+This version includes reading, subscriptions, durable archives, PWA/offline behavior and e-ink layouts. **Article annotations, handwriting and MCP access are the next development phase, not features claimed for 0.1.0.** Read [testing and evidence limits](docs/testing.md) and [CHANGELOG.md](CHANGELOG.md); maintain independent backups and do not assume every publisher or hardware device behaves identically to the tested fixtures.
 
 ## Run with Docker Compose
 
@@ -39,5 +39,6 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 - [Security and operator responsibilities](docs/security.md)
 - [Tests, CI and validation limits](docs/testing.md)
 - [Version history](CHANGELOG.md)
+- [0.1.0 release notes](docs/releases/0.1.0.md)
 
 The core workspace layout is `packages/shared` → `apps/web` → `apps/api`; `npm run build` follows that order. Development requires Node24.22.3/npm11 and a dedicated PostgreSQL database. The production host requires Docker+Compose, not a host Node installation. See [LICENSE](LICENSE) for the repository license.
