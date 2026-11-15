@@ -11,7 +11,7 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: [['list'], ['html', { open: 'never' }]],
-  use: { baseURL, trace: 'retain-on-failure', screenshot: 'only-on-failure', video: 'retain-on-failure' },
+  use: { baseURL, actionTimeout: 15_000, navigationTimeout: 30_000, trace: 'retain-on-failure', screenshot: 'only-on-failure', video: 'retain-on-failure' },
   webServer: {
     command: 'node tests/fixtures/upstream.mjs',
     url: `${process.env.FEEDINK_FIXTURE_URL || 'http://127.0.0.1:8899'}/__health`,

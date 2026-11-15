@@ -33,6 +33,26 @@ export async function detail(api: APIRequestContext, id: string): Promise<Articl
   expect(response.ok(), await response.text()).toBeTruthy();
   return response.json();
 }
+export async function browserNetworkFault(page: Page, browserName: 'chromium' | 'firefox' | 'webkit') {
+  if (browserName !== 'webkit') return (offline: boolean) => page.context().setOffline(offline);
+  // WPE's protocol-level offline switch can fail navigation before a service worker runs.
+  // Abort actual browser HTTP traffic instead; APIRequestContext remains an independent witness.
+  const marker = 'feedink-test-network-fault';
+  let blocked = false;
+  await page.context().addInitScript(key => {
+    const original = Object.getOwnPropertyDescriptor(Navigator.prototype, 'onLine')?.get;
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => localStorage.getItem(key) === '1' ? false : original?.call(navigator) ?? true });
+  }, marker);
+  await page.context().route(/^https?:\/\//, route => blocked ? route.abort('internetdisconnected') : route.continue());
+  return async (offline: boolean) => {
+    blocked = offline;
+    await page.evaluate(({ key, value }) => {
+      localStorage.setItem(key, value ? '1' : '0');
+      window.dispatchEvent(new Event(value ? 'offline' : 'online'));
+    }, { key: marker, value: offline });
+  };
+}
+
 export async function assertNoHorizontalOverflow(page: Page) {
   const dimensions = await page.evaluate(() => ({ width: window.innerWidth, content: document.documentElement.scrollWidth }));
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.width + 1);

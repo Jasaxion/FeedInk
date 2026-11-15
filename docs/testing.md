@@ -41,6 +41,8 @@ npm run test:e2e -- --project=desktop
 
 Run `api`, `desktop`, `mobile`, `tablet`, `workflows`, and optionally `webkit` separately, restarting only your own API process between projects. Combined browser projects share the same loopback rate-limit identity and can legitimately exhaust a minute's budget; do not disable or raise production limits to hide this. CI starts `node apps/api/dist/server.js` directly per project, uses bounded readiness, and terminates/waits for only its captured child PID. It installs both Chromium and WebKit and sets `FEEDINK_TEST_WEBKIT=1`.
 
+For WebKit, the PWA test injects actual browser HTTP failures plus the corresponding connectivity event instead of using the WPE protocol offline toggle, which can fail navigation before a service worker runs. The test separately verifies that browser HTTP cannot reach the API, cached shell/body/images reload, the server has not received offline edits, and reconnect sends them. Chromium retains its protocol-level offline test. Neither method is a hardware airplane-mode certification; no offline assertion is skipped.
+
 Playwright starts `tests/fixtures/upstream.mjs` via `webServer`; do not launch a duplicate fixture. If the fixture port is occupied, choose your own free port and set **both** `FEEDINK_FIXTURE_PORT` and `FEEDINK_FIXTURE_URL` consistently; never kill an unknown listener. The API is started separately and must reach that fixture URL. Configure the API's allowlist before launching it. For optional WebKit coverage, install WebKit and set `FEEDINK_TEST_WEBKIT=1`; do not report WebKit coverage when only Chromium ran. Browser screenshots/traces are private diagnostic output, not committed source or proof that unrelated scenarios passed.
 
 ## Container and recovery checks

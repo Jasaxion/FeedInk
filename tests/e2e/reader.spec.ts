@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { assertNoHorizontalOverflow, csrf, detail, register, resetUpstream, subscribe, waitForArticles } from './helpers.js';
+import { assertNoHorizontalOverflow, browserNetworkFault, csrf, detail, register, resetUpstream, subscribe, waitForArticles } from './helpers.js';
 
 test.beforeEach(async ({ request }) => { await resetUpstream(request); });
 test.afterEach(async ({ request }) => { await resetUpstream(request); });
@@ -68,8 +68,9 @@ test('all list modes remain usable and route navigation preserves selected artic
   await expect(page.getByTestId('article-card').first()).toBeVisible();
 });
 
-test('PWA reads cached body/images offline, syncs changes and purges private data on logout', async ({ page }, info) => {
+test('PWA reads cached body/images offline, syncs changes and purges private data on logout', async ({ page, browserName }, info) => {
   test.setTimeout(100_000);
+  const setOffline = await browserNetworkFault(page, browserName);
   const api = page.context().request;
   const session = await register(api);
   const sub = await subscribe(api, session);
@@ -97,7 +98,8 @@ test('PWA reads cached body/images offline, syncs changes and purges private dat
   await expect.poll(async () => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true);
   // Wait for the application's explicit offline readiness, not a blind timeout.
   await expect(page.getByTestId('offline-status')).toContainText(/已缓存|离线可用|离线就绪/);
-  await page.context().setOffline(true);
+  await setOffline(true);
+  expect(await page.evaluate(() => fetch('/api/health').then(() => false, () => true))).toBe(true);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('reader-content')).toContainText('持久存档');
   await expect(page.getByTestId('offline-status')).toContainText(/离线/);
@@ -107,14 +109,15 @@ test('PWA reads cached body/images offline, syncs changes and purges private dat
   await expect(page.getByTestId('offline-status')).toContainText(/待同步|等待同步/);
   expect((await detail(api, item.id)).saved).toBe(false);
   await page.screenshot({ path: info.outputPath('reader-offline.png'), fullPage: true });
-  await page.context().setOffline(false);
+  await setOffline(false);
+  expect(await page.evaluate(() => fetch('/api/health').then(response => response.ok))).toBe(true);
   await expect.poll(async () => (await detail(api, item.id)).saved, { timeout: 30_000 }).toBe(true);
   await page.goto('/settings');
   await page.getByRole('button', { name: /退出登录/ }).click();
   await expect(page.getByTestId('app-shell')).toHaveCount(0);
-  await page.context().setOffline(true);
+  await setOffline(true);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.getByText(item.title, { exact: true })).toHaveCount(0);
   await expect(page.getByTestId('reader-content')).toHaveCount(0);
-  await page.context().setOffline(false);
+  await setOffline(false);
 });
