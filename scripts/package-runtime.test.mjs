@@ -18,6 +18,7 @@ async function fixture(t) {
     'apps/api/migrations/001.sql': 'SELECT 1;',
     'apps/web/package.json': '{"name":"@fixture/web"}',
     'apps/web/dist/index.html': '<!doctype html><title>Fixture</title>',
+    'apps/web/dist/manifest.webmanifest': '{"name":"Fixture","display":"standalone"}',
     'packages/shared/package.json': '{"name":"@fixture/shared"}',
     'packages/shared/dist/index.js': 'export const version = 1;',
   };
@@ -36,6 +37,7 @@ test('runtime bundle includes only declared build inputs and verified hashes', a
   const manifest = JSON.parse(await readFile(join(root, '.artifacts/runtime/runtime-manifest.json'), 'utf8'));
   assert.equal(manifest.version, 1);
   assert.equal(manifest.files.some(file => file.path === '.env'), false);
+  assert.equal(manifest.files.some(file => file.path === 'apps/web/dist/manifest.webmanifest'), true);
   for (const file of manifest.files) {
     const bytes = await readFile(join(root, '.artifacts/runtime', file.path));
     assert.equal(createHash('sha256').update(bytes).digest('hex'), file.sha256);

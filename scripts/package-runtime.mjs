@@ -7,7 +7,7 @@ import { inspectPublicText } from './check-public-content.mjs';
 const root = process.cwd();
 const output = resolve('.artifacts/runtime');
 const tracked = new Set(execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0'));
-const extensions = new Set(['.js', '.mjs', '.cjs', '.map', '.json', '.ts', '.css', '.html', '.svg', '.png', '.webp', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.txt', '.sql']);
+const extensions = new Set(['.js', '.mjs', '.cjs', '.map', '.json', '.ts', '.css', '.html', '.webmanifest', '.svg', '.png', '.webp', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.txt', '.sql']);
 const secretValues = Object.entries(process.env)
   .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PRIVATE_KEY|API_KEY|DATABASE_URL/.test(key) && value && value.length >= 12)
   .map(([, value]) => value);
@@ -24,7 +24,7 @@ async function copy(source, target) {
   if (!info.isFile()) throw new Error('Runtime package accepts only regular files');
   const logical = relative(root, source).split('\\').join('/');
   if (logical.startsWith('apps/api/migrations/') && extname(source) !== '.sql') throw new Error('Unexpected migration artifact');
-  if (!['LICENSE', 'NOTICE'].includes(logical) && (!extensions.has(extname(source)) || extname(source) === '.ts' && !source.endsWith('.d.ts'))) throw new Error('Unexpected runtime artifact type');
+  if (!['LICENSE', 'NOTICE'].includes(logical) && (!extensions.has(extname(source)) || extname(source) === '.ts' && !source.endsWith('.d.ts'))) throw new Error(`Unexpected runtime artifact type: ${logical}`);
   const bytes = await readFile(source);
   if (!bytes.includes(0)) {
     const text = bytes.toString('utf8');
