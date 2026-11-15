@@ -30,7 +30,8 @@ export function createMcpServer(db: DB, store: Store, notes: Annotations, princi
   const server = new McpServer({ name: 'FeedInk', version: '0.1.0' }, { instructions: UNTRUSTED });
   const register = <S extends z.ZodRawShape>(name: string, required: McpScope, description: string, inputSchema: S, read: (input: z.infer<z.ZodObject<S>>) => Promise<CallToolResult>) => {
     // Each server closes over one immutable principal and lives for one HTTP request only.
-    server.registerTool(name, { description, inputSchema: z.object(inputSchema).strict(), annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async input => {
+    const schema = z.object(inputSchema).strict();
+    server.registerTool<z.ZodRawShape, typeof schema>(name, { description, inputSchema: schema, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async input => {
       try {
         if (!principal.scopes.includes(required)) throw new ApiFailure(403, 'FORBIDDEN', 'Token scope does not permit this tool');
         return await read(input as z.infer<z.ZodObject<S>>);
@@ -62,7 +63,7 @@ export function createMcpServer(db: DB, store: Store, notes: Annotations, princi
   register('list_notes', 'notes:read', 'List nonempty owned notes with revision metadata; handwriting is not searchable text.', { articleId: uuid.optional(), ...pagination }, async input => textResult(await notes.list(principal.userId, input)));
   register('search_notes', 'notes:read', 'Search owned quote and remark text, not handwriting recognition.', { query: z.string().max(200), ...pagination }, async ({ query, ...rest }) => textResult(await notes.list(principal.userId, { ...rest, q: query })));
   register('get_notes', 'notes:read', 'Read note metadata and complete paginated text marks, plus raw ink inventory counts. Offset/limit count marks; JSON export preserves raw points.', { ...contextInput, ...pagination }, async ({ articleId, mode, contentHash, offset, limit }) => {
-    const doc = await notes.get(principal.userId, articleId, mode, contentHash);
+    const doc = await notes.get(principal.userId, articleId, mode, contentHash, false);
     const items = [];
     let bytes = 0;
     for (const mark of doc.marks.slice(offset, offset + limit)) {
@@ -73,7 +74,7 @@ export function createMcpServer(db: DB, store: Store, notes: Annotations, princi
     return textResult({ document: { id: doc.id, articleId, mode, contentHash: doc.contentHash, title: doc.context.title, sourceUrl: doc.context.sourceUrl, revision: doc.revision, updatedAt: doc.updatedAt }, marks: items, ink: { strokeCount: doc.ink?.strokes.length ?? 0 }, totalMarks: doc.marks.length, nextOffset: offset + items.length < doc.marks.length ? offset + items.length : null });
   });
   register('get_note_preview', 'notes:read', 'Read one bounded raw/unlocated ink PNG group. Follow nextGroupOffset to consume the complete inventory.', { ...contextInput, group: z.number().int().min(0).max(4999).default(0) }, async ({ articleId, mode, contentHash, group }) => {
-    const doc = await notes.get(principal.userId, articleId, mode, contentHash), preview = await notePreview(doc, group);
+    const doc = await notes.get(principal.userId, articleId, mode, contentHash, false), preview = await notePreview(doc, group);
     if (preview.bytes.length > 512 * 1024) throw new ApiFailure(413, 'MCP_OUTPUT_LIMIT', 'Preview exceeds the MCP output budget; use the private export endpoint');
     const metadata = textResult({ articleId, mode, contentHash: doc.contentHash, revision: doc.revision, group, raw: true, width: preview.group.width, height: preview.group.height, totalGroups: preview.totalGroups, nextGroupOffset: preview.nextGroupOffset });
     return { ...metadata, content: [...metadata.content, { type: 'image', mimeType: 'image/png', data: preview.bytes.toString('base64') }] };

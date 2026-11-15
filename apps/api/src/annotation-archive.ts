@@ -4,13 +4,14 @@ import type { NotesBackup } from '@feedink/shared';
 import { type SQL, ApiFailure } from './core.js';
 import { ARTICLE_HTML_MAX_LENGTH, cleanHtml } from './content.js';
 import { Annotations, canonicalAnnotationHash } from './annotations.js';
-import { validateNotesBackup } from './annotation-validation.js';
+import { finiteJson, validateNotesBackup } from './annotation-validation.js';
 
 export const archivedAnnotationSchema = z.object({ backup: z.unknown(), contentHtml: z.string().max(ARTICLE_HTML_MAX_LENGTH), revision: z.number().int().min(1).max(2147483647), updatedAt: z.iso.datetime() }).strict();
 export type ArchivedAnnotation = z.infer<typeof archivedAnnotationSchema>;
 export function validateArchivedAnnotations(records: ArchivedAnnotation[], sourceUrl: string, images: ReadonlyMap<string, string>): void {
   const contexts = new Set<string>();
   for (const record of records) {
+    finiteJson(record.contentHtml);
     const backup = validateNotesBackup(record.backup), key = `${backup.source.mode}:${backup.source.contentHash}`;
     if (contexts.has(key) || backup.source.url !== sourceUrl || cleanHtml(record.contentHtml) !== record.contentHtml || canonicalAnnotationHash(record.contentHtml, sourceUrl, backup.source.mode, images) !== backup.source.contentHash) throw new ApiFailure(422, 'INVALID_ARCHIVE', 'Annotation snapshot identity does not match its article');
     contexts.add(key);
@@ -22,6 +23,7 @@ export async function restoreArchivedAnnotations(sql: SQL, notes: Annotations, u
   if (!records.length) return;
   const images = await sql`SELECT id,original_url FROM images WHERE article_id=${articleId}`;
   for (const record of records) {
+    finiteJson(record.contentHtml);
     const backup = record.backup as NotesBackup;
     const html = rewrite(record.contentHtml);
     if (backup.source.url !== sourceUrl || canonicalAnnotationHash(html, sourceUrl, backup.source.mode, new Map(images.map(i => [i.id, i.original_url]))) !== backup.source.contentHash) throw new ApiFailure(409, 'ANNOTATION_CONTEXT', 'Restored snapshot does not match the owned article');

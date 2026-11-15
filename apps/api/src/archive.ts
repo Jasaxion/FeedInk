@@ -467,7 +467,7 @@ export class Archives {
           }
           if (duplicate.length && duplicate[0].url !== a.url) throw new ApiFailure(409, 'ANNOTATION_CONTEXT', 'Duplicate article source differs from archived notes');
           const articleId = duplicate[0]?.id || id();
-          const existingImages = duplicate.length ? await tx`SELECT id,original_url FROM images WHERE article_id=${articleId}` : [];
+          const existingImages = duplicate.length ? await tx`SELECT id,original_url,status,file_key FROM images WHERE article_id=${articleId} FOR UPDATE` : [];
           if (new Set([...existingImages.map(i => i.original_url), ...a.images.map(i => i.originalUrl)]).size > 100) throw new ApiFailure(413, 'ARCHIVE_LIMIT', 'Restoring annotated snapshots would exceed the article image limit');
           const images = new Map(a.images.map(i => [i.id, existingImages.find(existing => existing.original_url === i.originalUrl)?.id || id()]));
           const rewrite = (input: string) => {
@@ -487,14 +487,19 @@ export class Archives {
             body = htmlText(fulltext || html);
           if (!duplicate.length) await tx`INSERT INTO articles(id,user_id,feed_id,guid,feed_title,title,url,author,published_at,archived_at,fetched_at,content_html,fulltext_html,fulltext_hash,content_text,content_hash,fulltext_error,summary,word_count,enclosures,read,saved,progress,fulltext_fetched_at,restored_at) VALUES(${articleId},${userId},${feedId},${a.guid},${a.feedTitle},${a.title},${a.url},${a.author},${a.publishedAt},${a.archivedAt},${a.fetchedAt},${html},${fulltext},${fulltext ? hash(fulltext) : null},${body},${hash(html)},${a.fulltextError},${body.slice(0, 400)},${countWords(body)},${tx.json(a.enclosures)},${a.read},${a.saved},${a.progress},${a.fulltextFetchedAt ?? null},now())`;
           for (const image of a.images) {
-            if (existingImages.some(existing => existing.original_url === image.originalUrl)) continue;
+            const existingImage = existingImages.find(existing => existing.original_url === image.originalUrl);
+            if (existingImage && (image.status !== 'cached' || existingImage.status === 'cached' && existingImage.file_key)) continue;
             let file = cached.get(image.id);
             if (image.status === "cached" && !file) {
               const { bytes, type } = await raster(files.get(image.path!)!);
               file = { key: await put(bytes), type };
               cached.set(image.id, file);
             }
-            await tx`INSERT INTO images(id,article_id,original_url,status,content_type,file_key,content_hash,captured_at,last_error,restored_at) VALUES(${images.get(image.id)!},${articleId},${image.originalUrl},${file ? "cached" : image.status},${file?.type || null},${file?.key || null},${file?.key || null},${image.capturedAt ?? null},${image.lastError ?? null},now())`;
+            if (existingImage && file) {
+              await tx`UPDATE images SET status='cached',content_type=${file.type},file_key=${file.key},content_hash=${file.key},captured_at=${image.capturedAt ?? null},last_error=null,restored_at=now() WHERE id=${existingImage.id}`;
+            } else {
+              await tx`INSERT INTO images(id,article_id,original_url,status,content_type,file_key,content_hash,captured_at,last_error,restored_at) VALUES(${images.get(image.id)!},${articleId},${image.originalUrl},${file ? "cached" : image.status},${file?.type || null},${file?.key || null},${file?.key || null},${image.capturedAt ?? null},${image.lastError ?? null},now())`;
+            }
           }
           await restoreArchivedAnnotations(tx, new Annotations(this.db), userId, articleId, a.url, a.annotations ?? [], rewrite);
           if (duplicate.length) skipped++;

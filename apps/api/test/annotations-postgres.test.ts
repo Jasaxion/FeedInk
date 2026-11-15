@@ -9,6 +9,7 @@ import sharp from 'sharp';
 import { createApp } from '../src/app.js';
 import { type Config, hash, withConnection } from '../src/core.js';
 import { makeZip, readZip } from '../src/zip.js';
+import { Annotations, canonicalAnnotationHash } from '../src/annotations.js';
 
 // CI owns an isolated PostgreSQL database. One connection exposes accidental pool re-entry.
 test('PostgreSQL annotations: CAS, history, tenant binding, portable archives and atomic insert-only restore', { skip: !process.env.TEST_DATABASE_URL, timeout: 180000 }, async t => {
@@ -120,8 +121,14 @@ test('PostgreSQL annotations: CAS, history, tenant binding, portable archives an
       assert.deepEqual((await readdir(dataDir)).sort(), before);
       // A pre-existing article with absent note contexts must restore, not silently skip.
       await db`DELETE FROM annotations WHERE user_id=${c.id}`;
+      const [unavailableImage] = await db`SELECT id FROM images WHERE article_id=${mapped.id}`;
+      await db`UPDATE images SET status='failed',file_key=null,content_hash=null WHERE id=${unavailableImage.id}`;
       await archives.import(c.id, archive);
       assert.equal((await annotations.versions(c.id, mapped.id, 'feed', 0, 20)).total, 2);
+      const restoredImage = await request(c, 'GET', `/assets/${unavailableImage.id}`);
+      assert.equal(restoredImage.statusCode, 200);
+      const restoredDimensions = await sharp(restoredImage.rawPayload).metadata();
+      assert.equal(restoredDimensions.width, 20); assert.equal(restoredDimensions.height, 20);
       for (const version of [1, 2]) {
         const legacy = structuredClone(manifest); legacy.version = version;
         for (const article of legacy.articles) delete article.annotations;
@@ -133,6 +140,31 @@ test('PostgreSQL annotations: CAS, history, tenant binding, portable archives an
       const tampered = structuredClone(manifest); tampered.articles[0].annotations[0].contentHtml = '<p>Unrelated replacement</p>';
       const bad = await makeZip([...files].map(([name, data]) => ({ name, data: name === 'manifest.json' ? Buffer.from(JSON.stringify(tampered)) : data })));
       await assert.rejects(() => archives.import(c.id, bad), (e: any) => e.code === 'INVALID_ARCHIVE');
+      const invalidUnicode = structuredClone(manifest);
+      const record = invalidUnicode.articles[0].annotations[0];
+      record.contentHtml = '<p>\ud800</p>';
+      record.backup.source.contentHash = canonicalAnnotationHash(record.contentHtml, url, record.backup.source.mode, new Map());
+      const invalidBytes = await makeZip([...files].map(([name, data]) => ({ name, data: name === 'manifest.json' ? Buffer.from(JSON.stringify(invalidUnicode)) : data })));
+      const countBefore = (await db`SELECT id FROM annotations WHERE user_id=${c.id}`).length;
+      await assert.rejects(() => archives.import(c.id, invalidBytes), (e: any) => e.code === 'INVALID_ANNOTATIONS');
+      assert.equal((await db`SELECT id FROM annotations WHERE user_id=${c.id}`).length, countBefore);
+    });
+    await t.test('a verified revision-zero context remains saveable after the current article changes', async () => {
+      const owner = await register(), retainedId = randomUUID();
+      await db`INSERT INTO articles(id,user_id,guid,feed_title,published_at,title,url,content_html,content_text,content_hash) VALUES(${retainedId},${owner.id},${retainedId},'Fixture',now(),'Offline context','https://example.invalid/offline-context','<p>Original context</p>','Original context',${hash('original-context')})`;
+      const concurrentDb = postgres(config.databaseUrl, { max: 2 });
+      const concurrentNotes = new Annotations(concurrentDb);
+      const opened = await Promise.all(Array.from({ length: 4 }, () => concurrentNotes.get(owner.id, retainedId, 'feed'))).finally(() => concurrentDb.end());
+      const original = opened[0];
+      assert.ok(opened.every(doc => doc.revision === 0 && doc.contentHash === original.contentHash));
+      await db`UPDATE articles SET content_html='<p>Changed context</p>',content_text='Changed context',content_hash=${hash('changed-context')} WHERE id=${retainedId}`;
+      const historical = await annotations.get(owner.id, retainedId, 'feed', original.contentHash);
+      assert.equal(historical.context.contentHtml, '<p>Original context</p>');
+      const saved = await annotations.save(owner.id, retainedId, 'feed', { schemaVersion: 1, contentHash: original.contentHash, ink: null, marks: payload.marks }, 0);
+      assert.equal(saved.revision, 1);
+      const current = await annotations.get(owner.id, retainedId, 'feed');
+      assert.notEqual(current.contentHash, saved.contentHash);
+      assert.equal(current.revision, 0);
     });
     await t.test('large valid notes retain full late-term search beyond the bounded FTS prefix', async () => {
       const owner = await register(), largeId = randomUUID();

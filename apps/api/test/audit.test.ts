@@ -467,7 +467,7 @@ test(
           const zip = await ctx.archives.export(sourceOwner.id),
             entries = await readZip(zip),
             manifest = JSON.parse(entries.get("manifest.json")!.toString());
-          assert.equal(manifest.version, 2);
+          assert.equal(manifest.version, 3);
           const imported = await ctx.archives.import(target.id, zip);
           assert.equal(imported.imported, 1);
           const [restored] =

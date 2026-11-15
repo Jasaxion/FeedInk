@@ -96,6 +96,14 @@ test('MCP SDK: initialize, scoped discovery, owned reads, immutable principals, 
         assert.equal(result.isError, true); assert.ok(!JSON.stringify(result).includes('beta synthetic'));
       }
     });
+    await t.test('read-only MCP does not create editor context snapshots for unannotated articles', async () => {
+      const untouched = randomUUID();
+      await db`INSERT INTO articles(id,user_id,guid,feed_title,published_at,title,url,content_html,content_text,content_hash) VALUES(${untouched},${a.id},${untouched},'Fixture',now(),'No notes','https://example.invalid/no-notes','<p>No notes</p>','No notes',${hash('no-notes')})`;
+      const result = value(await full.callTool({ name: 'get_notes', arguments: { articleId: untouched } }));
+      assert.equal(result.document.revision, 0);
+      assert.equal((await db`SELECT 1 FROM annotation_contexts WHERE article_id=${untouched}`).length, 0);
+      assert.equal((await db`SELECT 1 FROM annotations WHERE article_id=${untouched}`).length, 0);
+    });
     await t.test('concurrent stateless requests never share a mutable current user', async () => {
       const results = await Promise.all(Array.from({ length: 12 }, (_, i) => (i % 2 ? full : otherClient).callTool({ name: 'list_notes', arguments: {} })));
       for (let i = 0; i < results.length; i++) {

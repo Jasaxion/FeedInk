@@ -38,21 +38,34 @@ export class Annotations {
     const images = await sql`SELECT id,original_url FROM images WHERE article_id=${article.id}`;
     return { articleId: article.id, mode, contentHash: canonicalAnnotationHash(html, article.url, mode, new Map(images.map(i => [i.id, i.original_url]))), sourceUrl: article.url, title: article.title, contentHtml: html };
   }
-  async read(sql: SQL, userId: string, articleId: string, mode: AnnotationMode, requestedHash?: string): Promise<AnnotationDocument> {
-    const article = await this.owned(sql, userId, articleId);
+  async retainContext(sql: SQL, userId: string, context: AnnotationContext): Promise<void> {
+    await sql`INSERT INTO annotation_contexts(user_id,article_id,mode,content_hash,source_url,title,content_html) VALUES(${userId},${context.articleId},${context.mode},${context.contentHash},${context.sourceUrl},${context.title},${context.contentHtml}) ON CONFLICT DO NOTHING`;
+  }
+  async read(sql: SQL, userId: string, articleId: string, mode: AnnotationMode, requestedHash?: string, retainCurrent = true): Promise<AnnotationDocument> {
+    // Editor reads serialize capture with article changes; MCP stays read-only.
+    const article = await this.owned(sql, userId, articleId, retainCurrent);
     let context: AnnotationContext | undefined;
-    if (!requestedHash) { context = await this.currentContext(sql, article, mode); requestedHash = context.contentHash; }
+    if (!requestedHash) {
+      context = await this.currentContext(sql, article, mode); requestedHash = context.contentHash;
+      if (retainCurrent) await this.retainContext(sql, userId, context);
+    }
     const [row] = await sql`SELECT * FROM annotations WHERE user_id=${userId} AND article_id=${articleId} AND mode=${mode} AND content_hash=${requestedHash}`;
     const versions = (await sql`SELECT content_hash,revision,updated_at,mark_count,stroke_count FROM annotations WHERE user_id=${userId} AND article_id=${articleId} AND mode=${mode} ORDER BY updated_at DESC,id LIMIT 20`).map(annotationVersion);
     if (row) return annotationDocument(row, versions);
-    context ??= await this.currentContext(sql, article, mode);
-    if (context.contentHash !== requestedHash) throw new ApiFailure(409, 'ANNOTATION_CONTEXT', 'No owned snapshot matches this content hash');
+    const [retained] = await sql`SELECT * FROM annotation_contexts WHERE user_id=${userId} AND article_id=${articleId} AND mode=${mode} AND content_hash=${requestedHash}`;
+    if (retained) context = { articleId, mode, contentHash: retained.content_hash, sourceUrl: retained.source_url, title: retained.title, contentHtml: retained.content_html };
+    else {
+      context ??= await this.currentContext(sql, article, mode);
+      if (context.contentHash !== requestedHash) throw new ApiFailure(409, 'ANNOTATION_CONTEXT', 'No owned snapshot matches this content hash');
+      if (retainCurrent) await this.retainContext(sql, userId, context);
+    }
     return { id: null, schemaVersion: 1, contentHash: requestedHash, ink: null, marks: [], revision: 0, updatedAt: null, context, versions };
   }
-  async get(userId: string, articleId: string, mode: AnnotationMode, requestedHash?: string): Promise<AnnotationDocument> {
+  async get(userId: string, articleId: string, mode: AnnotationMode, requestedHash?: string, retainCurrent = true): Promise<AnnotationDocument> {
     return withConnection(this.db, async sql => {
-      await sql`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`;
-      try { const doc = await this.read(sql, userId, articleId, mode, requestedHash); await sql`COMMIT`; return doc; }
+      if (retainCurrent) await sql`BEGIN`;
+      else await sql`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+      try { const doc = await this.read(sql, userId, articleId, mode, requestedHash, retainCurrent); await sql`COMMIT`; return doc; }
       catch (error) { await sql`ROLLBACK`; throw error; }
     });
   }
@@ -81,6 +94,7 @@ export class Annotations {
     });
   }
   async persist(sql: SQL, userId: string, context: AnnotationContext, payload: AnnotationPayload, revision: number): Promise<void> {
+    await this.retainContext(sql, userId, context);
     const searchText = payload.marks.map(m => `${m.anchor?.exact ?? ''}\n${m.text}`).join('\n');
     await sql`INSERT INTO annotations(id,user_id,article_id,mode,content_hash,source_url,title,content_html,revision,ink,marks,mark_count,stroke_count,search_text)
       VALUES(${id()},${userId},${context.articleId},${context.mode},${context.contentHash},${context.sourceUrl},${context.title},${context.contentHtml},${revision},${payload.ink === null ? null : sql.json(payload.ink as any)},${sql.json(payload.marks as any)},${payload.marks.length},${payload.ink?.strokes.length ?? 0},${searchText})
