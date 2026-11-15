@@ -1,0 +1,58 @@
+/* Annotation controls are portal overlays: opening them never changes article flow. */
+.annotation-section{min-width:0}
+.annotation-entry{display:inline-flex;gap:2px;align-items:center}
+.annotation-entry [data-testid=annotation-toggle]{position:relative}
+.annotation-entry[data-pending] [data-testid=annotation-toggle]::after{content:"";position:absolute;right:4px;top:4px;width:5px;height:5px;border-radius:50%;background:var(--accent)}
+.annotation-entry-fallback{position:fixed;right:16px;top:12px;z-index:18}
+.annotation-sr-status{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.annotation-float{position:fixed;z-index:24;box-sizing:border-box;overflow:auto;overscroll-behavior:contain;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);box-shadow:0 6px 24px #0002;font:14px/1.5 system-ui,sans-serif;padding:6px;isolation:isolate}
+.annotation-float button,.annotation-float summary{min-height:38px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--ink);padding:6px 9px;cursor:pointer}
+.annotation-float button{display:inline-flex;align-items:center;justify-content:center;gap:4px}
+.annotation-float button:disabled{opacity:.5;cursor:default}
+.annotation-float button[aria-pressed=true]{border-color:var(--accent);color:var(--accent);background:var(--selected)}
+.annotation-float :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.annotation-float select,.annotation-float textarea{max-width:100%;background:var(--paper);color:var(--ink)}
+.annotation-selection,.annotation-ink{display:flex;gap:4px;align-items:center;flex-wrap:wrap;width:max-content;max-width:100%}
+.annotation-options{display:inline-flex}
+.annotation-options summary{list-style:none;display:flex;align-items:center}
+.annotation-options[open]{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.annotation-options label{display:inline-flex;gap:5px;align-items:center}
+.annotation-options input[type=range]{width:90px}
+.annotation-drawer{width:390px;height:calc(100dvh - 90px);padding:0;z-index:22}
+.annotation-drawer .annotations-panel{border:0;border-radius:0;margin:0;padding:16px;background:var(--panel);color:var(--ink);font:14px/1.6 system-ui,sans-serif}
+.annotation-drawer-header{display:flex;gap:12px;align-items:center;justify-content:space-between}
+.annotation-drawer-header h2{margin:0;font-size:17px}
+.annotations-panel [role=status]{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.annotations-panel .button-row{margin-top:12px;gap:6px;flex-wrap:wrap}
+.annotation-list{list-style:none;padding:0}
+.annotation-list li{display:flex;align-items:flex-start;gap:6px;margin:8px 0}
+.annotation-list .annotation-list-item{display:block;flex:1;text-align:left;min-width:0}
+.annotation-list p,.note-editor textarea{white-space:pre-wrap;overflow-wrap:anywhere}
+.annotation-float blockquote{margin:6px 0;border-left:3px solid var(--accent);padding:3px 10px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:140px;overflow:auto}
+.annotation-conflict{border:2px solid var(--accent);padding:10px;margin:12px 0}
+.annotation-conflict button{margin:4px}
+.annotations-panel details{margin-top:14px;overflow-wrap:anywhere}
+.annotations-panel details button{display:block;margin:6px 0}
+.annotations-panel input[type=file]{max-width:180px;font-size:12px}
+.annotation-editor{width:340px;padding:12px;z-index:26}
+.annotation-editor .note-editor{display:grid;gap:8px;border:0;padding:0}
+.annotation-editor h3{font-size:15px;margin:0 36px 0 0}
+.annotation-editor label{display:grid;gap:4px}
+.annotation-editor textarea{box-sizing:border-box;width:100%;resize:vertical;min-height:80px}
+.annotation-editor small{font-size:12px;color:var(--muted)}
+.annotation-editor-close{position:absolute;right:6px;top:6px}
+.annotation-page{position:relative;isolation:isolate}
+.text-mark-presentation{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:1}
+.text-mark{position:absolute;pointer-events:none}
+.text-mark-highlight,.text-mark-note{background:var(--mark-color);opacity:.3}
+.text-mark-underline{border-bottom:2px solid var(--mark-color)}
+.text-mark-wave{border-bottom:3px dotted var(--mark-color)}
+.text-mark-wave::after{content:'';position:absolute;left:0;right:0;bottom:-2px;height:4px;background:radial-gradient(ellipse at 50% 100%,transparent 45%,var(--mark-color) 50%,var(--mark-color) 65%,transparent 70%) 0 0/8px 4px repeat-x}
+.annotation-unlocated{font:12px/1.5 system-ui,sans-serif;color:var(--muted)}
+[data-theme=eink] .annotation-float{border:2px solid #000;border-radius:0;background:#fff;box-shadow:none}
+[data-theme=eink] .annotation-float button[aria-pressed=true]{background:#000!important;color:#fff!important;border:2px solid #000}
+[data-theme=eink] .text-mark{--mark-color:#000!important}
+[data-theme=eink] .text-mark-highlight,[data-theme=eink] .text-mark-note{background:transparent;border:1px solid #000;opacity:1}
+[data-theme=eink] .text-mark-wave::after{background:none}
+@media(max-width:699px){.annotation-float button,.annotation-float summary{min-height:44px}.annotation-drawer{width:100%;border-radius:16px 16px 6px 6px}.annotation-drawer .annotations-panel{padding:12px}.annotation-selection{gap:2px}.annotation-selection button{padding-inline:7px;font-size:13px}}
+@media print{.annotation-entry,.annotation-float,.annotation-sr-status,.text-mark-presentation,[data-webink-overlay]{display:none!important}}

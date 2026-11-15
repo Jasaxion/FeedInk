@@ -34,12 +34,19 @@ try {
   await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
   // An existing host is not used or overwritten by browser annotation persistence.
   await page.evaluate(() => { window.__hostCalls = 0; window.__existingHost = { postMessage() { window.__hostCalls++; } }; window.WebInkHost = window.__existingHost; });
-  await page.getByTestId('annotation-toggle').click(); await expect(page.getByTestId('annotation-toolbar')).toBeVisible(); await expect(page.getByTestId('annotations-panel')).toBeVisible();
+  await page.getByTestId('annotation-toggle').click(); await expect(page.getByTestId('annotations-panel')).toBeVisible();
   try { await expect(page.getByTestId('annotation-status')).toContainText('已同步'); }
   catch (error) { throw new Error(`Initial annotation load: ${await page.getByTestId('annotations-panel').getByRole('alert').allTextContents()}`, { cause: error }); }
-  for (const label of ['高亮', '下划线', '波浪线']) { await selectText(); await page.getByRole('button', { name: label, exact: true }).click(); await page.getByTestId('note-editor').fill(`${label} <img src=x onerror=alert(1)>`); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('已同步'); }
-  await page.getByRole('button', { name: '备注', exact: true }).click(); await page.getByTestId('note-editor').fill('整篇备注保留'); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+  for (const label of ['高亮', '下划线', '波浪线']) {
+    await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+    await selectText(); await page.getByTestId('selection-annotation-toolbar').getByRole('button', { name: label, exact: true }).click();
+    await expect(page.getByTestId('note-editor')).toHaveCount(0);
+    await page.getByTestId('annotation-toggle').click(); await page.locator('.annotation-list-item').last().click();
+    await page.getByTestId('note-editor').fill(`${label} <img src=x onerror=alert(1)>`); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+  }
+  await page.getByRole('button', { name: '整篇备注', exact: true }).click(); await page.getByTestId('note-editor').fill('整篇备注保留'); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('已同步');
   assert.equal(docs.get('one:feed').marks.length, 4); assert.equal(await page.locator('.annotations-panel img').count(), 0);
+  await page.getByTestId('ink-toggle').click();
   await page.getByRole('button', { name: '钢笔', exact: true }).click();
   await page.getByTestId('reader-content').scrollIntoViewIfNeeded();
   await page.getByTestId('reader-content').evaluate(root => {
@@ -50,13 +57,14 @@ try {
   const points = docs.get('one:feed').ink.strokes[0].points; assert.ok(points.some(point => point.p < .4)); assert.ok(points.some(point => point.p > .7));
   assert.equal(docs.get('one:feed').ink.url, fixture.control.articles[0].url);
   await page.getByTestId('reader-content').evaluate(root => { root.querySelector('img').dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, pointerType: 'pen' })); });
-  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: /放大|图片/ })).toHaveCount(0);
   // Pen contact on navigation must not be swallowed or recorded by the reader engine.
   const outside = await page.getByTestId('annotation-toggle').evaluate(button => { const event = new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'pen', pointerId: 99, button: 0 }); button.dispatchEvent(event); return event.defaultPrevented; });
   assert.equal(outside, false);
   await page.getByRole('button', { name: '撤销笔迹', exact: true }).click(); await expect.poll(() => docs.get('one:feed').ink?.strokes.length).toBe(0);
   await page.getByRole('button', { name: '重做笔迹', exact: true }).click(); await expect.poll(() => docs.get('one:feed').ink?.strokes.length).toBe(1);
   assert.deepEqual(await page.evaluate(() => [window.WebInkHost === window.__existingHost, window.__hostCalls, !!window.WebInk]), [true, 0, false]);
+  await page.getByRole('button', { name: '退出手写', exact: true }).click();
   const downloadPromise = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click(); const download = await downloadPromise;
   const backup = JSON.parse(await readFile(await download.path(), 'utf8')); assert.equal(backup.marks.length, 4); assert.equal(backup.ink.strokes.length, 1); assert.notEqual(backup.ink.strokes[0].anchor.kind, 'render-v1');
   const popupPromise = page.waitForEvent('popup'); await page.getByRole('button', { name: '打印 / PDF', exact: true }).click(); const popup = await popupPromise; await expect(popup.getByTestId('annotation-print-view')).toBeVisible(); await expect(popup.locator('blockquote')).toHaveCount(3); await expect(popup.locator('img')).toHaveCount(1); await expect(popup.locator('body')).toContainText('不是可恢复备份');
@@ -64,7 +72,7 @@ try {
   await popup.close();
   // Explicit conflict: repeated retry must retain local data and must not adopt the new revision.
   conflict = true; docs.get('one:feed').revision += 1;
-  await page.getByRole('button', { name: '备注', exact: true }).click(); await page.getByTestId('note-editor').fill('冲突草稿'); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('冲突');
+  await page.getByRole('button', { name: '整篇备注', exact: true }).click(); await page.getByTestId('note-editor').fill('冲突草稿'); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('冲突');
   const before = writes; await page.getByRole('button', { name: '重试同步', exact: true }).click(); await expect(page.getByRole('button', { name: '重试同步', exact: true })).toBeEnabled(); await expect(page.getByTestId('annotation-status')).toContainText('冲突'); assert.equal(writes, before); await expect(page.getByTestId('annotations-panel')).toContainText('冲突草稿');
   // Forced expiry must remove active identity, hide content and retain pending notes in quarantine.
   fixture.control.loggedIn = false;

@@ -44,11 +44,14 @@ export async function annotationRegressions(browser, expect) {
     } finally { state.hold?.resolve(); state.ackHold?.resolve(); state.loadHold?.resolve(); await context.close(); await fixture.close(); }
   }
   async function newNote(page, text) {
-    await page.getByRole('button', { name: '备注', exact: true }).click();
+    await page.getByRole('button', { name: '整篇备注', exact: true }).click();
     await page.getByTestId('note-editor').fill(text);
   }
   async function draw(page, selectTool = true) {
-    if (selectTool) await page.getByRole('button', { name: '钢笔', exact: true }).click();
+    if (selectTool) {
+      if (!await page.getByTestId('annotation-toolbar').isVisible()) await page.getByTestId('ink-toggle').click();
+      await page.getByRole('button', { name: '钢笔', exact: true }).click();
+    }
     await page.getByTestId('reader-content').scrollIntoViewIfNeeded();
     await page.getByTestId('reader-content').evaluate(root => {
       const target = root.querySelector('p'), box = target.getBoundingClientRect();
@@ -63,6 +66,76 @@ export async function annotationRegressions(browser, expect) {
       return false;
     }));
   }
+  for (const width of [1280, 390]) await scenario(`contextual selection geometry and keyboard at ${width}px`, async ({ page, state }) => {
+    await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+    await page.setViewportSize({ width, height: 844 });
+    const body = page.getByTestId('reader-content');
+    await expect(page.getByTestId('annotations-panel')).toHaveCount(0);
+    await expect(page.getByTestId('annotation-toolbar')).toHaveCount(0);
+    const initial = await body.boundingBox();
+    await page.getByTestId('annotation-toggle').click();
+    const after = await body.boundingBox();
+    assert.equal(after.y, initial.y, 'drawer must not push the body down');
+    assert.equal(after.width, initial.width, 'drawer must not reflow text');
+    await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+    await page.getByTestId('ink-toggle').click();
+    assert.equal((await body.boundingBox()).y, initial.y, 'ink palette is out of flow');
+    await page.getByRole('button', { name: '退出手写', exact: true }).click();
+    await expect(page.getByTestId('ink-toggle')).toHaveAttribute('aria-pressed', 'false');
+    async function select() {
+      await body.locator('p').first().scrollIntoViewIfNeeded();
+      await body.evaluate(root => {
+        const node = root.querySelector('p').firstChild, range = document.createRange();
+        range.setStart(node, 0); range.setEnd(node, Math.min(node.length, 6));
+        const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await expect(page.getByTestId('selection-annotation-toolbar')).toBeVisible();
+    }
+    async function bounded(testId) {
+      await expect.poll(() => page.getByTestId(testId).evaluate(node => {
+        const box = node.getBoundingClientRect(), reader = document.querySelector('.reader-scroll').getBoundingClientRect(), viewport = window.visualViewport;
+        const minX = Math.max(reader.left, viewport.offsetLeft), maxX = Math.min(reader.right, viewport.offsetLeft + viewport.width), minY = Math.max(reader.top, viewport.offsetTop), maxY = Math.min(reader.bottom, viewport.offsetTop + viewport.height);
+        return box.left >= minX && box.right <= maxX + 1 && box.top >= minY && box.bottom <= maxY + 1 && node.parentElement.classList.contains('app-shell');
+      })).toBe(true);
+    }
+    await select(); await bounded('selection-annotation-toolbar');
+    await page.keyboard.press('Alt+Enter');
+    await expect(page.getByTestId('selection-annotation-toolbar').getByRole('button', { name: '高亮', exact: true })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('note-editor')).toHaveCount(0);
+    await expect.poll(() => state.document.marks.length).toBe(1);
+    assert.equal(state.document.marks[0].kind, 'highlight');
+    await select(); await page.keyboard.press('Escape');
+    await expect(page.getByTestId('selection-annotation-toolbar')).toHaveCount(0);
+    await select(); await page.getByTestId('selection-annotation-toolbar').getByRole('button', { name: '备注', exact: true }).click();
+    await expect(page.getByTestId('note-editor')).toBeFocused();
+    await page.getByTestId('note-editor').fill('outside dismissal retains draft');
+    await page.locator('.article-source').click();
+    await expect(page.getByTestId('note-editor')).toHaveCount(0);
+    await expect.poll(() => state.document.marks[1]?.text).toBe('outside dismissal retains draft');
+    await body.evaluate(node => { node.style.minHeight = '1800px'; });
+    await select();
+    await page.locator('.reader-scroll').evaluate(node => { node.scrollTop += 35; });
+    await bounded('selection-annotation-toolbar');
+    await page.locator('.reader-scroll').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await expect(page.getByTestId('selection-annotation-toolbar')).toHaveCount(0);
+    await body.evaluate(node => { node.style.minHeight = ''; });
+    await page.locator('.reader-scroll').evaluate(node => { node.scrollTop = 0; });
+    await page.getByTestId('annotation-toggle').click();
+    await expect(page.getByTestId('annotations-panel')).toContainText('outside dismissal retains draft');
+    await page.locator('.annotation-list-item').last().click();
+    await expect(page.getByTestId('note-editor')).toHaveValue('outside dismissal retains draft');
+    await page.setViewportSize({ width, height: 460 });
+    await expect(page.getByTestId('note-editor')).toBeVisible();
+    await bounded('annotation-note-popover');
+    await page.getByTestId('note-editor').press('Escape');
+    await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+    await page.reload();
+    await expect(page.locator('.text-mark')).not.toHaveCount(0);
+    await expect(page.getByTestId('annotations-panel')).toHaveCount(0);
+    await expect(page.getByTestId('annotation-toolbar')).toHaveCount(0);
+  });
   for (const verification of ['401', '401-marker-failure', 'owner-mismatch']) await scenario(`focused annotation session ${verification} locks pending notes`, async ({ page, state, fixture }) => {
     state.failure = 503;
     await newNote(page, '必须隔离的草稿');
@@ -89,12 +162,14 @@ export async function annotationRegressions(browser, expect) {
   await scenario('same-context current-version reload and import restore paint and input', async ({ page, state }) => {
     await draw(page); await expect.poll(() => state.document.ink?.strokes.length).toBe(1);
     await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    if (await page.getByTestId('annotation-toolbar').isVisible()) await page.getByRole('button', { name: '退出手写', exact: true }).click();
     await page.getByText('正文版本 · 当前正文', { exact: true }).click();
     await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
     await page.getByTestId('reader-content').scrollIntoViewIfNeeded();
     await expect.poll(() => painted(page)).toBe(true);
     await draw(page); await expect.poll(() => state.document.ink?.strokes.length).toBe(2);
     await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    await page.getByRole('button', { name: '退出手写', exact: true }).click();
     const backup = { format: 'feedink-notes', version: 1, source: { url: state.document.context.sourceUrl, title: state.document.context.title, mode: 'feed', contentHash: state.document.contentHash }, ink: state.document.ink, marks: state.document.marks };
     const importedRevision = state.document.revision + 1;
     page.once('dialog', dialog => dialog.accept());
@@ -153,6 +228,7 @@ export async function annotationRegressions(browser, expect) {
     await newNote(page, 'committed while acknowledgement is held');
     await page.getByRole('button', { name: '保存备注', exact: true }).click();
     await expect.poll(() => state.document.revision).toBe(1);
+    if (await page.getByTestId('annotation-toolbar').isVisible()) await page.getByRole('button', { name: '退出手写', exact: true }).click();
     await page.getByText('正文版本 · 当前正文', { exact: true }).click();
     const loads = state.loads;
     const reload = page.getByRole('button', { name: '返回最新正文版本', exact: true });
@@ -175,11 +251,11 @@ export async function annotationRegressions(browser, expect) {
     await expect.poll(() => state.document.revision).toBe(1);
     // Destroy the old document while its server response is withheld: IDB has no ACK.
     await page.reload(); heldAck.resolve(); state.ackHold = null;
-    await expect.poll(() => state.preconditionFailures).toBe(1);
     await page.getByTestId('annotation-toggle').click();
     await expect(page.getByTestId('annotation-status')).toContainText('已同步');
     await expect(page.getByTestId('annotation-status')).not.toContainText('冲突');
     await expect(page.getByTestId('annotations-panel')).toContainText('durable note with lost response');
+    assert.ok(state.preconditionFailures <= 1, 'automatic authoritative load can confirm the lost acknowledgement before a stale PUT');
     assert.equal(state.document.revision, 1); assert.equal(state.writes, 1);
   });
   await scenario('retirement freezes edits and keeps latest B on local failure', async ({ page }) => {
@@ -199,13 +275,15 @@ export async function annotationRegressions(browser, expect) {
     await page.getByTestId('note-editor').fill('draft A');
     await expect.poll(() => page.evaluate(() => !!window.releaseDraftA)).toBe(true);
     await page.getByTestId('note-editor').fill('draft B');
-    await page.getByTestId('reader').getByRole('button', { name: '返回', exact: true }).click();
+    await page.getByTestId('reader').getByRole('button', { name: '返回', exact: true }).focus();
+    await page.getByTestId('reader').getByRole('button', { name: '返回', exact: true }).press('Enter');
     await expect(page.getByTestId('note-editor')).toBeDisabled();
     await expect(page.getByTestId('note-editor')).toHaveValue('draft B');
     await page.evaluate(() => window.releaseDraftA());
     await expect(page.getByText(/未切换页面：/)).toBeVisible();
     await expect(page.getByTestId('note-editor')).toBeEnabled();
     await expect(page.getByTestId('note-editor')).toHaveValue('draft B');
+    await page.getByTestId('note-editor').press('Escape');
     const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
     const backup = JSON.parse(await readFile(await (await downloaded).path(), 'utf8')); assert.equal(backup.marks[0].text, 'draft B');
     await page.evaluate(() => { window.restoreNoteWrites(); window.dispatchEvent(new Event('online')); });
@@ -219,6 +297,8 @@ export async function annotationRegressions(browser, expect) {
     const stateWrites = fixture.control.writes.length;
     state.loadHold = deferred();
     await newNote(page, 'pending through slow load');
+    await page.getByTestId('note-editor').press('Escape');
+    if (await page.getByTestId('annotation-toolbar').isVisible()) await page.getByRole('button', { name: '退出手写', exact: true }).click();
     await page.getByText('正文版本 · 当前正文', { exact: true }).click();
     const loads = state.loads;
     await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
@@ -253,6 +333,7 @@ export async function annotationRegressions(browser, expect) {
     await expect(page.getByTestId('reader-content')).toContainText('第一篇');
     await expect(page.getByRole('button', { name: '钢笔', exact: true })).toHaveAttribute('aria-pressed', 'true');
     await draw(page, false);
+    await page.getByRole('button', { name: '退出手写', exact: true }).click();
     await expect(page.getByTestId('annotations-panel').getByRole('heading', { name: /手写 2 笔/ })).toBeVisible();
     const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
     assert.equal(JSON.parse(await readFile(await (await downloaded).path(), 'utf8')).ink.strokes.length, 2);
@@ -335,6 +416,7 @@ export async function annotationRegressions(browser, expect) {
     await page.getByRole('button', { name: '保存备注', exact: true }).click();
     await expect(page.getByTestId('annotations-panel')).toContainText('未同步：');
     state.document = { ...state.document, contentHash: 'b'.repeat(64), context: { ...state.document.context, contentHash: 'b'.repeat(64), contentHtml: '<p>H2 current body</p>' } };
+    if (await page.getByTestId('annotation-toolbar').isVisible()) await page.getByRole('button', { name: '退出手写', exact: true }).click();
     await page.getByText('正文版本 · 当前正文', { exact: true }).click();
     for (const status of [409, 404]) {
       state.historyStatus = status;

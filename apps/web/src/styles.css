@@ -444,40 +444,35 @@ kbd{font:12px ui-monospace,monospace;background:var(--panel);border:1px solid va
 .reader-pane{grid-column:3;grid-row:1}
 
 /* Reader annotations share the existing paper, purple/gray palette and e-ink theme. */
-.annotation-section{min-width:0}
-.annotation-heading{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0;font:13px/1.5 system-ui,sans-serif}
-.annotation-heading [role=status]{color:var(--muted)}
-.annotations-panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:24px;font:14px/1.6 system-ui,sans-serif;color:var(--ink)}
-.annotation-toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.annotations-panel button{border:1px solid var(--line);border-radius:5px;background:var(--paper);min-height:38px;padding:7px 10px}
-.annotation-toolbar button[aria-pressed=true]{color:var(--accent);border-color:var(--accent);background:var(--selected)}
-.annotation-toolbar label{display:flex;align-items:center;gap:6px;max-width:180px}
-.annotation-toolbar input[type=range]{max-width:95px}
-.annotation-list{list-style:none;padding:0;max-height:320px;overflow:auto;overscroll-behavior:contain}
-.annotation-list li{display:flex;align-items:flex-start;gap:8px;margin:8px 0}
-.annotation-list-item{flex:1;text-align:left;min-width:0}
-.annotation-list p,.note-editor textarea{white-space:pre-wrap;overflow-wrap:anywhere}
-.annotations-panel blockquote{margin:6px 0;border-left:3px solid var(--accent);padding:3px 10px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
-.annotation-conflict{border:2px solid var(--accent);padding:10px;margin:12px 0}
-.note-editor{display:grid;gap:8px;border-top:1px solid var(--line);padding-top:10px}
-.annotation-page{position:relative;isolation:isolate}
-.text-mark-presentation{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:1}
-.text-mark{position:absolute;pointer-events:none}
-.text-mark-highlight{background:var(--mark-color);opacity:.28}
-.text-mark-underline,.text-mark-note{border-bottom:2px solid var(--mark-color)}
-.text-mark-wave{border-bottom:3px solid var(--mark-color);border-bottom-style:dotted}
-.text-mark-wave::after{content:'';position:absolute;left:0;right:0;bottom:-2px;height:4px;background:radial-gradient(ellipse at 50% 100%,transparent 45%,var(--mark-color) 50%,var(--mark-color) 65%,transparent 70%) 0 0/8px 4px repeat-x}
-.annotation-unlocated{font:12px/1.5 system-ui,sans-serif;color:var(--muted)}
-.annotations-panel details{margin-top:14px;overflow-wrap:anywhere}
-.annotations-panel details button{display:block;margin:6px 0}
-.annotations-panel input[type=file]{max-width:180px;font-size:12px}
 .mcp-token-once{padding:12px;border:2px solid var(--accent);overflow-wrap:anywhere}
 .mcp-token-once textarea{font-family:monospace}
-[data-theme=eink] .annotation-toolbar button[aria-pressed=true]{background:#000!important;color:#fff!important;border:2px solid #000}
-[data-theme=eink] .annotations-panel{border:2px solid #000;border-radius:0;background:#fff}
-[data-theme=eink] .text-mark{--mark-color:#000!important}
-[data-theme=eink] .text-mark-highlight{background:transparent;border:1px solid #000;opacity:1}
-[data-theme=eink] .text-mark-wave::after{background:none}
-[data-theme=eink] .annotations-panel button{min-height:44px}
-@media(max-width:700px){.annotations-panel{padding:10px}.annotation-toolbar button{min-height:44px}.annotation-list{max-height:240px}.annotation-heading{gap:6px}.annotations-panel .button-row{align-items:stretch}.annotations-panel .button-row>*{flex:1 1 40%}}
-@media print{.annotation-heading,.annotations-panel,.text-mark-presentation,[data-webink-overlay]{display:none!important}}
+
+/* Reading controls stay out of the document flow. */
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.reader-annotation-tools{display:flex;align-items:center;gap:3px;flex:none}
+.reader-connection{display:inline-flex;align-items:center;color:var(--muted);flex:none}
+.list-connection{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;color:var(--muted);opacity:.65}
+.list-connection.attention{color:var(--accent);opacity:1}
+.reader-options{position:absolute;top:52px;right:10px;z-index:30;width:min(300px,calc(100% - 20px));max-height:calc(100% - 65px);overflow:auto;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--paper);box-shadow:0 8px 32px #0002;color:var(--ink);font:14px/1.5 system-ui,sans-serif}
+.reader-options[hidden],.reader-options [hidden]{display:none!important}
+.reader-options>button,.reader-options>a{display:flex;align-items:center;gap:12px;width:100%;min-height:42px;padding:9px 10px;text-align:left;color:var(--ink);border-radius:6px;text-decoration:none}
+.reader-options>button:hover,.reader-options>a:hover{background:var(--hover)}
+.reader-options .reader-options-back{color:var(--muted);border-bottom:1px solid var(--line);border-radius:0;margin-bottom:10px}
+.reader-preferences{padding:0 8px 8px;display:grid;gap:12px}
+.reader-preferences .field{margin:0}
+.reader-preferences select{width:100%}
+.reader-preferences>label{display:flex;justify-content:space-between;align-items:center}
+.reader-size-controls{display:flex;align-items:center;gap:12px}
+.reader-size-controls button{border:1px solid var(--line);border-radius:5px;min-width:40px;min-height:36px;background:var(--panel)}
+.reader-size-controls output{min-width:24px;text-align:center;font-variant-numeric:tabular-nums}
+.reader-options .speech-panel{margin:0;padding:8px;border:0;background:transparent}
+.article-meta{margin-bottom:24px}
+.article-document>.archive-details{margin-top:24px}
+.modal .archive-details{margin:0;padding:0;border:0}
+.app-shell:has(>.reader-pane[data-focus=true]){grid-template-columns:minmax(0,1fr)!important}
+.app-shell:has(>.reader-pane[data-focus=true])>.sidebar,.app-shell:has(>.reader-pane[data-focus=true])>.list-pane,.app-shell:has(>.reader-pane[data-focus=true])>.resize-handle,.app-shell:has(>.reader-pane[data-focus=true])>.drawer-scrim{display:none!important}
+.app-shell:has(>.reader-pane[data-focus=true])>.reader-pane{display:flex!important;grid-column:1/-1;grid-row:1}
+[data-theme=eink] .reader-options{border:2px solid #000;box-shadow:none;border-radius:0}
+@container(max-width:450px){.reader-annotation-tools{gap:0}.reader-annotation-tools .icon-button{width:36px;min-width:32px}.reader-toolbar{gap:2px}.reader-options{right:6px;width:min(300px,calc(100% - 12px))}}
+@media(max-width:700px){.article-meta{margin-bottom:18px}.reader-options>button,.reader-options>a{min-height:44px}}
+@media print{.reader-options{display:none!important}}

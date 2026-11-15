@@ -18,15 +18,14 @@ test.use({ trace: 'off', screenshot: 'off', video: 'off' });
 test.beforeEach(async ({ request }) => { await resetUpstream(request); });
 test.afterEach(async ({ request }) => { await resetUpstream(request); });
 
-const tools = ['高亮', '下划线', '波浪线', '备注', '钢笔', '荧光笔', '橡皮', '撤销笔迹', '重做笔迹'];
+const tools = ['钢笔', '荧光笔', '橡皮', '撤销笔迹', '重做笔迹'];
 const pending = /本地|待同步|等待同步/;
 const synchronized = /已同步|已保存到服务器|服务器已保存/;
 
 async function showAnnotations(page: Page) {
-  if (!await page.getByTestId('annotation-toolbar').isVisible()) await page.getByTestId('annotation-toggle').click();
-  await expect(page.getByTestId('annotation-toolbar')).toBeVisible();
+  if (!await page.getByTestId('annotations-panel').isVisible()) await page.getByTestId('annotation-toggle').click();
   await expect(page.getByTestId('annotations-panel')).toBeVisible();
-  await expect(page.getByTestId('annotation-toolbar').getByRole('button', { name: '高亮', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '整篇备注', exact: true })).toBeEnabled();
 }
 
 async function openAnnotations(page: Page, articleId: string) {
@@ -36,6 +35,8 @@ async function openAnnotations(page: Page, articleId: string) {
 }
 
 async function selectQuote(page: Page, quote = fixtureQuote) {
+  if (await page.getByTestId('annotations-panel').isVisible()) await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+  if (await page.getByTestId('annotation-toolbar').isVisible()) await page.getByRole('button', { name: '退出手写', exact: true }).click();
   const body = page.getByTestId('reader-content');
   await body.scrollIntoViewIfNeeded();
   const selected = await body.evaluate((root, exact) => {
@@ -56,9 +57,11 @@ async function selectQuote(page: Page, quote = fixtureQuote) {
 
 async function addRemark(page: Page, text: string) {
   await selectQuote(page);
-  await page.getByTestId('annotation-toolbar').getByRole('button', { name: '备注', exact: true }).click();
+  await page.getByTestId('selection-annotation-toolbar').getByRole('button', { name: '备注', exact: true }).click();
   await page.getByTestId('note-editor').fill(text);
   await page.getByRole('button', { name: '保存备注', exact: true }).click();
+  if (await page.getByTestId('note-editor').isVisible()) await page.getByTestId('note-editor').press('Escape');
+  await showAnnotations(page);
 }
 
 async function waitForMarks(api: APIRequestContext, articleId: string, count: number) {
@@ -104,7 +107,7 @@ test('selected quotes produce all four text marks, survive reload and do not mov
   await openAnnotations(page, first.id);
   for (const [index, label] of ['高亮', '下划线', '波浪线'].entries()) {
     await selectQuote(page);
-    await page.getByTestId('annotation-toolbar').getByRole('button', { name: label, exact: true }).click();
+    await page.getByTestId('selection-annotation-toolbar').getByRole('button', { name: label, exact: true }).click();
     const document = await waitForMarks(api, first.id, index + 1);
     expect(document.marks[index].anchor?.exact).toBe(fixtureQuote);
     expect(document.marks[index].kind).toBe(['highlight', 'underline', 'wave'][index]);
@@ -143,9 +146,11 @@ test('browser pen preserves pressure, scopes input to the reader, and whole-stro
   const session = await createAnnotationUser(api);
   const { first, second } = await seedAnnotationArticles(api, session);
   await openAnnotations(page, first.id);
+  await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+  await page.getByTestId('ink-toggle').click();
   const toolbar = page.getByTestId('annotation-toolbar');
   await toolbar.getByRole('button', { name: '钢笔', exact: true }).click();
-  const outside = await page.getByTestId('annotation-status').boundingBox();
+  const outside = await page.getByTestId('annotation-toggle').boundingBox();
   if (!outside) throw new Error('Annotation status must have visible geometry');
   await penPath(page, [{ x: outside.x + 4, y: outside.y + 4, pressure: 0.2 }, { x: outside.x + 20, y: outside.y + 5, pressure: 0.8 }]);
   const paragraph = page.getByTestId('reader-content').locator('p').filter({ hasText: fixtureQuote }).first();
@@ -420,7 +425,7 @@ test('forced expiry strictly blocks account switching until the original owner r
     await expect(page.getByTestId('offline-status')).not.toContainText('正在同步');
     await expect.poll(() => page.getByTestId('reader').evaluate(root => { const scroll = root.querySelector('.reader-scroll')!; return scroll.scrollHeight <= scroll.clientHeight + 1; })).toBe(true);
     await saveFault.fail(first.id);
-    await page.getByRole('button', { name: '备注', exact: true }).click();
+    await page.getByRole('button', { name: '整篇备注', exact: true }).click();
     await page.getByTestId('note-editor').fill('明确放弃的未同步备注');
     expect(await page.locator('.reader-scroll').evaluate(scroll => scroll.scrollHeight <= scroll.clientHeight + 1)).toBe(true);
     const failedOnce = { mode: 'fail', attempted: 1, held: 0, failed: 1, completed: 0, lastStatus: null };
@@ -585,6 +590,8 @@ test('e-ink and narrow mobile annotation tools remain labelled, reachable and in
   await openAnnotations(page, first.id);
   await expect(page.locator('[data-theme="eink"]').first()).toBeAttached();
   await assertNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+  await page.getByTestId('ink-toggle').click();
   const toolbar = page.getByTestId('annotation-toolbar');
   for (const label of tools) {
     const button = toolbar.getByRole('button', { name: label, exact: true });
