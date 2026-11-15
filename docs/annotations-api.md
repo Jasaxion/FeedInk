@@ -1,6 +1,6 @@
 # Annotation and MCP contract
 
-This document specifies the next development phase; it is not a claim that the base 0.1.0 release contains these endpoints. Types are in `packages/shared/src/annotations.ts`.
+This document specifies the 0.2.0 annotation and MCP interfaces; the historical base 0.1.0 release does not contain them. Types are in `packages/shared/src/annotations.ts`.
 
 ## Scope and ownership
 

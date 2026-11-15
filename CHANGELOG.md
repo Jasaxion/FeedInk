@@ -2,9 +2,7 @@
 
 Version records describe FeedInk changes and verified behavior. Development checkpoints are not production releases.
 
-## Unreleased — annotations and read-only AI access
-
-Development candidate; the full release gates are still pending.
+## 0.2.0 — annotations and read-only AI access — 2026-11-15
 
 - Add reader-scoped text highlights, straight and wavy underlines, remarks, and pressure-aware browser handwriting adapted from Apache-2.0 WebInk.
 - Preserve versioned article/mode contexts, including verified contexts opened before an offline draft's first save; use conditional writes and explicit conflict handling.
@@ -14,6 +12,10 @@ Development candidate; the full release gates are still pending.
 - Add authenticated Streamable HTTP MCP with seven read-only article/note/image tools, separate scopes, one-time token display, revocation, expiry and disabled-account checks.
 - Extend hosted checks with real SDK interoperability, HTTP-level browser fault witnesses, annotation shards, PDF text/raster checks, and note/token persistence through HTTPS deployment recovery.
 - Publish hash-inventoried runtime code with required licenses/notices only after all CI gates pass; exclude environment files, archives, credentials and raw diagnostics.
+
+### Verification
+
+Application verification [43724390424](https://github.com/Jasaxion/FeedInk/actions/runs/43724390424), revision `227bbc2`: all 179 automated checks passed (73 API, 82 web, 10 fixture, 4 source-hygiene, 7 backup-format and 3 runtime-package checks). All 57 runnable E2E cases passed, plus the Chromium/WebKit client regression suites. Two WebKit-only trusted-pen/PDF witness slots are covered by actual Chromium tests instead. PDF checks inspect extracted text and rasterized stroke colors. The container job verifies HTTPS authority/origin rejection and notes/token persistence through restart and paired recovery. The release page records final tagged-commit CI; no physical pen/e-ink hardware certification is implied.
 
 ## 0.1.0 — base reader — 2026-11-15
 
@@ -32,4 +34,4 @@ Development candidate; the full release gates are still pending.
 
 Hosted run [43682875301](https://github.com/Jasaxion/FeedInk/actions/runs/43682875301), application revision `3acdec5`, passed both verification and production-container jobs. Reported checks: 47 API, 59 web, 6 fixture, 3 public-content and 7 backup-format tests; all passed with zero skips. The 20 end-to-end cases covered real API behavior, desktop/mobile/tablet/WebKit reading, offline recovery, a complete UI workflow and two-tab state coordination. Docker Engine verified build, secure bootstrap, restart, paired database/file recovery and failure guards.
 
-The next development phase adds browser handwriting and text annotations, note exports and authenticated MCP reading/search. Those capabilities are not included in this base release. Test definitions and this record do not certify untested devices, external services or private deployment configurations.
+Browser handwriting, text annotations, note exports and authenticated MCP were added in 0.2.0, not in this historical base release. Test definitions and this record do not certify untested devices, external services or private deployment configurations.

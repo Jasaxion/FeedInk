@@ -1,6 +1,6 @@
 # 笔记导出、恢复与 PDF
 
-> 下一阶段约定；不是基础版已交付功能清单。执行结果以集成版本的 CI 为准。完整接口见 [annotations-api.md](annotations-api.md)。
+> 适用于 0.2.0 及以上版本；基础版 0.1.0 不包含笔记导出。完整接口见 [annotations-api.md](annotations-api.md)。
 
 ## 三种用途，不要混淆
 
@@ -72,4 +72,4 @@ Markdown 必须保留引文、种类、备注、来源和版本元数据；转�
 4. `pdftoppm` 把每页栅格化，独立检查三种自有测试笔迹的色彩、非零几何和未被边界裁掉，防止报告保留文字却丢失手写。
 5. 对比服务器原始笔迹未被展示投影替换；临时 PDF、文本和图片在用例结束后删除。
 
-这需要 Chromium、Poppler 和中文字体。集成人员在 **GitHub 托管 CI** 安装 `poppler-utils`、`fonts-noto-cjk` 并注册新 Playwright 项目；本阶段未运行这些测试，也不要求读者在本地执行构建。请勿把私有 PDF/截图作为公开 CI 资产。
+这需要 Chromium、Poppler 和中文字体。GitHub 托管 CI 安装 `poppler-utils`、`fonts-noto-cjk` 并执行上述 PDF 检查；[已通过的应用验证](https://github.com/Jasaxion/FeedInk/actions/runs/43724390424)包含桌面和移动视口的实际 PDF。请勿把私有 PDF/截图作为公开 CI 资产。

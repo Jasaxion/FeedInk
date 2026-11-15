@@ -4,11 +4,17 @@ An independently implemented RSS reader for **multi-user self-hosted Web and ins
 
 FeedInk is independently developed and ships original demonstration content. The [product requirements](docs/requirements.md) describe its own behavior. Install the PWA through a compatible browser; no native platform packages are included.
 
+## Version 0.2.0 — annotations and read-only AI access
+
+Add text highlights, straight/wavy underlines, remarks and pressure-aware browser handwriting; export restorable JSON, portable Markdown/PNG archives and printable PDF reports. Notes retain owned content snapshots, conditional revisions and protected offline drafts. Authenticated MCP exposes seven scoped read-only article/note/image tools.
+
+The application passed [complete hosted verification](https://github.com/Jasaxion/FeedInk/actions/runs/43724390424): **179 automated checks, 57 runnable API/browser E2E cases**, Chromium/WebKit client regressions, actual PDF text/pixel checks, and HTTPS Docker restart/paired recovery including notes and MCP credentials. Two WebKit slots intentionally defer trusted pen injection and PDF generation to Chromium; they do not waive other WebKit coverage. See [0.2.0 release notes](docs/releases/0.2.0.md) and the release page for the final tagged revision.
+
 ## Version 0.1.0 — base reader
 
 The base reader passed its [complete hosted verification](https://github.com/Jasaxion/FeedInk/actions/runs/43682875301): 122 automated checks and 20 real API/browser end-to-end cases, plus production Docker startup, administrator bootstrap, restart and paired database/file recovery.
 
-This version includes reading, subscriptions, durable archives, PWA/offline behavior and e-ink layouts. **Article annotations, handwriting and MCP access are the next development phase, not features claimed for 0.1.0.** Read [testing and evidence limits](docs/testing.md) and [CHANGELOG.md](CHANGELOG.md); maintain independent backups and do not assume every publisher or hardware device behaves identically to the tested fixtures.
+This version includes reading, subscriptions, durable archives, PWA/offline behavior and e-ink layouts. Article annotations, handwriting and MCP were added in 0.2.0 and are not claimed for the historical 0.1.0 release. Read [testing and evidence limits](docs/testing.md) and [CHANGELOG.md](CHANGELOG.md); maintain independent backups and do not assume every publisher or hardware device behaves identically to the tested fixtures.
 
 ## Run with Docker Compose
 
@@ -34,9 +40,9 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 - [Architecture and trust boundaries](docs/architecture.md)
 - [API/shared contract](docs/api.md)
 - [Annotation and MCP development contract](docs/annotations-api.md)
-- [Annotations, offline drafts and recovery (development)](docs/annotations.md)
-- [JSON, Markdown and PDF note exports (development)](docs/notes-export.md)
-- [Scoped read-only MCP access (development)](docs/mcp.md)
+- [Annotations, offline drafts and recovery](docs/annotations.md)
+- [JSON, Markdown and PDF note exports](docs/notes-export.md)
+- [Scoped read-only MCP access](docs/mcp.md)
 - [Product requirements and acceptance](docs/requirements.md)
 - [Deployment, HTTPS and PWA](docs/deployment.md)
 - [Consistent backup and empty-target restore](docs/backup.md)
@@ -44,6 +50,6 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 - [Tests, CI and validation limits](docs/testing.md)
 - [Version history](CHANGELOG.md)
 - [0.1.0 release notes](docs/releases/0.1.0.md)
-- [0.2.0 candidate notes and upgrade precautions](docs/releases/0.2.0.md)
+- [0.2.0 release notes and upgrade precautions](docs/releases/0.2.0.md)
 
-The current development workspace builds `packages/ink` → `packages/shared` → `apps/web` → `apps/api`. Annotation components are adapted from the authorized Apache-2.0 WebInk source; see [NOTICE](NOTICE). The reusable engine does not by itself mean the new annotation UI/API is released. Development requires Node24.22.3/npm11 and a dedicated PostgreSQL database. The production host requires Docker+Compose, not a host Node installation. See [LICENSE](LICENSE) for the repository license.
+The current development workspace builds `packages/ink` → `packages/shared` → `apps/web` → `apps/api`. Annotation components are adapted from the authorized Apache-2.0 WebInk source; see [NOTICE](NOTICE). Development requires Node24.22.3/npm11 and a dedicated PostgreSQL database. The production host requires Docker+Compose, not a host Node installation. See [LICENSE](LICENSE) for the repository license.

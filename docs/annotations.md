@@ -1,6 +1,6 @@
 # 批注与笔记
 
-> 本页说明下一阶段的功能约定和验收边界，不表示基础版 0.1.0 已提供这些功能。以实际部署版本及已执行的 CI 结果为准。接口与数据类型分别见 [annotations-api.md](annotations-api.md) 和 `packages/shared/src/annotations.ts`。
+> 本页说明 0.2.0 的批注功能和验收边界；基础版 0.1.0 不包含这些能力。以实际部署版本为准。接口与数据类型分别见 [annotations-api.md](annotations-api.md) 和 `packages/shared/src/annotations.ts`。
 
 ## 阅读时使用
 
@@ -69,4 +69,4 @@
 
 `apps/web/test/annotation-regressions.mjs` 另以受控客户端夹具覆盖批注会话验证 / Markdown 的 401 锁定、账号不匹配、导航写入屏障失败保留、同上下文笔迹重建、旧草稿精确回退及慢保存后的自动续传。夹具不替代真实后端验收。
 
-这些修正及新增回归仅完成源码检查，**本次未运行构建、单元或浏览器 / E2E 测试**。项目注册、依赖集成和 GitHub 托管 CI 由集成人员完成；不要将测试文件存在或语法检查通过写成验收通过。新增代码涉及来源资源限制，不在本地或企业计算资源上进行重型构建/浏览器测试。诊断文件只供授权私下排查，不作为公共附件或发行资产。
+[完整托管验证](https://github.com/Jasaxion/FeedInk/actions/runs/43724390424)已执行构建、单元/数据库、Chromium/WebKit 客户端及真实 API/E2E 门禁。测试文件存在或语法检查通过本身不是验收证据。发行页记录最终提交；诊断文件只供授权私下排查，不作为公共附件或发行资产。
