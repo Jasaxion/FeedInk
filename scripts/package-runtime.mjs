@@ -1,6 +1,6 @@
 import { access, cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { extname, join, relative, resolve } from 'node:path';
+import { basename, extname, join, relative, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { inspectPublicText } from './check-public-content.mjs';
 
@@ -24,7 +24,7 @@ async function copy(source, target) {
   if (!info.isFile()) throw new Error('Runtime package accepts only regular files');
   const logical = relative(root, source).split('\\').join('/');
   if (logical.startsWith('apps/api/migrations/') && extname(source) !== '.sql') throw new Error('Unexpected migration artifact');
-  if (!['LICENSE', 'NOTICE'].includes(logical) && (!extensions.has(extname(source)) || extname(source) === '.ts' && !source.endsWith('.d.ts'))) throw new Error(`Unexpected runtime artifact type: ${logical}`);
+  if (!['LICENSE', 'NOTICE'].includes(basename(source)) && (!extensions.has(extname(source)) || extname(source) === '.ts' && !source.endsWith('.d.ts'))) throw new Error(`Unexpected runtime artifact type: ${logical}`);
   const bytes = await readFile(source);
   if (!bytes.includes(0)) {
     const text = bytes.toString('utf8');
@@ -42,6 +42,7 @@ for (const directory of ['apps', 'packages']) {
     await access(join(workspace, 'package.json'));
     await mkdir(join(output, workspace), { recursive: true });
     await copy(join(workspace, 'package.json'), join(output, workspace, 'package.json'));
+    for (const legal of ['LICENSE', 'NOTICE']) if (tracked.has(join(workspace, legal).split('\\').join('/'))) await copy(join(workspace, legal), join(output, workspace, legal));
     await copy(join(workspace, 'dist'), join(output, workspace, 'dist'));
     if (workspace === 'apps/api') await copy(join(workspace, 'migrations'), join(output, workspace, 'migrations'));
   }

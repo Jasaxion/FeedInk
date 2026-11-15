@@ -12,7 +12,11 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const files = {
     'package.json': '{"name":"fixture","version":"0.0.0","private":true}',
-    'package-lock.json': '{}', LICENSE: 'Fixture license',
+    'package-lock.json': '{}', LICENSE: 'Fixture license', NOTICE: 'Fixture attribution',
+    'packages/ink/package.json': '{"name":"@fixture/ink"}',
+    'packages/ink/LICENSE': 'Independent engine license',
+    'packages/ink/NOTICE': 'Independent engine attribution',
+    'packages/ink/dist/index.js': 'export const engine = true;',
     'apps/api/package.json': '{"name":"@fixture/api"}',
     'apps/api/dist/server.js': 'export const ready = true;',
     'apps/api/migrations/001.sql': 'SELECT 1;',
@@ -38,6 +42,9 @@ test('runtime bundle includes only declared build inputs and verified hashes', a
   assert.equal(manifest.version, 1);
   assert.equal(manifest.files.some(file => file.path === '.env'), false);
   assert.equal(manifest.files.some(file => file.path === 'apps/web/dist/manifest.webmanifest'), true);
+  assert.equal(await readFile(join(root, '.artifacts/runtime/packages/ink/LICENSE'), 'utf8'), 'Independent engine license');
+  assert.equal(await readFile(join(root, '.artifacts/runtime/packages/ink/NOTICE'), 'utf8'), 'Independent engine attribution');
+  assert.equal(await readFile(join(root, '.artifacts/runtime/NOTICE'), 'utf8'), 'Fixture attribution');
   for (const file of manifest.files) {
     const bytes = await readFile(join(root, '.artifacts/runtime', file.path));
     assert.equal(createHash('sha256').update(bytes).digest('hex'), file.sha256);
