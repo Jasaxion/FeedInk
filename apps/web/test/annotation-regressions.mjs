@@ -158,6 +158,7 @@ export async function annotationRegressions(browser, expect) {
     assert.equal(state.loads, loads, 'GET/local reconciliation cannot overtake the pending acknowledgement');
     state.ackHold.resolve(); state.ackHold = null;
     await expect.poll(() => state.loads).toBe(loads + 1);
+    await expect(reload).toBeEnabled();
     await expect(page.getByTestId('annotation-status')).toContainText('已同步');
     await expect(page.getByTestId('annotation-status')).not.toContainText('冲突');
     assert.equal(state.writes, 1);

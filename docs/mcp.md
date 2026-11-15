@@ -69,6 +69,8 @@ totalMarks: number
 nextOffset: number | null
 ```
 
+文章正文、图片字节和笔记上下文的 `contentHash` 属于不同的完整性范围，不能互换。读取历史笔记时，使用 `list_notes` / `get_notes` 返回的笔记上下文哈希，不要直接复用文章或图片哈希。
+
 该结果同时有 `structuredContent` 与等价的 JSON text，不把 `context.contentHtml` 整个文章快照塞进笔记响应。不要把一页的 `marks.length` 误当作总数；有 `nextOffset` 时继续翻页。来源修订发生变化时，不应把不同文档版本当成同一快照拼接。
 
 `get_note_preview` 的元数据包含 `{articleId,mode,contentHash,revision,group,raw:true,...dimensions}`。预览是可视化数据，不是自动识别出的文字；`raw:true` 不能被解释为已证明准确定位到当前 DOM。输出大小和渲染预算有界；失败或未定位必须显式报告，JSON 原始数据仍可通过已授权的笔记导出保存。
