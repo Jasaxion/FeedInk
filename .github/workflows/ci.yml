@@ -48,7 +48,7 @@ jobs:
           node scripts/check-public-content.mjs
           node --test scripts/check-public-content.test.mjs
       - run: npm ci --no-audit --no-fund
-      - name: Production build (shared → web → API)
+      - name: Production build (ink → shared → web → API)
         run: npm run build
       - name: Typecheck workspaces and test contracts
         run: npm run typecheck
@@ -69,6 +69,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk
+      - name: Client lifecycle and privacy regressions
+        run: |
+          failed=0
+          for browser in chromium webkit; do
+            for suite in browser audit shell images offline-origin annotations; do
+              if ! FEEDINK_BROWSER="$browser" npm run "test:$suite" -w @feedink/web; then failed=1; fi
+            done
+          done
+          if ! npm run test:residual -w @feedink/web; then failed=1; fi
+          test "$failed" = 0
       - name: Browser and API end-to-end tests
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: |
@@ -126,7 +136,7 @@ jobs:
           grep -F 'Bootstrap requires an unused email and no active administrator' "$RUNNER_TEMP/bootstrap-refusal.log" > /dev/null
           docker compose up -d --wait --wait-timeout 120
           curl --fail http://127.0.0.1:3000/api/health
-          BASE_URL=http://127.0.0.1:3000 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" node scripts/test-deployment.mjs bootstrap
+          BASE_URL=http://127.0.0.1:3000 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" MCP_STATE_FILE="$RUNNER_TEMP/mcp-state.json" node scripts/test-deployment.mjs bootstrap
           export BASE_URL=http://127.0.0.1:3000 STATE_FILE="$RUNNER_TEMP/deployment-state.json"
           node scripts/test-deployment.mjs seed
           docker compose restart app
@@ -147,7 +157,7 @@ jobs:
           scripts/restore.sh "$RUNNER_TEMP/application-backup" --confirm-restore=feedink-ci-recovery
           docker compose up -d --wait --wait-timeout 120
           BASE_URL=http://127.0.0.1:3001 STATE_FILE="$RUNNER_TEMP/deployment-state.json" node scripts/test-deployment.mjs verify
-          BASE_URL=http://127.0.0.1:3001 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" node scripts/test-deployment.mjs bootstrap
+          BASE_URL=http://127.0.0.1:3001 ADMIN_EMAIL=operator-ci@example.invalid ADMIN_PASSWORD_FILE="$RUNNER_TEMP/admin-password" MCP_STATE_FILE="$RUNNER_TEMP/mcp-state.json" node scripts/test-deployment.mjs bootstrap
       - name: Real PostgreSQL plus independent archive volume failure-guard drill
         env:
           TEST_IMAGE: feedink:ci

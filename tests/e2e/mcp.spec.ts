@@ -46,7 +46,7 @@ class McpWitness {
         body: JSON.stringify({ jsonrpc: '2.0', ...(id === undefined ? {} : { id }), method, params }),
       });
     } catch { throw new Error(`MCP ${method} transport failed; credential-bearing diagnostics withheld`); }
-    expect(response.status(), `MCP ${method} HTTP status`).toBe(notification ? 202 : 200);
+    expect(response.status, `MCP ${method} HTTP status`).toBe(notification ? 202 : 200);
     this.sessionId = response.headers.get('mcp-session-id') ?? this.sessionId;
     if (notification) { await response.body?.cancel(); return {}; }
     const parse = (text: string): RecordValue => {

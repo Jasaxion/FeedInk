@@ -32,13 +32,36 @@ if (mode === 'bootstrap') {
   assert.equal(session.user.isAdmin, true);
   const cookie = response.headers.getSetCookie()[0].split(';')[0];
   await get('/api/admin/users', cookie);
+  if (process.env.MCP_STATE_FILE) {
+    let token;
+    try { ({ token } = JSON.parse(await readFile(process.env.MCP_STATE_FILE, 'utf8'))); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (!token) {
+      const created = await fetch(base + '/api/mcp-tokens', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken }, body: JSON.stringify({ name: 'Deployment persistence test', scopes: ['notes:read'], expiresInDays: 1 }), signal: AbortSignal.timeout(15000) });
+      assert.equal(created.status, 201, 'administrator token creation');
+      ({ token } = await created.json());
+      assert.equal(typeof token, 'string');
+      await writeFile(process.env.MCP_STATE_FILE, JSON.stringify({ token }), { flag: 'wx', mode: 0o600 });
+    }
+    const rpc = async (method, params, id) => {
+      const reply = await fetch(base + '/mcp', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', method, params, ...(id === undefined ? {} : { id }) }), signal: AbortSignal.timeout(15000) });
+      assert.equal(reply.status, id === undefined ? 202 : 200, 'persisted MCP token remains usable');
+      return id === undefined ? null : reply.json();
+    };
+    const initialized = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'deployment-check', version: '1' } }, 1);
+    assert.equal(initialized.result.serverInfo.name, 'FeedInk');
+    await rpc('notifications/initialized', {}, undefined);
+    const listed = await rpc('tools/list', {}, 2);
+    assert.equal(listed.result.tools.length, 7);
+    assert.ok(listed.result.tools.every(tool => tool.annotations.readOnlyHint));
+  }
   const registration = await fetch(base + '/api/auth/register', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: 'closed-registration@example.invalid', password: 'not-a-production-password', name: 'Closed test' }),
     signal: AbortSignal.timeout(15000),
   });
   assert.equal(registration.status, 403, 'registration remains closed after bootstrap');
-  console.log('PASS bootstrap: administrator login/access works with public registration closed');
+  console.log('PASS bootstrap: administrator access, configured MCP persistence check and closed registration');
   process.exit(0);
 }
 let state;
@@ -53,7 +76,14 @@ if (mode === 'seed') {
   const image = article.images.find(image => image.status === 'cached');
   assert.ok(image, 'demo image captured');
   const bytes = Buffer.from(await (await get(image.url, cookie)).arrayBuffer());
-  state = { cookie, user: session.user.id, article: article.id, contentHash: hash(article.contentHtml), image: image.url, imageHash: hash(bytes), total: articles.total };
+  const annotationPath = `/api/articles/${article.id}/annotations?mode=feed`;
+  const context = await (await get(annotationPath, cookie)).json();
+  const now = Date.now();
+  const payload = { schemaVersion: 1, contentHash: context.contentHash, ink: { version: 1, url: article.url, title: article.title, layoutWidth: 800, updatedAt: now, strokes: [{ id: 'deployment-stroke', tool: 'pen', color: '#123456', width: 2, opacity: 1, points: [{ x: 10, y: 10, p: 0.2 }, { x: 20, y: 15, p: 0.8 }], anchor: { kind: 'deployment-fixture' } }] }, marks: [{ id: 'deployment-note', kind: 'note', color: 'yellow', anchor: null, text: 'Durable deployment note', createdAt: now, updatedAt: now }] };
+  const saved = await fetch(base + annotationPath, { method: 'PUT', headers: { cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken, 'If-Match': '"0"' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000) });
+  assert.equal(saved.status, 200, 'deployment annotation save');
+  const document = await saved.json();
+  state = { cookie, user: session.user.id, article: article.id, contentHash: hash(article.contentHtml), image: image.url, imageHash: hash(bytes), total: articles.total, annotationPath: `${annotationPath}&contentHash=${document.contentHash}`, annotationRevision: document.revision, annotationHash: hash(JSON.stringify({ ink: document.ink, marks: document.marks })) };
   await writeFile(stateFile, JSON.stringify(state), { flag: 'wx', mode: 0o600 });
 } else {
   state = JSON.parse(await readFile(stateFile, 'utf8'));
@@ -61,6 +91,9 @@ if (mode === 'seed') {
   assert.equal(hash(article.contentHtml), state.contentHash);
   assert.equal(hash(Buffer.from(await (await get(state.image, state.cookie)).arrayBuffer())), state.imageHash);
   assert.equal((await (await get('/api/articles?scope=archive', state.cookie)).json()).total, state.total);
+  const document = await (await get(state.annotationPath, state.cookie)).json();
+  assert.equal(document.revision, state.annotationRevision);
+  assert.equal(hash(JSON.stringify({ ink: document.ink, marks: document.marks })), state.annotationHash, 'original text notes and pressure strokes survive restart/recovery');
 }
 assert.equal((await fetch(base + state.image)).status, 401, 'asset denies unauthenticated access');
-console.log(`PASS ${process.argv[2]}: health, SPA, manifest, service worker, ${state.total} original demo articles, stored body/image SHA256 and unauthenticated asset denial`);
+console.log(`PASS ${process.argv[2]}: health, SPA, manifest, service worker, ${state.total} original demo articles, stored body/image SHA256, raw annotations and unauthenticated asset denial`);
