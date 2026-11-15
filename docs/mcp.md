@@ -51,7 +51,7 @@ MCP（Model Context Protocol）让兼容客户端查询当前令牌所属账号�
 
 | 工具 | 参数 | 结果边界 |
 |---|---|---|
-| `search_articles` | `{query,offset?,limit?}` | 当前账号文章搜索，`{items,total,nextOffset}` |
+| `search_articles` | `{query,offset?,limit?}` | 当前账号文章搜索，`{items,total,nextOffset}`；每项含 `articleId`、标题、来源与摘要 |
 | `get_article` | `{articleId,offset?,limit?}` | 已拥有文章，正文输出有界并提供来源/完整性信息 |
 | `get_article_image` | `{imageId}` | 已归档、已拥有图片；MCP image block + `{imageId,articleId,contentHash,...dimensions}` 元数据 |
 | `list_notes` | `{articleId?,offset?,limit?}` | 非空笔记摘要，`{items,total,nextOffset}` |

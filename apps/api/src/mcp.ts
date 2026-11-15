@@ -90,6 +90,7 @@ export function installMcp(app: FastifyInstance, config: Config, db: DB, store: 
       let principal: McpPrincipal;
       try { principal = await tokens.authenticate(request.headers.authorization); }
       catch (error) { reply.header('WWW-Authenticate', 'Bearer realm="FeedInk MCP"'); throw error; }
+      if (request.url.includes('?')) throw new ApiFailure(400, 'MCP_QUERY', 'MCP does not accept query parameters or URL credentials');
       if (request.method !== 'POST') return reply.code(405).header('Allow', 'POST').send({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'This stateless endpoint supports POST only' } });
       const server = createMcpServer(db, store, notes, principal);
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

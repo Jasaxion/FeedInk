@@ -169,7 +169,7 @@ test('real initialize/list/call searches owned articles/notes and returns bounde
   }
   for (const name of ['search_articles', 'search_notes']) expect(Object.keys(tools.find(tool => tool.name === name)!.inputSchema.properties)).toEqual(expect.arrayContaining(['query', 'offset', 'limit']));
   const search = structured(await client.call('search_articles', { query: '持久存档', offset: 0, limit: 1 }));
-  expect((search.items as { id: string }[]).map(item => item.id)).toEqual([first.id]);
+  expect((search.items as { articleId: string }[]).map(item => item.articleId)).toEqual([first.id]);
   expect(search.total).toBe(1); expect(search.nextOffset).toBeNull();
   const article = structured(await client.call('get_article', { articleId: first.id, offset: 0, limit: 1200 }));
   expect(JSON.stringify(article)).toContain(fixtureQuote);
@@ -259,6 +259,7 @@ test('tokens are shown once, session+CSRF managed, read-only, immediately revoca
   const credential = await createToken(request, session, ['notes:read']);
   expect(await deniedHttp()).toBe(401);
   expect(await deniedHttp(undefined, new URL(baseURL).origin, '?token=DO_NOT_USE_PLACEHOLDER')).toBe(401);
+  expect(await deniedHttp(credential.token, new URL(baseURL).origin, '?unsupported=1')).toBe(400);
   expect(await deniedHttp(credential.token, 'https://untrusted.example.test')).toBe(403);
   const listing = await request.get('/api/mcp-tokens');
   expect(listing.status()).toBe(200);

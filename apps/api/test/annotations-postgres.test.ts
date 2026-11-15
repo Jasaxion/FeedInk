@@ -9,7 +9,7 @@ import sharp from 'sharp';
 import { createApp } from '../src/app.js';
 import { type Config, type SQL, hash, withConnection } from '../src/core.js';
 import { makeZip, readZip } from '../src/zip.js';
-import { Annotations, canonicalAnnotationHash } from '../src/annotations.js';
+import { Annotations, canonicalAnnotationHash, notesBackup } from '../src/annotations.js';
 import { Archives } from '../src/archive.js';
 import { Content, raster } from '../src/content.js';
 import { SafeFetcher } from '../src/network.js';
@@ -170,6 +170,15 @@ test('PostgreSQL annotations: CAS, history, tenant binding, portable archives an
       const current = await annotations.get(owner.id, retainedId, 'feed');
       assert.notEqual(current.contentHash, saved.contentHash);
       assert.equal(current.revision, 0);
+      const writePath = `/articles/${retainedId}/annotations?mode=feed&contentHash=${current.contentHash}`;
+      const currentPayload = { schemaVersion: 1, contentHash: current.contentHash, ink: null, marks: payload.marks };
+      const written = await request(owner, 'PUT', writePath, currentPayload, 0);
+      assert.equal(written.statusCode, 200, 'editor context URL is accepted for matching writes');
+      const imported = await request(owner, 'POST', writePath.replace('/annotations?', '/annotations/import?'), notesBackup(written.json()), 1);
+      assert.equal(imported.statusCode, 200, 'editor context URL is accepted for matching imports');
+      assert.equal((await request(owner, 'PUT', writePath, { ...currentPayload, contentHash: 'b'.repeat(64) }, 2)).statusCode, 409);
+      assert.equal((await request(owner, 'POST', writePath.replace('/annotations?', '/annotations/import?').replace('mode=feed', 'mode=fulltext'), notesBackup(imported.json()), 2)).statusCode, 409);
+      assert.equal((await annotations.get(owner.id, retainedId, 'feed')).revision, 2);
     });
     await t.test('annotated duplicate import preserves retained revision-zero metadata for the same canonical body', async () => {
       const source = await register(), destination = await register();

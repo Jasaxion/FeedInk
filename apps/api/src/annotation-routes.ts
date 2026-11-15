@@ -24,7 +24,8 @@ export function installAnnotationRoutes(root: FastifyInstance, notes: Annotation
     return send(reply, await notes.get(user(r), article(r), q.mode, q.contentHash));
   });
   app.put('/api/articles/:id/annotations', { bodyLimit: ANNOTATION_LIMITS.bytes }, async (r, reply) => {
-    const q = z.object({ mode: annotationMode.default('feed') }).strict().parse(r.query);
+    const q = query.parse(r.query);
+    if (q.contentHash !== undefined && q.contentHash !== (r.body as { contentHash?: unknown } | null)?.contentHash) throw new ApiFailure(409, 'ANNOTATION_CONTEXT', 'Query and document contexts differ');
     return send(reply, await notes.save(user(r), article(r), q.mode, r.body, annotationPrecondition(r.headers['if-match'])));
   });
   app.delete('/api/articles/:id/annotations', async (r, reply) => {
@@ -42,8 +43,9 @@ export function installAnnotationRoutes(root: FastifyInstance, notes: Annotation
   });
   app.post('/api/articles/:id/annotations/import', { bodyLimit: ANNOTATION_LIMITS.bytes }, async (r, reply) => {
     const expected = annotationPrecondition(r.headers['if-match']);
-    z.object({}).strict().parse(r.query);
+    const q = z.object({ mode: annotationMode.optional(), contentHash: contentHash.optional() }).strict().parse(r.query);
     const backup = validateNotesBackup(r.body);
+    if (q.mode !== undefined && q.mode !== backup.source.mode || q.contentHash !== undefined && q.contentHash !== backup.source.contentHash) throw new ApiFailure(409, 'ANNOTATION_CONTEXT', 'Query and backup contexts differ');
     return send(reply, await notes.save(user(r), article(r), backup.source.mode, backup, expected, { backup: true }));
   });
   app.get('/api/articles/:id/annotations/export', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (r, reply) => {

@@ -21,7 +21,6 @@ export function mcpBoundary(request: FastifyRequest, config: Config): void {
   const loopback = origin.protocol !== 'http:' || (() => { try { return ipaddr.process(request.ip).range() === 'loopback'; } catch { return false; } })();
   if (!secureMcpConfig(config) || !loopback || request.protocol !== origin.protocol.slice(0, -1) || request.host.toLowerCase() !== origin.host.toLowerCase()) throw new ApiFailure(403, 'MCP_ORIGIN', 'MCP requires the configured secure application origin');
   if (request.headers.origin !== undefined && request.headers.origin !== origin.origin) throw new ApiFailure(403, 'MCP_ORIGIN', 'MCP origin is not allowed');
-  if (request.url.includes('?')) throw new ApiFailure(400, 'MCP_QUERY', 'MCP does not accept query parameters or URL credentials');
 }
 export class McpTokens {
   constructor(readonly db: DB, readonly config: Config) {}
