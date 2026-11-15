@@ -278,13 +278,20 @@ export class Content {
           );
         await sql`BEGIN`;
         try {
+          // Match archive restore's article-before-images order and reject stale sources.
+          const [current] =
+            await sql`SELECT * FROM articles WHERE id=${article.id} AND user_id=${article.user_id} AND url=${article.url} FOR UPDATE`;
+          if (!current) {
+            await sql`ROLLBACK`;
+            return false;
+          }
           const captured = await this.capture(
-            article.id,
+            current.id,
             extracted.content,
             page.url,
             sql,
           );
-          await sql`UPDATE articles SET fulltext_html=${captured.html},fulltext_hash=${captured.hash},fulltext_fetched_at=now(),fulltext_error=null,content_text=${captured.text},word_count=${captured.words},title=${article.feed_id ? article.title : (extracted.title || article.title).slice(0, 1000)},summary=${article.feed_id ? article.summary : captured.text.slice(0, 400)} WHERE id=${article.id}`;
+          await sql`UPDATE articles SET fulltext_html=${captured.html},fulltext_hash=${captured.hash},fulltext_fetched_at=now(),fulltext_error=null,content_text=${captured.text},word_count=${captured.words},title=${current.feed_id ? current.title : (extracted.title || current.title).slice(0, 1000)},summary=${current.feed_id ? current.summary : captured.text.slice(0, 400)} WHERE id=${current.id} AND user_id=${current.user_id}`;
           await sql`COMMIT`;
         } catch (e) {
           await sql`ROLLBACK`;
@@ -293,7 +300,7 @@ export class Content {
         await this.retry(article, sql);
         return true;
       } catch (e) {
-        await sql`UPDATE articles SET fulltext_error=${safeError(e)} WHERE id=${article.id}`;
+        await sql`UPDATE articles SET fulltext_error=${safeError(e)} WHERE id=${article.id} AND user_id=${article.user_id} AND url=${article.url}`;
         return false;
       }
     });

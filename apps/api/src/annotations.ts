@@ -95,9 +95,10 @@ export class Annotations {
   }
   async persist(sql: SQL, userId: string, context: AnnotationContext, payload: AnnotationPayload, revision: number): Promise<void> {
     await this.retainContext(sql, userId, context);
+    const [retained] = await sql`SELECT source_url,title,content_html FROM annotation_contexts WHERE user_id=${userId} AND article_id=${context.articleId} AND mode=${context.mode} AND content_hash=${context.contentHash}`;
     const searchText = payload.marks.map(m => `${m.anchor?.exact ?? ''}\n${m.text}`).join('\n');
     await sql`INSERT INTO annotations(id,user_id,article_id,mode,content_hash,source_url,title,content_html,revision,ink,marks,mark_count,stroke_count,search_text)
-      VALUES(${id()},${userId},${context.articleId},${context.mode},${context.contentHash},${context.sourceUrl},${context.title},${context.contentHtml},${revision},${payload.ink === null ? null : sql.json(payload.ink as any)},${sql.json(payload.marks as any)},${payload.marks.length},${payload.ink?.strokes.length ?? 0},${searchText})
+      VALUES(${id()},${userId},${context.articleId},${context.mode},${context.contentHash},${retained.source_url},${retained.title},${retained.content_html},${revision},${payload.ink === null ? null : sql.json(payload.ink as any)},${sql.json(payload.marks as any)},${payload.marks.length},${payload.ink?.strokes.length ?? 0},${searchText})
       ON CONFLICT(user_id,article_id,mode,content_hash) DO UPDATE SET revision=EXCLUDED.revision,ink=EXCLUDED.ink,marks=EXCLUDED.marks,mark_count=EXCLUDED.mark_count,stroke_count=EXCLUDED.stroke_count,search_text=EXCLUDED.search_text,updated_at=now()`;
   }
   async save(userId: string, articleId: string, mode: AnnotationMode, value: unknown, expected: number, options: { clearHash?: string; backup?: boolean } = {}): Promise<AnnotationDocument> {
