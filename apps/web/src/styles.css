@@ -453,7 +453,8 @@ kbd{font:12px ui-monospace,monospace;background:var(--panel);border:1px solid va
 .reader-connection{display:inline-flex;align-items:center;color:var(--muted);flex:none}
 .list-connection{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;color:var(--muted);opacity:.65}
 .list-connection.attention{color:var(--accent);opacity:1}
-.reader-options{position:absolute;top:52px;right:10px;z-index:30;width:min(300px,calc(100% - 20px));max-height:calc(100% - 65px);overflow:auto;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--paper);box-shadow:0 8px 32px #0002;color:var(--ink);font:14px/1.5 system-ui,sans-serif}
+.reader-options{position:fixed;inset:52px 10px auto auto;margin:0;z-index:30;width:min(300px,calc(100% - 20px));max-height:calc(100% - 65px);overflow:auto;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--paper);box-shadow:0 8px 32px #0002;color:var(--ink);font:14px/1.5 system-ui,sans-serif}
+.reader-options::backdrop{display:none;pointer-events:none}
 .reader-options[hidden],.reader-options [hidden]{display:none!important}
 .reader-options>button,.reader-options>a{display:flex;align-items:center;gap:12px;width:100%;min-height:42px;padding:9px 10px;text-align:left;color:var(--ink);border-radius:6px;text-decoration:none}
 .reader-options>button:hover,.reader-options>a:hover{background:var(--hover)}

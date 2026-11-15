@@ -22,12 +22,27 @@ try {
   assert.deepEqual(await readdir(new URL('../dist/assets', import.meta.url)), previousAssets, 'JavaScript/CSS asset names remain unchanged');
   assert.notEqual(await readFile(new URL('../dist/sw.js', import.meta.url), 'utf8'), previousWorker, 'manifest-only build changes worker');
   await page.evaluate(async () => { const registration = await navigator.serviceWorker.getRegistration(); await registration.update(); });
-  await expect(page.getByRole('button', { name: '更新并重新载入', exact: true })).toBeVisible();
-  await Promise.all([page.waitForNavigation({ waitUntil: 'load', timeout: 20_000 }), page.getByRole('button', { name: '更新并重新载入', exact: true }).click()]);
+  await expect.poll(() => page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting?.state)).toBe('installed');
+  const update = page.getByRole('button', { name: '更新并重新载入', exact: true, includeHidden: true });
+  await expect(update).toHaveCount(0);
+  await page.getByRole('button', { name: '返回', exact: true }).click();
+  await expect(update).toBeVisible();
+  await page.getByRole('button', { name: '列表菜单', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '列表操作', exact: true })).toBeVisible();
+  await expect(update).toHaveCount(0);
+  await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  await expect(update).toBeVisible();
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '设置', exact: true })).toBeVisible();
+  await expect(update).toHaveCount(0);
+  await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  await expect(update).toBeVisible();
+  await Promise.all([page.waitForNavigation({ waitUntil: 'load', timeout: 20_000 }), update.click()]);
+  await page.getByTestId('article-card').filter({ hasText: '第一篇持久存档' }).click();
   await expect(page.getByTestId('reader-content')).toContainText('第一篇持久存档');
   await context.setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await expect(page.getByTestId('reader-content')).toContainText('第一篇持久存档');
   assert.equal(await page.evaluate(async () => (await (await fetch('/manifest.webmanifest')).json()).description), 'FeedInk shell-only update regression');
-  await context.close(); console.log('PASS manifest-only production rebuild changes worker, prompts update, activates and restarts offline with new public shell.');
+  await context.close(); console.log('PASS manifest-only production rebuild changes worker, prompts only in unobstructed library, activates and restarts offline with new public shell.');
 } finally {
   await browser?.close(); await fixture.close(); await writeFile(manifest, original); await build();
 }

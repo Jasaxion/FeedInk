@@ -52,6 +52,7 @@ test('real UI registration, organization, subscription, tagging, exports and arc
   const reader = page.getByTestId('reader');
   await expect(page.getByTestId('reader-content')).toContainText('持久存档');
   await reader.getByRole('button', { name: '更多文章操作', exact: true }).click();
+  await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '标签与文章操作', exact: true }).click();
   const actions = page.getByRole('dialog', { name: '文章操作', exact: true });
   const tagCheckbox = actions.getByRole('checkbox', { name: '值得重读', exact: true });
   await tagCheckbox.click();

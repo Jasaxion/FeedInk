@@ -34,6 +34,16 @@ async function openAnnotations(page: Page, articleId: string) {
   await showAnnotations(page);
 }
 
+async function changeBodyMode(page: Page, mode: 'feed' | 'fulltext') {
+  if (await page.getByTestId('annotations-panel').isVisible()) await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+  await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+  const tools = page.getByRole('dialog', { name: '阅读工具', exact: true });
+  await tools.getByRole('button', { name: '正文与排版', exact: true }).click();
+  await tools.getByRole('combobox', { name: '正文模式', exact: true }).selectOption(mode);
+  await page.keyboard.press('Escape');
+  await expect(tools).toBeHidden();
+}
+
 async function selectQuote(page: Page, quote = fixtureQuote) {
   if (await page.getByTestId('annotations-panel').isVisible()) await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
   if (await page.getByTestId('annotation-toolbar').isVisible()) await page.getByRole('button', { name: '退出手写', exact: true }).click();
@@ -128,13 +138,13 @@ test('selected quotes produce all four text marks, survive reload and do not mov
   await page.getByRole('button', { name: '上一篇 (K)', exact: true }).click();
   await expect(page.getByTestId('reader')).toContainText(first.title);
   await showAnnotations(page);
-  await page.getByRole('combobox', { name: '正文模式', exact: true }).selectOption('fulltext');
+  await changeBodyMode(page, 'fulltext');
   await expect(page.getByTestId('reader-content')).toContainText('第1段');
   await showAnnotations(page);
   expect((await getAnnotation(api, first.id, 'fulltext')).context.mode).toBe('fulltext');
   await expect(page.getByTestId('annotations-panel')).not.toContainText(fixtureRemark);
   expect((await getAnnotation(api, first.id, 'feed')).marks).toEqual(saved.marks);
-  await page.getByRole('combobox', { name: '正文模式', exact: true }).selectOption('feed');
+  await changeBodyMode(page, 'feed');
   await expect(page.getByTestId('annotation-toggle')).toHaveAttribute('aria-expanded', 'false');
   await showAnnotations(page);
   await expect(page.getByTestId('annotations-panel')).toContainText(fixtureRemark);

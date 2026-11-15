@@ -65,6 +65,8 @@ try {
   await page.getByRole('button', { name: '重做笔迹', exact: true }).click(); await expect.poll(() => docs.get('one:feed').ink?.strokes.length).toBe(1);
   assert.deepEqual(await page.evaluate(() => [window.WebInkHost === window.__existingHost, window.__hostCalls, !!window.WebInk]), [true, 0, false]);
   await page.getByRole('button', { name: '退出手写', exact: true }).click();
+  await expect(page.getByTestId('annotations-panel')).toHaveCount(0);
+  await page.getByTestId('annotation-toggle').click();
   const downloadPromise = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click(); const download = await downloadPromise;
   const backup = JSON.parse(await readFile(await download.path(), 'utf8')); assert.equal(backup.marks.length, 4); assert.equal(backup.ink.strokes.length, 1); assert.notEqual(backup.ink.strokes[0].anchor.kind, 'render-v1');
   const popupPromise = page.waitForEvent('popup'); await page.getByRole('button', { name: '打印 / PDF', exact: true }).click(); const popup = await popupPromise; await expect(popup.getByTestId('annotation-print-view')).toBeVisible(); await expect(popup.locator('blockquote')).toHaveCount(3); await expect(popup.locator('img')).toHaveCount(1); await expect(popup.locator('body')).toContainText('不是可恢复备份');

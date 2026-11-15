@@ -9,6 +9,7 @@ const { chromium, webkit, expect } = await import(process.env.FEEDINK_PLAYWRIGHT
 const engine = process.env.FEEDINK_BROWSER === 'webkit' ? webkit : chromium;
 const executablePath = process.env.FEEDINK_BROWSER === 'webkit' ? undefined : process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
 import { DEFAULT_SETTINGS } from '@feedink/shared';
+import { emptyAnnotationDocument } from './audit-fixture.mjs';
 import { fixtureOrigin, fixtureOffline } from './fixture-origin.mjs';
 import { fixturePageErrors, verifyRuntimeErrorWitness } from './fixture-page-errors.mjs';
 
@@ -37,6 +38,14 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/folders') return json({ items: folders });
     if (url.pathname === '/api/tags') return json({ items: [tag] });
     if (url.pathname === '/api/articles') return json({ items: articleRows, total: articleRows.length, nextCursor: null });
+    const annotationArticle = articleRows.find(item => url.pathname === `/api/articles/${item.id}/annotations`);
+    if (annotationArticle && req.method === 'GET') {
+      const mode = url.searchParams.get('mode') || 'feed';
+      if (mode !== 'feed' && (mode !== 'fulltext' || !annotationArticle.fulltextHtml)) return json({ error: { code: 'ANNOTATION_CONTEXT', message: '测试正文上下文不可用' } }, 409);
+      const document = emptyAnnotationDocument(annotationArticle, mode);
+      if (url.searchParams.has('contentHash') && url.searchParams.get('contentHash') !== document.contentHash) return json({ error: { code: 'ANNOTATION_CONTEXT', message: '测试历史上下文不可用' } }, 409);
+      return json(document);
+    }
     const matchedArticle = articleRows.find(item => url.pathname === `/api/articles/${item.id}`);
     if (matchedArticle) return json(matchedArticle);
     const stateArticle = articleRows.find(item => url.pathname === `/api/articles/${item.id}/state`);
@@ -76,17 +85,21 @@ try {
   await page.getByTestId('reader-content').waitFor();
   assert.match(await page.getByTestId('reader-content').textContent(), /持久存档/);
   assert.equal(await page.locator('.article-content script').count(), 0); assert.equal(await page.locator('.article-content .toast').count(), 0); assert.equal(await page.evaluate(() => window.__feedinkXss), undefined);
-  await page.getByTestId('offline-status').getByText(/离线可用/).waitFor();
+  await expect(page.getByTestId('offline-status')).toContainText('离线可用');
   step('continuous speech across article fetch');
-  await page.getByRole('button', { name: '朗读', exact: true }).click();
+  await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+  await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '朗读', exact: true }).click();
   await page.getByLabel('连续朗读下一篇').check();
   await page.getByRole('button', { name: '开始朗读', exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.__feedinkSpeech.spoken.length)).toBe(1);
   await page.evaluate(() => window.__feedinkSpeech.latest.onend(new Event('end')));
   await expect(page.getByTestId('reader-content')).toContainText('第二篇的正文');
   await expect.poll(() => page.evaluate(() => window.__feedinkSpeech.spoken.at(-1))).toContain(secondArticle.title);
+  // Article navigation dismisses the popup, but continuous speech remains mounted.
+  await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+  await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '朗读', exact: true }).click();
   await page.getByRole('button', { name: '停止朗读', exact: true }).click();
-  await page.getByRole('button', { name: '收起朗读', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.getByTestId('article-card').filter({ hasText: article.title }).click();
   await expect(page.getByTestId('reader-content')).toContainText('持久存档');
   step('late fulltext response cannot replace selected article');
@@ -97,7 +110,10 @@ try {
   releaseFulltext();
   await expect(page.getByRole('status').filter({ hasText: '全文与可用图片已持久归档' })).toBeVisible();
   await expect(page.getByTestId('reader-content')).toContainText('第二篇的正文');
+  await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+  await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '正文与排版', exact: true }).click();
   assert.equal(await page.getByLabel('正文模式').inputValue(), 'feed');
+  await page.keyboard.press('Escape');
   await page.getByTestId('article-card').filter({ hasText: article.title }).click();
   await expect(page.getByTestId('reader-content')).toContainText('持久存档');
   await page.locator('.reader-scroll').focus(); await page.keyboard.press('y'); await page.waitForFunction(() => document.querySelector('[aria-label="稍后阅读"]').getAttribute('aria-pressed') === 'true');

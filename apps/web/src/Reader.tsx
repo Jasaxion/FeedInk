@@ -28,7 +28,11 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
     window.addEventListener('keydown', key, true); document.addEventListener('pointerdown', outside);
     return () => { window.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside); };
   }, [menuOpen, focused]);
-  useEffect(() => { if (menuOpen) menu.current?.querySelector<HTMLElement>('button,select,input')?.focus(); }, [menuOpen, menuView]);
+  useEffect(() => {
+    const node = menu.current; if (!node) return;
+    if (menuOpen) { if (!node.matches(':popover-open')) node.showPopover(); node.querySelector<HTMLElement>('button,select,input')?.focus(); }
+    else if (node.matches(':popover-open')) node.hidePopover();
+  }, [menuOpen, menuView]);
   useEffect(() => setToolbar(!settings.hideToolbar), [settings.hideToolbar]);
   useEffect(() => setZoom(1), [image]);
   useEffect(() => {
@@ -62,7 +66,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
         {!app.online && <span className="reader-connection" role="status" title="离线阅读 · 更改将在本账号联网后同步"><Icon name="offline" size={14} /><span className="sr-only">离线阅读</span></span>}
         <button ref={menuButton} type="button" className="icon-button" title="更多文章操作" aria-label="更多文章操作" aria-expanded={menuOpen} aria-controls="reader-options" onClick={() => { setMenuView('main'); setMenuOpen(value => !value); }}><Icon name="more" /></button>
       </header> : <div className="collapsed-toolbar"><IconButton icon="back" label="返回" onClick={back} /><span className="reader-annotation-tools" ref={setAnnotationHost} /><button className="text-button" onClick={() => setToolbar(true)}>显示工具栏</button></div>}
-      <div id="reader-options" ref={menu} className="reader-options" role="dialog" aria-label="阅读工具" hidden={!menuOpen}>
+      <div id="reader-options" ref={menu} popover="manual" className="reader-options" role="dialog" aria-label="阅读工具" hidden={!menuOpen}>
         {menuView === 'main' && <>
           <button onClick={() => setMenuView('reading')}><Icon name="filters" />正文与排版</button>
           <button onClick={() => { setSpeech(true); setMenuView('speech'); }}><Icon name="audio" />朗读</button>

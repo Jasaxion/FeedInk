@@ -18,7 +18,7 @@ try {
   await scenario('CI nested discovery input has an exact accessible label and submits discovery', async ({ page, url, control }) => {
     await page.goto(`${url}/discover`); await page.getByLabel('网址或关键字', { exact: true }).fill('technology'); await page.getByRole('button', { name: '查找', exact: true }).click();
     await expect.poll(() => control.discoveryQueries).toEqual(['technology']); await expect(page.getByRole('heading', { name: '发现结果订阅', exact: true })).toBeVisible();
-    await page.goto(`${url}/?article=one`); await page.getByRole('button', { name: '朗读', exact: true }).click(); await expect(page.getByLabel('速度', { exact: true })).toHaveAttribute('type', 'range');
+    await page.goto(`${url}/?article=one`); await page.getByRole('button', { name: '更多文章操作', exact: true }).click(); await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '朗读', exact: true }).click(); await expect(page.getByLabel('速度', { exact: true })).toHaveAttribute('type', 'range');
   });
   await scenario('P1 skipped foreign-owner purge cannot restore Alice after Bob logs out in the same SPA', async ({ page, context, url, control }) => {
     await open(page, url); await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));

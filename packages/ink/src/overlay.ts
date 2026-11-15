@@ -34,6 +34,9 @@ function observeHistory(history: History, before: () => void, after: () => void)
 
 export interface ReaderOverlayOptions {
   readerRoot: HTMLElement;
+  /** Optional viewport-coordinate host below application controls, rather than the top layer. */
+  paintHost?: HTMLElement;
+  clipRoot?: HTMLElement;
   documentUrl: string;
   title: string;
   transport: (message: HostMessage) => boolean;
@@ -94,6 +97,7 @@ export class WebInkOverlay implements WebInkAPI {
   private browserCapture: { target: Element; id: number } | null = null;
 
   constructor(private readonly win: Window, private readonly options?: ReaderOverlayOptions) {
+    for (const host of [options?.paintHost, options?.clipRoot]) if (host && (host.ownerDocument !== win.document || !host.contains(options!.readerRoot))) throw new Error('Ink hosts must contain the owned reader');
     this.document = this.emptyDocument();
     this.anchors = new ContentAnchorResolver(win, this.anchorNotice, this.onResizeObserved, options?.readerRoot);
     this.gestures = new GestureController(this.document, this.anchors);
@@ -103,7 +107,7 @@ export class WebInkOverlay implements WebInkAPI {
     const properties: Record<string, string> = {
       all: 'initial', position: 'fixed', display: 'block', left: '0', top: '0',
       margin: '0', padding: '0', border: '0', overflow: 'hidden',
-      'pointer-events': 'none', 'z-index': '2147483647', contain: 'strict',
+      'pointer-events': 'none', 'z-index': options?.paintHost ? '16' : '2147483647', contain: 'strict',
       isolation: 'isolate', opacity: '1', visibility: 'visible', transform: 'none',
     };
     for (const [property, value] of Object.entries(properties)) this.root.style.setProperty(property, value, 'important');
@@ -113,7 +117,7 @@ export class WebInkOverlay implements WebInkAPI {
     this.activeCanvas = win.document.createElement('canvas');
     this.activeCanvas.style.cssText = 'all:initial;visibility:inherit;display:block;position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
     shadow.append(this.canvas, this.activeCanvas);
-    if (typeof this.root.showPopover === 'function') {
+    if (!options?.paintHost && typeof this.root.showPopover === 'function') {
       // A nonmodal top-layer overlay escapes transformed/clipping html roots without
       // changing page CSS or making the underlying document inert (unlike a dialog).
       this.root.setAttribute('popover', 'manual');
@@ -836,8 +840,9 @@ export class WebInkOverlay implements WebInkAPI {
   }
   private attach(): void {
     const doc = this.win.document;
-    if (doc.documentElement && this.root.parentNode !== doc.documentElement) doc.documentElement.append(this.root);
-    if (this.root.isConnected && typeof this.root.showPopover === 'function' && !this.root.matches(':popover-open')) {
+    const host = this.options?.paintHost || doc.documentElement;
+    if (host && this.root.parentNode !== host) host.append(this.root);
+    if (!this.options?.paintHost && this.root.isConnected && typeof this.root.showPopover === 'function' && !this.root.matches(':popover-open')) {
       this.root.showPopover();
     }
     if (this.resize && this.observedRoot !== doc.documentElement) {
@@ -997,8 +1002,9 @@ export class WebInkOverlay implements WebInkAPI {
       context.clearRect(0, 0, size.width, size.height);
       context.setTransform(size.width / viewport.width, 0, 0, size.height / viewport.height, 0, 0);
       if (this.options) {
-        const box = this.options.readerRoot.getBoundingClientRect();
-        context.beginPath(); context.rect(box.left - viewport.offsetLeft, box.top - viewport.offsetTop, box.width, box.height); context.clip();
+        const box = this.options.readerRoot.getBoundingClientRect(), clip = this.options.clipRoot?.getBoundingClientRect() || box;
+        const left = Math.max(box.left, clip.left), top = Math.max(box.top, clip.top);
+        context.beginPath(); context.rect(left - viewport.offsetLeft, top - viewport.offsetTop, Math.max(0, Math.min(box.right, clip.right) - left), Math.max(0, Math.min(box.bottom, clip.bottom) - top)); context.clip();
       }
     };
     if (this.committedDirty) {

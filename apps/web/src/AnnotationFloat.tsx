@@ -14,7 +14,7 @@ export function placeAnnotation(bounds: AnnotationBounds, size: { width: number;
 }
 
 export function AnnotationFloat({ root, anchor, kind, children, onClose, onInvisible, label, testId }: {
-  root: RefObject<HTMLDivElement | null>; anchor?: Range | null; kind: 'selection' | 'editor' | 'ink' | 'drawer'; children: ReactNode; onClose: () => void; onInvisible?: () => void; label: string; testId?: string;
+  root: RefObject<HTMLDivElement | null>; anchor?: Range | null; kind: 'selection' | 'editor' | 'ink' | 'drawer' | 'notice'; children: ReactNode; onClose: () => void; onInvisible?: () => void; label: string; testId?: string;
 }) {
   const element = useRef<HTMLDivElement>(null), callbacks = useRef({ onClose, onInvisible }); callbacks.current = { onClose, onInvisible };
   const [style, setStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -46,10 +46,13 @@ export function AnnotationFloat({ root, anchor, kind, children, onClose, onInvis
     window.addEventListener('resize', schedule); window.addEventListener('scroll', schedule, true);
     window.visualViewport?.addEventListener('resize', schedule); window.visualViewport?.addEventListener('scroll', schedule);
     position();
-    if (kind === 'editor') node.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true });
-    if (kind === 'drawer') node.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
     return () => { cancelAnimationFrame(frame); resize.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); window.visualViewport?.removeEventListener('resize', schedule); window.visualViewport?.removeEventListener('scroll', schedule); };
   }, [host, anchor, kind, root]);
+  useLayoutEffect(() => {
+    if (style.visibility !== 'visible') return;
+    if (kind === 'editor') element.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true });
+    if (kind === 'drawer') element.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+  }, [style.visibility, kind, anchor]);
   if (!host) return null;
   return createPortal(<div ref={element} className={`annotation-float annotation-${kind}`} data-annotation-ui="" data-testid={testId} role={kind === 'selection' || kind === 'ink' ? 'toolbar' : 'dialog'} aria-label={label} style={style}
     onPointerDown={event => event.stopPropagation()} onPointerUp={event => event.stopPropagation()} onTouchStart={event => event.stopPropagation()} onTouchEnd={event => event.stopPropagation()} onClick={event => event.stopPropagation()}

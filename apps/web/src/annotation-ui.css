@@ -1,6 +1,8 @@
 /* Annotation controls are portal overlays: opening them never changes article flow. */
 .annotation-section{min-width:0}
-.annotation-entry{display:inline-flex;gap:2px;align-items:center}
+.annotation-entry{position:relative;display:inline-flex;gap:2px;align-items:center}
+.annotation-notice{z-index:28;max-width:300px;border-color:var(--accent);font-size:12px}
+.annotation-notice strong{margin-right:6px}
 .annotation-entry [data-testid=annotation-toggle]{position:relative}
 .annotation-entry[data-pending] [data-testid=annotation-toggle]::after{content:"";position:absolute;right:4px;top:4px;width:5px;height:5px;border-radius:50%;background:var(--accent)}
 .annotation-entry-fallback{position:fixed;right:16px;top:12px;z-index:18}

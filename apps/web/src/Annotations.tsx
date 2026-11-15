@@ -166,7 +166,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
     };
     try {
       setEngineError('');
-      overlay = new WebInkOverlay(window, { readerRoot: reader, documentUrl: row.document.context.sourceUrl, title: row.document.context.title, transport });
+      overlay = new WebInkOverlay(window, { readerRoot: reader, paintHost: reader.closest<HTMLElement>('.app-shell') || undefined, clipRoot: reader.closest<HTMLElement>('.reader-scroll') || undefined, documentUrl: row.document.context.sourceUrl, title: row.document.context.title, transport });
       overlay.configure({ enabled: false, attachmentMode: 'smart' });
       overlay.boot({ nativeInput: false });
       overlay.restore(validateAnnotations(row.document).ink);
@@ -293,6 +293,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
   const colors = <select aria-label="批注颜色" value={color} onChange={event => setColor(event.target.value as MarkColor)}>{Object.keys(markColors).map(value => <option key={value} value={value}>{({ yellow: '黄色', green: '绿色', blue: '蓝色', lilac: '淡紫' } as Record<string, string>)[value]}</option>)}</select>;
   return <section className="annotation-section">
     {toolbarHost ? createPortal(toolbar, toolbarHost) : root.current?.closest('.app-shell') && createPortal(<div className="annotation-entry-fallback">{toolbar}</div>, root.current.closest('.app-shell')!)}
+    {Boolean(writeError.current || row?.pending && error || row?.conflict) && !open && !editor && <AnnotationFloat root={root} kind="notice" label="笔记保存状态" onClose={() => setOpen(true)}><div role="alert"><strong>{writeError.current ? '笔记未保存' : row?.conflict ? '笔记有冲突' : '笔记待同步'}</strong> <button onClick={() => { closeInk(); setOpen(true); }}>查看恢复选项</button></div></AnnotationFloat>}
     {!open && <span className="annotation-sr-status" role="status" data-testid="annotation-status">{status}{error && ` · ${error}`}</span>}
     {selection && !editor && !inkOpen && <AnnotationFloat root={root} anchor={selection.range} kind="selection" label="选中文字批注" testId="selection-annotation-toolbar" onClose={closeSelection} onInvisible={() => setSelection(null)}>
       {(['highlight', 'underline', 'wave', 'note'] as TextMarkKind[]).map(kind => <button key={kind} disabled={readOnly} onPointerDown={event => event.preventDefault()} onClick={() => addMark(kind)}>{markLabels[kind]}</button>)}

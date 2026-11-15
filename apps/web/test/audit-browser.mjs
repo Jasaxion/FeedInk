@@ -48,6 +48,24 @@ try {
     await page.getByTestId('article-card').first().focus(); await page.keyboard.press('Enter'); await expect(page.getByTestId('reader-content')).toBeVisible();
     control.subscriptions[0].iconUrl = 'https://untrusted.invalid/tracker.png'; let tracked = false; page.on('request', request => { if (request.url().includes('untrusted.invalid')) tracked = true; }); await settledRequests(page); await page.reload(); await expect(page.getByTestId('reader-content')).toBeVisible(); await settle(page); assert.equal(tracked, false); assert.equal(await page.locator('.article-source img').count(), 0); await expect(page.locator('.article-source .source-icon svg')).toBeVisible();
   });
+  await scenario('reading-first install banner is retained but hidden for reader and modals', async ({ page, url }) => {
+    await open(page, url);
+    // Owned browser-API seam; this tests presentation, not native install eligibility.
+    await page.evaluate(() => { const event = new Event('beforeinstallprompt', { cancelable: true }); Object.assign(event, { prompt: async () => {}, userChoice: Promise.resolve({ outcome: 'dismissed' }) }); window.dispatchEvent(event); });
+    const install = page.getByRole('button', { name: '安装 FeedInk', exact: true, includeHidden: true });
+    await expect(install).toHaveCount(0);
+    await page.getByRole('button', { name: '返回', exact: true }).click();
+    await expect(install).toBeVisible();
+    for (const [button, title] of [['列表菜单', '列表操作'], ['新建标签', '管理标签'], ['设置', '设置']]) {
+      await page.getByRole('button', { name: button, exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: title, exact: true }); await expect(dialog).toBeVisible();
+      await expect(install).toHaveCount(0);
+      await dialog.getByRole('button', { name: '关闭对话框', exact: true }).click();
+      await expect(install).toBeVisible();
+    }
+    await page.getByTestId('article-card').first().click();
+    await expect(page.getByTestId('reader-content')).toBeVisible(); await expect(install).toHaveCount(0);
+  });
   await scenario('05 initial pending-read selection race', async ({ page, url }) => {
     await page.goto(url); await expect(page.getByTestId('article-card')).toHaveCount(2); await expect(page.getByTestId('offline-status')).toContainText('已连接');
     await page.evaluate(() => { window.__audit.queueHold = true; }); await page.getByTestId('article-card').filter({ hasText: '第一篇' }).click(); await page.waitForFunction(() => window.__audit.held.length > 0);
@@ -87,7 +105,11 @@ try {
     control.subscriptions[0].settings.articleMode = 'webpage'; const held = deferred(); control.holdLibrary = held; await page.goto(`${url}/?article=one`); await expect(page.getByTestId('app-shell')).toBeVisible(); assert.equal(await page.locator('iframe').count(), 0);
     held.resolve(); control.holdLibrary = null; await expect(page.locator('iframe.original-frame')).toBeVisible(); await expect(page.locator('iframe')).toHaveAttribute('sandbox', ''); await expect(page.frameLocator('iframe').locator('h1')).toHaveText('沙箱原网页夹具'); await expect(page).toHaveURL(/article=one/);
     await expect(page.getByRole('link', { name: '在新标签页打开原文' })).toHaveAttribute('href', `${url}/original`);
-    await page.getByLabel('正文模式').selectOption('feed'); await page.getByTestId('reader').getByRole('button', { name: '稍后阅读', exact: true }).click(); await expect.poll(() => control.articles[0].saved).toBe(true); assert.equal(await page.getByLabel('正文模式').inputValue(), 'feed');
+    await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+    await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '正文与排版', exact: true }).click();
+    await page.getByLabel('正文模式').selectOption('feed'); assert.equal(await page.getByLabel('正文模式').inputValue(), 'feed');
+    await page.keyboard.press('Escape');
+    await page.getByTestId('reader').getByRole('button', { name: '稍后阅读', exact: true }).click(); await expect.poll(() => control.articles[0].saved).toBe(true);
     control.articles[0].url = `${url}/denied`; await page.reload(); await expect(page.locator('iframe')).toHaveAttribute('src', `${url}/denied`); await expect(page.getByRole('link', { name: '在新标签页打开原文' })).toBeVisible();
     await setOffline(true); await expect(page.locator('iframe')).toHaveCount(0); await expect(page.getByRole('status').filter({ hasText: '离线时原网页不可用' })).toBeVisible();
   });

@@ -5,6 +5,13 @@ import { resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_SETTINGS } from '@feedink/shared';
 import { fixtureOrigin } from './fixture-origin.mjs';
+// Synthetic context token only: this is not the API's canonical production content hash.
+export function emptyAnnotationDocument(article, mode = 'feed') {
+  const contentHash = (mode === 'fulltext' ? 'b' : 'a').repeat(64);
+  return { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash,
+    context: { articleId: article.id, mode, contentHash, sourceUrl: article.url, title: article.title,
+      contentHtml: mode === 'fulltext' ? article.fulltextHtml : article.contentHtml }, ink: null, marks: [] };
+}
 export function deferred() { let resolve; const promise = new Promise(value => { resolve = value; }); return { promise, resolve }; }
 export async function auditFixture() {
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
@@ -49,6 +56,15 @@ export async function auditFixture() {
           if (control.holdMutation) { const held = control.holdMutation; control.holdMutation = null; control.mutationHeld = true; await held.promise; }
           if (version !== `"${state.stateVersion}"`) return json({ error: { code: 'STATE_CONFLICT', message: '状态版本冲突' } }, 412);
           Object.assign(state, patch); state.stateVersion++; counts(); control.writes.push({ id: state.id, patch, version }); return json(state);
+        }
+        // Specific annotation race/CAS fixtures above override this read-only mount fallback.
+        const annotationArticle = control.articles.find(item => url.pathname === `/api/articles/${item.id}/annotations`);
+        if (annotationArticle && req.method === 'GET') {
+          const mode = url.searchParams.get('mode') || 'feed';
+          if (mode !== 'feed' && (mode !== 'fulltext' || !annotationArticle.fulltextHtml)) return json({ error: { code: 'ANNOTATION_CONTEXT', message: '测试正文上下文不可用' } }, 409);
+          const document = emptyAnnotationDocument(annotationArticle, mode);
+          if (url.searchParams.has('contentHash') && url.searchParams.get('contentHash') !== document.contentHash) return json({ error: { code: 'ANNOTATION_CONTEXT', message: '测试历史上下文不可用' } }, 409);
+          return json(document);
         }
         const item = control.articles.find(item => url.pathname === `/api/articles/${item.id}`);
         if (item) { const captured = structuredClone(item); if (control.holdDetail) { const hold = control.holdDetail; control.holdDetail = null; control.detailCaptured = true; await hold.promise; } return json(captured); }
