@@ -28,7 +28,8 @@ export function AnnotationFloat({ root, anchor, kind, children, onClose, onInvis
       const viewport = window.visualViewport;
       const bounds = annotationBounds(reader.getBoundingClientRect(), { left: viewport?.offsetLeft || 0, top: viewport?.offsetTop || 0, right: (viewport?.offsetLeft || 0) + (viewport?.width || window.innerWidth), bottom: (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight) });
       const maxWidth = Math.max(0, bounds.right - bounds.left), maxHeight = Math.max(0, bounds.bottom - bounds.top);
-      node.style.maxWidth = `${maxWidth}px`; node.style.maxHeight = `${maxHeight}px`;
+      const heightLimit = kind === 'drawer' && window.innerWidth < 700 ? maxHeight * .72 : maxHeight;
+      node.style.maxWidth = `${maxWidth}px`; node.style.maxHeight = `${heightLimit}px`;
       let target: AnnotationBounds | undefined;
       if (anchor) {
         if (!root.current?.contains(anchor.startContainer) || !root.current.contains(anchor.endContainer)) { callbacks.current.onInvisible?.(); return; }
@@ -38,8 +39,8 @@ export function AnnotationFloat({ root, anchor, kind, children, onClose, onInvis
       }
       const box = node.getBoundingClientRect();
       const position = placeAnnotation(bounds, box, target);
-      if (kind === 'drawer') { position.top = window.innerWidth < 700 ? bounds.bottom - Math.min(box.height, maxHeight * .72) : bounds.top; }
-      setStyle({ ...position, maxWidth, maxHeight: kind === 'drawer' && window.innerWidth < 700 ? maxHeight * .72 : maxHeight, visibility: maxWidth > 0 && maxHeight > 0 ? 'visible' : 'hidden' });
+      if (kind === 'drawer') { position.top = window.innerWidth < 700 ? bounds.bottom - Math.min(box.height, heightLimit) : bounds.top; }
+      setStyle({ ...position, maxWidth, maxHeight: heightLimit, visibility: maxWidth > 0 && maxHeight > 0 ? 'visible' : 'hidden' });
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(position); };
     const resize = new ResizeObserver(schedule); resize.observe(node); resize.observe(reader);

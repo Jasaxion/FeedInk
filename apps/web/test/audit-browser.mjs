@@ -15,7 +15,7 @@ let passed = 0;
 const failures = [];
 async function scenario(name, action) {
   console.log(`AUDIT ${name}`); const fixture = await auditFixture(); const context = await browser.newContext({ viewport: { width: 1280, height: 800 } }); context.setDefaultTimeout(10_000); context.setDefaultNavigationTimeout(15_000); await context.addInitScript(instrumentStorage);
-  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: fixture.url, apiPaths: ['/api/session', '/api/articles', '/api/subscriptions', '/api/folders', '/api/tags'], fixtureDocumentPaths: ['/original', '/denied'], origin: fixture });
+  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: fixture.url, apiPaths: ['/api/session', '/api/articles', '/api/subscriptions', '/api/folders', '/api/tags', ...fixture.control.articles.map(article => `/api/articles/${article.id}/annotations`)], fixtureDocumentPaths: ['/original', '/denied'], origin: fixture });
   const page = await context.newPage();
   try { await action({ ...fixture, page, context, setOffline: fixtureOffline(context, fixture) }); await errors.assertClean(); passed++; console.log(`PASS ${name}`); }
   catch (error) { failures.push({ name, error }); console.error(`FAIL ${name}`, await page.locator('body').innerText({ timeout: 2000 }).catch(() => 'unavailable')); await page.screenshot({ path: join(artifacts, `failure-${passed}.png`), timeout: 3000 }).catch(() => {}); }

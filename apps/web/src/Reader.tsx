@@ -23,7 +23,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   useEffect(() => { setMenuOpen(false); setArchiveOpen(false); if (!article) setFocused(false); }, [article?.id]);
   useEffect(() => {
     if (!menuOpen && !focused) return;
-    const key = (event: KeyboardEvent) => { if (event.key !== 'Escape' || document.querySelector('dialog[open],.annotation-float')) return; event.preventDefault(); event.stopImmediatePropagation(); if (menuOpen) { setMenuOpen(false); menuButton.current?.focus(); } else setFocused(false); };
+    const key = (event: KeyboardEvent) => { if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return; if (menuOpen) { event.preventDefault(); event.stopImmediatePropagation(); setMenuOpen(false); menuButton.current?.focus(); return; } if (document.querySelector('.annotation-float')) return; event.preventDefault(); event.stopImmediatePropagation(); setFocused(false); };
     const outside = (event: PointerEvent) => { if (menuOpen && !menu.current?.contains(event.target as Node) && !menuButton.current?.contains(event.target as Node)) setMenuOpen(false); };
     window.addEventListener('keydown', key, true); document.addEventListener('pointerdown', outside);
     return () => { window.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside); };
@@ -56,13 +56,12 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   }
   return <main className={`reader-pane ${settings.wrapCode ? 'wrap-code' : ''}`} data-testid="reader" data-focus={focused && !!article || undefined} aria-label="文章阅读区">
     {!article ? <Empty title="留一点时间，给阅读"><p>从左侧选择一篇文章</p><small>J / K 切换 · Enter 打开 · ? 快捷键</small></Empty> : <>
-      {toolbar ? <header className="reader-toolbar"><IconButton icon="back" label="返回" onClick={back} /><IconButton icon="previous" label="上一篇 (K)" onClick={() => move(-1)} /><IconButton icon="next" label="下一篇 (J)" onClick={() => move(1)} /><span className="toolbar-spacer" />
+      {toolbar ? <header className="reader-toolbar"><IconButton icon={focused ? 'focusExit' : 'back'} label={focused ? '退出专注阅读' : '返回'} onClick={focused ? () => setFocused(false) : back} /><IconButton icon="previous" label="上一篇 (K)" onClick={() => move(-1)} /><IconButton icon="next" label="下一篇 (J)" onClick={() => move(1)} /><span className="toolbar-spacer" />
         <IconButton icon="article" label={fetching ? '正在提取全文' : '提取全文'} className="icon-button desktop-tool" aria-pressed={mode === 'fulltext'} disabled={fetching || !app.online} onClick={() => void extract()} />
         <IconButton icon="saved" label="稍后阅读" aria-pressed={article.saved} onClick={() => void app.task(() => app.patchArticle(article, { saved: !article.saved }))} />
         <IconButton icon="tag" label="管理文章标签" className="icon-button desktop-tool" onClick={more} />
         <IconButton icon={article.read ? 'unread' : 'check'} label={article.read ? '标记为未读' : '标记为已读'} className="icon-button desktop-tool" onClick={() => void app.task(() => app.patchArticle(article, { read: !article.read }))} />
         <span className="reader-annotation-tools" ref={setAnnotationHost} />
-        {focused && <IconButton icon="focusExit" label="退出专注阅读" onClick={() => setFocused(false)} />}
         {!app.online && <span className="reader-connection" role="status" title="离线阅读 · 更改将在本账号联网后同步"><Icon name="offline" size={14} /><span className="sr-only">离线阅读</span></span>}
         <button ref={menuButton} type="button" className="icon-button" title="更多文章操作" aria-label="更多文章操作" aria-expanded={menuOpen} aria-controls="reader-options" onClick={() => { setMenuView('main'); setMenuOpen(value => !value); }}><Icon name="more" /></button>
       </header> : <div className="collapsed-toolbar"><IconButton icon="back" label="返回" onClick={back} /><span className="reader-annotation-tools" ref={setAnnotationHost} /><button className="text-button" onClick={() => setToolbar(true)}>显示工具栏</button></div>}

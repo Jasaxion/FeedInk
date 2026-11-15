@@ -70,7 +70,7 @@ try {
   browser = await engine.launch({ executablePath, headless: true, timeout: 20_000 });
   await verifyRuntimeErrorWitness(browser);
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: url, apiPaths: ['/api/session', '/api/articles'], origin });
+  const errors = await fixturePageErrors(context, { browserName: engine.name(), ownedOrigin: url, apiPaths: ['/api/session', '/api/articles', `/api/articles/${article.id}/annotations`, `/api/articles/${secondArticle.id}/annotations`], origin });
   const setOffline = fixtureOffline(context, origin);
   context.setDefaultTimeout(10_000); context.setDefaultNavigationTimeout(15_000);
   // Deterministic browser-API seam: verifies continuous-play UI logic, not actual voice/audio quality.

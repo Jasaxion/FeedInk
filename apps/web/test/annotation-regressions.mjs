@@ -86,7 +86,14 @@ export async function annotationRegressions(browser, expect) {
     await page.getByTestId('selection-annotation-toolbar').getByRole('button', { name: '高亮', exact: true }).click();
     await expect(page.getByTestId('annotations-panel')).toHaveCount(0);
     await expect(page.locator('.annotation-notice').getByRole('alert')).toContainText('笔记未保存');
-    await page.getByRole('button', { name: '查看恢复选项', exact: true }).click();
+    await page.getByTestId('ink-toggle').click();
+    const recovery = page.getByRole('button', { name: '查看恢复选项', exact: true });
+    assert.equal(await recovery.evaluate(button => { const r = button.getBoundingClientRect(); return button.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); }), true, 'new ink palette cannot cover the existing recovery action');
+    await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+    await page.locator('#reader-options').press('Escape');
+    await expect(page.locator('#reader-options')).toBeHidden();
+    await expect(recovery).toBeVisible();
+    await recovery.click();
     const download = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
     const backup = JSON.parse(await readFile(await (await download).path(), 'utf8'));
     assert.equal(backup.marks.length, 1); assert.equal(backup.marks[0].kind, 'highlight');
@@ -97,10 +104,13 @@ export async function annotationRegressions(browser, expect) {
     await page.getByTestId('annotation-toggle').click();
     const layers = await page.locator('.annotation-drawer').evaluate(drawer => { const ink = document.querySelector('[data-webink-overlay]'); return { sameParent: ink.parentElement === drawer.parentElement, topLayer: ink.hasAttribute('popover'), ink: Number(getComputedStyle(ink).zIndex), drawer: Number(getComputedStyle(drawer).zIndex) }; });
     assert.equal(layers.sameParent, true); assert.equal(layers.topLayer, false); assert.ok(layers.drawer > layers.ink);
-    await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
     await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
     await expect(page.locator('#reader-options')).toBeVisible();
     assert.equal(await page.locator('#reader-options').evaluate(node => node.matches(':popover-open')), true);
+    await page.locator('#reader-options').press('Escape');
+    await expect(page.locator('#reader-options')).toBeHidden();
+    await expect(page.getByTestId('annotations-panel')).toBeVisible();
+    await expect(page.getByTestId('reader-content')).toBeVisible();
   });
   for (const width of [1280, 390]) await scenario(`contextual selection geometry and keyboard at ${width}px`, async ({ page, state }) => {
     await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
