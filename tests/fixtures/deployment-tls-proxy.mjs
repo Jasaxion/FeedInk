@@ -6,6 +6,7 @@ const [cert, key] = await Promise.all([readFile(process.env.TEST_TLS_CERT), read
 const servers = [];
 for (const [port, upstreamPort] of [[3443, 3000], [3444, 3001]]) {
   const server = https.createServer({ cert, key }, (request, response) => {
+    if (request.headers.host?.toLowerCase() !== `localhost:${port}`) { response.writeHead(403); response.end(); return; }
     const headers = { ...request.headers, host: `localhost:${port}`, 'x-forwarded-host': `localhost:${port}`, 'x-forwarded-proto': 'https', 'x-forwarded-for': request.socket.remoteAddress };
     delete headers.forwarded;
     const upstream = http.request({ host: '127.0.0.1', port: upstreamPort, method: request.method, path: request.url, headers }, incoming => {

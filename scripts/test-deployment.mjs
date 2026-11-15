@@ -3,6 +3,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
+import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
 const base = process.env.BASE_URL;
 const stateFile = process.env.STATE_FILE;
 const mode = process.argv[2];
@@ -54,6 +56,17 @@ if (mode === 'bootstrap') {
     const listed = await rpc('tools/list', {}, 2);
     assert.equal(listed.result.tools.length, 7);
     assert.ok(listed.result.tools.every(tool => tool.annotations.readOnlyHint));
+    for (const deniedHeaders of [{ Host: 'wrong.example.invalid' }, { Origin: 'https://wrong.example.invalid' }]) {
+      const target = new URL('/mcp', base), request = target.protocol === 'https:' ? httpsRequest : httpRequest;
+      const status = await new Promise((resolve, reject) => {
+        // Keep TLS certificate verification bound to the URL, independently of the hostile HTTP Host.
+        const outgoing = request(target, { method: 'POST', servername: target.hostname, timeout: 15000, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...deniedHeaders } }, incoming => { incoming.resume(); incoming.once('end', () => resolve(incoming.statusCode)); });
+        outgoing.on('error', () => reject(new Error('MCP negative-origin transport failed; credentials withheld')));
+        outgoing.on('timeout', () => outgoing.destroy(new Error('MCP boundary check timed out')));
+        outgoing.end(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }));
+      });
+      assert.equal(status, 403, 'external Host/Origin mismatch is rejected through the configured proxy');
+    }
   }
   const registration = await fetch(base + '/api/auth/register', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

@@ -70,6 +70,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk
       - name: Client lifecycle and privacy regressions
+        id: client
+        continue-on-error: true
         run: |
           failed=0
           for browser in chromium webkit; do
@@ -80,6 +82,8 @@ jobs:
           if ! npm run test:residual -w @feedink/web; then failed=1; fi
           test "$failed" = 0
       - name: Browser and API end-to-end tests
+        id: e2e
+        continue-on-error: true
         if: ${{ hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: |
           failed=0
@@ -89,6 +93,11 @@ jobs:
             fi
           done
           test "$failed" = 0
+      - name: Require both browser acceptance gates
+        if: always()
+        run: |
+          test '${{ steps.client.outcome }}' = success
+          test '${{ steps.e2e.outcome }}' = success
       - name: Package reviewed runtime code
         run: |
           node --test scripts/package-runtime.test.mjs
