@@ -15,7 +15,7 @@ import { Reader } from './Reader';
 import { scopedCss } from './safety';
 import { SettingsPanel } from './Settings';
 import { PendingNotesOwnerError } from './offline';
-import { allAnnotationDrafts, discardLockedAnnotations, flushActiveNotes, freezeActiveNotes, guardLockedAnnotationLogin, recoverLockedAnnotations, retireActiveNotes, synchronizeAnnotations } from './annotationSync';
+import { allAnnotationDrafts, discardLockedAnnotations, flushActiveNotes, freezeActiveNotes, guardLockedAnnotationLogin, lockAnnotationOwner, recoverLockedAnnotations, retireActiveNotes, synchronizeAnnotations } from './annotationSync';
 import { exportNotesJson } from './annotationExport';
 
 const emptyLibrary: Library = { subscriptions: [], folders: [], tags: [] };
@@ -35,33 +35,39 @@ export function App() {
   const navigateNow = useCallback((path: string, replace = false) => { history[replace ? 'replaceState' : 'pushState']({}, '', path); setLocationKey(location.pathname + location.search); }, []);
   const navigate = useCallback((path: string, replace = false) => { const epoch = authEpoch(); void retireActiveNotes(() => { assertAuthEpoch(epoch); navigateNow(path, replace); }).catch(error => notify(`未切换页面：${message(error)}。请先导出 JSON 或重试保存。`, true)); }, []);
   const [notesLogout, setNotesLogout] = useState(false);
+  const [lockedExitWarning, setLockedExitWarning] = useState(false);
   const commitSession = useCallback((value: Session | null, epoch: number) => { assertAuthEpoch(epoch); sessionRef.current = value; setApiSession(value, epoch); setSession(value); }, []);
   const task = useCallback(async <T,>(action: () => Promise<T>): Promise<T | undefined> => { try { return await action(); } catch (error) { if (error instanceof ObsoleteSessionError || error instanceof ObsoleteMutationError) return; if (isConnectionError(error)) setOnline(false); notify(message(error), true); return undefined; } }, [notify]);
   const logoutInFlight = useRef(false);
-  async function purge(epoch = authEpoch(), owner?: string) {
-    localStorage.setItem('feedink-private-purge-pending', '1');
+  async function purge(epoch = authEpoch(), owner?: string, preserveMarker = false) {
+    try { localStorage.setItem('feedink-private-purge-pending', '1'); } catch { /* Still purge/quarantine in IndexedDB when marker storage alone fails. */ }
     try {
       const outcome = await store.clear(() => assertAuthEpoch(epoch), owner, true); assertAuthEpoch(epoch);
-      if (outcome === 'cleared') localStorage.removeItem('feedink-private-purge-pending');
+      if (outcome === 'cleared' && !preserveMarker) localStorage.removeItem('feedink-private-purge-pending');
     }
-    catch (error) { if (!(error instanceof ObsoleteSessionError)) notify(`本地数据清理失败：${message(error)}。请在浏览器中清除此网站数据。`, true); }
+    catch (error) { if (!(error instanceof ObsoleteSessionError)) notify(`本地数据清理失败：${message(error)}。请保留此标签页，恢复存储后登录原账号同步或导出笔记；不要直接清除网站数据。`, true); }
   }
   async function invalidate(reason = '登录已失效，请重新登录') {
-    const owner = sessionRef.current?.user.id;
-    localStorage.setItem('feedink-private-purge-pending', '1');
+    const previous = sessionRef.current?.user, owner = previous?.id;
     const retiring = freezeActiveNotes(owner); setNotesLogout(false);
-    const intent = createLogoutIntent(owner); const epoch = beginAuthTransition(); commitSession(null, epoch);
+    let intent: ReturnType<typeof createLogoutIntent> | undefined;
+    try { localStorage.setItem('feedink-private-purge-pending', '1'); intent = createLogoutIntent(owner); }
+    catch { if (previous) lockAnnotationOwner(previous.id, previous.email); setLockedExitWarning(true); }
+    const epoch = beginAuthTransition(); commitSession(null, epoch);
     channelRef.current?.postMessage({ type: 'logout' }); navigateNow('/login', true); notify(`${reason}；未同步笔记已锁定，请重新登录同一账号恢复。`, true);
     try { await retiring; }
     catch { notify('登录已锁定；本机笔记写入失败，请不要关闭此标签页，重新登录原账号后恢复。', true); return; }
-    await withAuthNetworkLock(async () => { assertAuthEpoch(epoch); if (isCurrentLogout(intent)) await purge(epoch, owner); });
+    await withAuthNetworkLock(async () => { assertAuthEpoch(epoch); if (!intent || isCurrentLogout(intent)) await purge(epoch, owner, !intent); });
   }
   async function login(value: Session) {
     const epoch = authEpoch();
     await checkAuthOperation(); assertAuthEpoch(epoch);
-    try { await store.activate(value, () => assertAuthEpoch(epoch)); await checkAuthOperation(); assertAuthEpoch(epoch); localStorage.removeItem('feedink-private-purge-pending'); }
+    let activated = false;
+    try { await store.activate(value, () => assertAuthEpoch(epoch)); await checkAuthOperation(); assertAuthEpoch(epoch); activated = true; }
     catch (error) { assertAuthEpoch(epoch); if (error instanceof PendingNotesOwnerError) throw error; localStorage.setItem('feedink-private-purge-pending', '1'); notify(`登录成功，但离线存储不可用：${message(error)}`, true); }
-    await recoverLockedAnnotations(store, value.user.id); await checkAuthOperation(); assertAuthEpoch(epoch); localStorage.removeItem('feedink-logout-pending'); commitSession(value, epoch); setOnline(true);
+    await recoverLockedAnnotations(store, value.user.id); await checkAuthOperation(); assertAuthEpoch(epoch);
+    if (activated) localStorage.removeItem('feedink-private-purge-pending');
+    localStorage.removeItem('feedink-logout-pending'); commitSession(value, epoch); setLockedExitWarning(false); setOnline(true);
     channelRef.current?.postMessage({ type: 'identity', userId: value.user.id });
     if (location.pathname !== '/share') navigate('/', true);
   }
@@ -91,6 +97,24 @@ export function App() {
     try { await flushActiveNotes(); if ((await allAnnotationDrafts(store, owner)).length) { setNotesLogout(true); return; } }
     catch { setNotesLogout(true); return; }
     await performLogout();
+  }
+  async function lockNotesAndExit() {
+    const owner = sessionRef.current?.user; if (!owner) return;
+    // Freeze/snapshot before any storage operation; unreadability is never consent to discard.
+    lockAnnotationOwner(owner.id, owner.email);
+    const retiring = freezeActiveNotes(owner.id);
+    void retiring.catch(() => {});
+    setNotesLogout(false); setLockedExitWarning(true);
+    let marked = false;
+    try { localStorage.setItem('feedink-private-purge-pending', '1'); createLogoutIntent(owner.id); marked = true; }
+    catch { /* The in-memory owner lock and unload warning remain authoritative in this tab. */ }
+    const epoch = beginAuthTransition(); commitSession(null, epoch);
+    navigateNow('/login', true); channelRef.current?.postMessage({ type: 'logout' });
+    await retiring.catch(() => {});
+    if (!marked) { notify('已锁定本页；无法持久保存退出标记，服务器会话未撤销。请保留此标签页并恢复浏览器存储。', true); return; }
+    // No alternate HTTP path: missing auth coordination must still suppress revocation.
+    await Promise.all([withAuthNetworkLock(async () => { assertAuthEpoch(epoch); await purge(epoch, owner.id, true); }), retryLogout()]);
+    if (!navigator.onLine) notify('笔记已锁定；离线时无法撤销服务器会话，恢复联网后会自动重试');
   }
   async function performLogout(discard = false) {
     const owner = sessionRef.current?.user.id;
@@ -142,8 +166,8 @@ export function App() {
   }, []);
   const renderEpoch = authEpoch();
   const path = locationKey.split('?')[0];
-  return <>{starting ? <main className="startup"><Logo text /><p role="status">正在打开你的阅读空间…</p></main> : session ? <Workspace key={session.user.id} session={session} epoch={renderEpoch} store={store} online={online} setOnline={setOnline} locationKey={locationKey} navigate={navigate} notify={notify} task={task} updateSession={value => { assertAuthEpoch(renderEpoch); if (sessionRef.current?.user.id !== value.user.id) throw new ObsoleteSessionError(); const merged = mergeSessionMetadata(value, renderEpoch); commitSession(merged, renderEpoch); void store.updateIdentity(merged, () => assertAuthEpoch(renderEpoch)).catch(error => { if (!(error instanceof ObsoleteSessionError)) notify(message(error), true); }); }} logout={logout} invalidate={invalidate} /> : <Auth onLogin={login} beforeLogin={async (email, demo) => { guardLockedAnnotationLogin(email, demo); await store.guardAnnotationLogin(email, demo); }} path={path} navigate={navigate} />}
-    {notesLogout && session && <Modal title="退出前处理未同步笔记" onClose={() => setNotesLogout(false)}><p>本机或其他标签页有未同步笔记。请选择同步、导出后取消退出，或明确放弃。直接关闭网站可能丢失尚未写入的草稿。</p><div className="button-row"><button onClick={() => void task(async () => { await flushActiveNotes(); await synchronizeAnnotations(store, session.user.id, authEpoch()); if ((await allAnnotationDrafts(store, session.user.id)).length) throw new Error('仍有冲突或未同步笔记，请处理后再退出'); await performLogout(); })} disabled={!online}>同步并退出</button><button onClick={() => void task(async () => { for (const row of await allAnnotationDrafts(store, session.user.id)) exportNotesJson(row.document); })}>导出未同步笔记</button><button className="danger" onClick={() => void task(() => performLogout(true))}>放弃未同步更改</button><button onClick={() => setNotesLogout(false)}>取消退出</button></div></Modal>}
+  return <>{lockedExitWarning && !session && <p role="alert" className="error-box">笔记已锁定，请保留此标签页并登录原账号恢复。无法确认存储已持久保存时，关闭或刷新可能丢失未写入的笔记。</p>}{starting ? <main className="startup"><Logo text /><p role="status">正在打开你的阅读空间…</p></main> : session ? <Workspace key={session.user.id} session={session} epoch={renderEpoch} store={store} online={online} setOnline={setOnline} locationKey={locationKey} navigate={navigate} notify={notify} task={task} updateSession={value => { assertAuthEpoch(renderEpoch); if (sessionRef.current?.user.id !== value.user.id) throw new ObsoleteSessionError(); const merged = mergeSessionMetadata(value, renderEpoch); commitSession(merged, renderEpoch); void store.updateIdentity(merged, () => assertAuthEpoch(renderEpoch)).catch(error => { if (!(error instanceof ObsoleteSessionError)) notify(message(error), true); }); }} logout={logout} invalidate={invalidate} /> : <Auth onLogin={login} beforeLogin={async (email, demo) => { guardLockedAnnotationLogin(email, demo); await store.guardAnnotationLogin(email, demo); }} path={path} navigate={navigate} />}
+    {notesLogout && session && <Modal title="退出前处理未同步笔记" onClose={() => setNotesLogout(false)}><p>有未同步笔记，或无法读取本机存储确认状态。可以锁定笔记并退出，不删除草稿；也可同步、导出或明确放弃。存储不可用时请保留此标签页，再登录原账号恢复。</p><div className="button-row"><button onClick={() => void task(async () => { await flushActiveNotes(); await synchronizeAnnotations(store, session.user.id, authEpoch()); if ((await allAnnotationDrafts(store, session.user.id)).length) throw new Error('仍有冲突或未同步笔记，请处理后再退出'); await performLogout(); })} disabled={!online}>同步并退出</button><button onClick={() => void task(async () => { for (const row of await allAnnotationDrafts(store, session.user.id)) exportNotesJson(row.document); })}>导出未同步笔记</button><button onClick={() => void task(lockNotesAndExit)}>锁定笔记并退出</button><button className="danger" onClick={() => void task(() => performLogout(true))}>放弃未同步更改</button><button onClick={() => setNotesLogout(false)}>取消退出</button></div></Modal>}
     {notice && <Notification notice={notice} close={() => setNotice(null)} />}
   </>;
 }

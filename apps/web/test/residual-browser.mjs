@@ -33,10 +33,11 @@ try {
     assert.equal(control.user.id, 'bob'); assert.equal(await cachedIdentity(), 'alice'); assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
     await page.evaluate(() => { window.__audit.clearFailure = false; window.__audit.identityQuota = false; });
     // Deliberately stay in this SPA: reloading here would purge Alice before exercising Bob's skipped clear.
-    await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await expect.poll(() => control.logouts).toBe(2); await page.evaluate(() => navigator.locks.request('feedink-auth-network', () => {}));
+    await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.getByRole('button', { name: '锁定笔记并退出', exact: true }).click(); await expect.poll(() => control.logouts).toBe(2); await page.evaluate(() => navigator.locks.request('feedink-auth-network', () => {}));
     assert.equal(control.loggedIn, false); assert.equal(await cachedIdentity(), 'alice');
     const blockerAfterLogout = await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending'));
     assert.equal(await page.evaluate(() => localStorage.getItem('feedink-logout-pending')), null);
+    page.once('dialog', dialog => dialog.accept());
     await context.setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.locator('main.auth-page, [data-testid="app-shell"]').first().waitFor();
     assert.deepEqual({ authenticatedShells: await page.getByTestId('app-shell').count(), cachedOwner: await cachedIdentity() }, { authenticatedShells: 0, cachedOwner: null }, 'offline reload must not restore the retained Alice account');
     await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible(); assert.equal(blockerAfterLogout, '1'); await expect(page.getByText('第一篇持久存档', { exact: true })).toHaveCount(0);
@@ -71,7 +72,7 @@ try {
   });
   await scenario('R3 no lock and no coordination storage suppresses unsafe pending revocation', async ({ page, context, url, control }) => {
     await context.addInitScript(() => { Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined }); indexedDB.open = () => { throw new DOMException('storage disabled', 'UnknownError'); }; });
-    await page.goto(`${url}/settings`); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible(); await expect(page.getByRole('alert')).toContainText('未撤销服务器会话');
+    await page.goto(`${url}/settings`); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.getByRole('button', { name: '锁定笔记并退出', exact: true }).click(); await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible(); await expect(page.getByRole('alert').filter({ hasText: '未撤销服务器会话' })).toBeVisible();
     assert.equal(control.logouts, 0); assert.equal(control.loggedIn, true); assert.ok(await page.evaluate(() => localStorage.getItem('feedink-logout-pending'))); await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await frames(page); assert.equal(control.logouts, 0);
   });
   await scenario('R5 total IDB open failure permits repeated safe online writes with and without native locks', async ({ page, context, url, control }) => {

@@ -26,6 +26,7 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
   const [historical, setHistorical] = useState(false), [syncing, setSyncing] = useState(false);
   const pauses = useRef(0), syncBusy = useRef(false);
   const [paused, setPaused] = useState(false), [loadGeneration, setLoadGeneration] = useState(0), [syncAgain, setSyncAgain] = useState(0);
+  const [configurationGeneration, setConfigurationGeneration] = useState(0);
   const readOnly = loading || paused;
   const rawHtml = row?.document.context.contentHtml ?? (mode === 'fulltext' && article.fulltextHtml ? article.fulltextHtml : article.contentHtml);
   const html = useMemo(() => sanitizeArticle(rawHtml, app.session.settings.lazyImages), [rawHtml, app.session.settings.lazyImages]);
@@ -61,7 +62,14 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
   function pause() {
     // Capture accepted engine input before rejecting any further edits.
     engine.current?.flush(); pauses.current++; setPaused(true); engine.current?.configure({ enabled: false });
-    return () => { pauses.current--; if (alive.current) setPaused(pauses.current > 0); };
+    return () => {
+      pauses.current--;
+      if (alive.current) {
+        setPaused(pauses.current > 0);
+        // React may batch false → true → false when a retirement rejects immediately.
+        if (!pauses.current) setConfigurationGeneration(value => value + 1);
+      }
+    };
   }
   const actions = useRef({ update, flush, pause }); actions.current = { update, flush, pause };
   useEffect(() => {
@@ -136,7 +144,7 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     } catch (reason) { setEngineError(errorText(reason)); return; }
     return () => { window.dispatchEvent(new Event('feedink:annotation-context-retired')); overlay.destroy(); if (engine.current === overlay) engine.current = null; };
   }, [contextKey, html, loadGeneration]);
-  useEffect(() => { engine.current?.configure({ enabled: open && tool !== 'text' && !readOnly && !frozen.current && !pauses.current, tool: tool === 'text' ? 'pen' : tool, color: app.session.settings.theme === 'eink' ? '#000000' : markColors[color], width: tool === 'highlighter' ? Math.max(12, width * 4) : tool === 'eraser' ? Math.max(16, width * 4) : width }); }, [open, tool, color, width, contextKey, html, loadGeneration, readOnly, app.session.settings.theme]);
+  useEffect(() => { engine.current?.configure({ enabled: open && tool !== 'text' && !readOnly && !frozen.current && !pauses.current, tool: tool === 'text' ? 'pen' : tool, color: app.session.settings.theme === 'eink' ? '#000000' : markColors[color], width: tool === 'highlighter' ? Math.max(12, width * 4) : tool === 'eraser' ? Math.max(16, width * 4) : width }); }, [open, tool, color, width, contextKey, html, loadGeneration, configurationGeneration, readOnly, app.session.settings.theme]);
   useEffect(() => {
     let active = true;
     for (const image of root.current?.querySelectorAll<HTMLImageElement>('img[data-asset]') || []) {
@@ -159,7 +167,9 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     if (syncBusy.current || frozen.current || pauses.current) return; syncBusy.current = true; setSyncing(true); setError('');
     try {
       if (writeError.current && current.current) persist(current.current);
-      await flush(); const sentVersion = current.current?.localVersion;
+      await flush();
+      if (!app.online) return;
+      const sentVersion = current.current?.localVersion;
       await synchronizeAnnotations(app.store, owner, epoch); await refreshLocal();
       // Only successful passes can re-arm a debounce consumed by an in-flight save.
       if (alive.current && current.current?.pending && !current.current.conflict && current.current.localVersion !== sentVersion) setSyncAgain(value => value + 1);
@@ -168,9 +178,9 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     finally { syncBusy.current = false; if (alive.current) setSyncing(false); }
   }
   useEffect(() => {
-    if (!row?.pending || row.conflict || !app.online) return;
+    if (!row?.pending || row.conflict || !app.online || readOnly) return;
     const timer = setTimeout(() => void sync(), 1000); return () => clearTimeout(timer);
-  }, [row?.localVersion, app.online, syncAgain]);
+  }, [row?.localVersion, app.online, syncAgain, readOnly]);
   useEffect(() => {
     const refreshed = () => { void refreshLocal().catch(() => {}); };
     window.addEventListener('feedink:annotations-synced', refreshed);
@@ -210,7 +220,7 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
     if (backup.format !== 'feedink-notes' || backup.version !== 1 || backup.source?.url !== active.document.context.sourceUrl || backup.source?.mode !== mode || backup.source?.contentHash !== active.document.contentHash) throw new Error('备份不属于此文章正文版本');
     validateAnnotations({ ...active.document, ink: backup.ink, marks: backup.marks });
     if (!confirm('导入会替换此正文版本的服务器笔记，是否继续？')) return;
-    const result = await api<AnnotationDocument>(annotationPath(active.document.context).replace('/annotations?', '/annotations/import?'), { method: 'POST', headers: { 'If-Match': `"${active.document.revision}"` }, body: JSON.stringify(backup) });
+    const result = await api<AnnotationDocument>(`/articles/${encodeURIComponent(active.document.context.articleId)}/annotations/import`, { method: 'POST', headers: { 'If-Match': `"${active.document.revision}"` }, body: JSON.stringify(backup) });
     assertAuthEpoch(epoch); assertContext(result, active.document.context);
     if (!alive.current || current.current?.localVersion !== active.localVersion) throw new Error('上下文已变更，请重新载入导入结果');
     await load(result.contentHash);
@@ -228,7 +238,7 @@ export function AnnotatedArticle({ article, mode, onImage, onTap }: { article: A
       </div>
       <p className="muted small">先选择正文文字再添加标记；无选区可添加整篇备注。手写使用浏览器触控笔压力，手指用于滚动。笔迹采用保守定位，不确定的锚点不猜测位置。</p>
       {error && <p role="alert">{error}</p>}{Boolean(writeError.current) && row && <button onClick={() => { if (confirm('请先导出 JSON。本操作放弃此标签页尚未写入的草稿，重新载入本机 / 服务器版本。')) { engine.current?.destroy(); engine.current = null; writeTail.current = Promise.resolve(); writeError.current = null; void load(row.document.contentHash); } }}>放弃此页草稿并重新载入</button>}{engineError && <p role="status">笔迹提示：{engineError} · 未定位数据仍在 JSON / 打印报告中保留。</p>}
-      {row && <><div className="button-row"><button className="secondary" disabled={syncing || loading || !app.online} onClick={() => void sync()}>{syncing ? '正在同步…' : '重试同步'}</button><button onClick={() => void app.task(async () => { exportNotesJson(exportSnapshot()); })}>导出 JSON</button><button disabled={!app.online || row.pending} onClick={() => void app.task(() => exportNotesMarkdown(row.document))}>导出 Markdown</button><button onClick={() => void app.task(async () => { printNotes(exportSnapshot()); })}>打印 / PDF</button><label className="secondary">导入笔记 JSON<input aria-label="导入笔记 JSON" type="file" accept="application/json,.json" disabled={!app.online || loading || row.pending} onChange={event => { const file = event.target.files?.[0]; if (file) void app.task(() => importJson(file)); event.target.value = ''; }} /></label></div>
+      {row && <><div className="button-row"><button className="secondary" disabled={syncing || readOnly} onClick={() => void sync()}>{syncing ? '正在同步…' : '重试同步'}</button><button onClick={() => void app.task(async () => { exportNotesJson(exportSnapshot()); })}>导出 JSON</button><button disabled={!app.online || row.pending} onClick={() => void app.task(() => exportNotesMarkdown(row.document))}>导出 Markdown</button><button onClick={() => void app.task(async () => { printNotes(exportSnapshot()); })}>打印 / PDF</button><label className="secondary">导入笔记 JSON<input aria-label="导入笔记 JSON" type="file" accept="application/json,.json" disabled={!app.online || loading || row.pending} onChange={event => { const file = event.target.files?.[0]; if (file) void app.task(() => importJson(file)); event.target.value = ''; }} /></label></div>
         <p className="muted small">JSON 保存全部原始笔记，可恢复到匹配的文章存档。Markdown 使用服务器当次快照（可能包含其他设备的新修改）；打印是含引用、备注和笔迹组的展示报告，不是备份。{row.pending && ' 当前有本地草稿，Markdown 暂不可用。'}</p>
         {row.conflict && <section className="annotation-conflict" role="alert"><h3>版本冲突 · 未覆盖任何一方</h3><p>本地基线 {row.document.revision}，服务器修订 {row.conflict.revision}。请比较并导出后明确选择。</p><button onClick={() => exportNotesJson(row.document)}>导出本地版本</button><button onClick={() => exportNotesJson(row.conflict!)}>导出服务器冲突版本</button><button onClick={() => void app.task(() => resolveConflict(false))}>使用服务器版本</button><button onClick={() => void app.task(() => resolveConflict(true))}>保留本地版本</button></section>}
         <details><summary>正文版本 {historical ? '· 正在查看历史 / 离线快照' : '· 当前正文'}</summary><p className="hash">{row.document.contentHash}</p><button disabled={!app.online || loading} onClick={() => void load()}>返回最新正文版本</button>{versions.map(version => <button key={version.contentHash} disabled={loading} onClick={() => void load(version.contentHash)}>{version.contentHash.slice(0, 12)} · {version.markCount} 标记 / {version.strokeCount} 笔 · 修订 {version.revision}</button>)}<button disabled={!app.online || nextVersion === null} onClick={() => void app.task(async () => { const page = await api<{ items: AnnotationVersion[]; nextOffset: number | null }>(`/articles/${article.id}/annotation-versions?mode=${mode}&offset=${nextVersion}&limit=20`); assertAuthEpoch(epoch); if (!alive.current) return; setVersions(old => [...new Map([...old, ...page.items].map(item => [item.contentHash, item])).values()]); setNextVersion(page.nextOffset); })}>加载更多版本</button></details>

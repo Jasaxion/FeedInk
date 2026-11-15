@@ -12,10 +12,12 @@ export function Auth({ onLogin, beforeLogin, path, navigate }: { beforeLogin?: (
   async function submit(event?: FormEvent, demo = false) {
     event?.preventDefault(); setError(''); setBusy(true);
 
+    // Cancel an older revocation synchronously, before waiting for its network lock.
+    const epoch = beginAuthTransition();
     try {
       await withAuthNetworkLock(async () => {
+        assertAuthEpoch(epoch);
         await beforeLogin?.(email, demo);
-        const epoch = beginAuthTransition();
         assertAuthEpoch(epoch);
         const session = await mutate<Session>(demo ? '/auth/demo' : register ? '/auth/register' : '/auth/login', 'POST', demo ? undefined : { email, password, ...(register ? { name } : {}) });
         assertAuthEpoch(epoch);

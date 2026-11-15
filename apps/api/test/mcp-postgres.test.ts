@@ -143,7 +143,7 @@ test('MCP SDK: initialize, scoped discovery, owned reads, immutable principals, 
       for (const [url, extra, expected] of [
         ['/mcp', { origin: 'https://foreign.example.invalid' }, 403],
         ['/mcp', { host: 'rebind.example.invalid' }, 403],
-        [`/mcp?token=${both.token}`, {}, 401],
+        [`/mcp?token=${both.token}`, { authorization: '' }, 401],
         ['/mcp?unsupported=1', { authorization: `Bearer ${both.token}` }, 400],
         ['/mcp', { authorization: 'Bearer fi_mcp_invalid' }, 401],
       ] as const) {

@@ -8,16 +8,20 @@ export async function annotationRegressions(browser, expect) {
     const fixture = await auditFixture(), context = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
     const page = await context.newPage(); context.setDefaultTimeout(15000);
     const article = fixture.control.articles[0], hash = 'a'.repeat(64);
-    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, failure: 0, hold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT' };
+    const state = { document: { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], contentHash: hash, context: { articleId: article.id, mode: 'feed', contentHash: hash, sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml }, ink: null, marks: [] }, writes: 0, failure: 0, hold: null, historyStatus: 409, historyCode: 'ANNOTATION_CONTEXT', loadHold: null, loads: 0 };
     await context.route('**/api/articles/one/annotations**', async route => {
       const request = route.request(), url = new URL(request.url());
       if (url.pathname.endsWith('/import')) {
+        assert.equal(url.search, '', 'import context is carried by the backup');
         const backup = request.postDataJSON(); state.document = { ...state.document, ink: backup.ink, marks: backup.marks, revision: state.document.revision + 1 };
       } else if (request.method() === 'PUT') {
+        assert.deepEqual([...url.searchParams.keys()], ['mode'], 'PUT hash is carried by the payload');
+        assert.equal(request.headers()['if-match'], `"${state.document.revision}"`);
         state.writes++; if (state.hold) await state.hold.promise;
         if (state.failure) return route.fulfill({ status: state.failure, json: { error: { code: 'UNAVAILABLE', message: '受控保存失败' } } });
         state.document = { ...state.document, ...request.postDataJSON(), revision: state.document.revision + 1 };
       } else if (url.searchParams.has('contentHash') && url.searchParams.get('contentHash') !== state.document.contentHash) return route.fulfill({ status: state.historyStatus, json: { error: { code: state.historyCode, message: '历史上下文不可用' } } });
+      if (request.method() === 'GET') { state.loads++; if (state.loadHold) await state.loadHold.promise; }
       await route.fulfill({ json: state.document });
     });
     try {
@@ -30,14 +34,14 @@ export async function annotationRegressions(browser, expect) {
       await expect(page.getByRole('button', { name: '重试同步', exact: true })).toBeEnabled();
       await run({ page, context, fixture, state });
       console.log(`PASS annotation regression: ${name}`);
-    } finally { state.hold?.resolve(); await context.close(); await fixture.close(); }
+    } finally { state.hold?.resolve(); state.loadHold?.resolve(); await context.close(); await fixture.close(); }
   }
   async function newNote(page, text) {
     await page.getByRole('button', { name: '备注', exact: true }).click();
     await page.getByTestId('note-editor').fill(text);
   }
-  async function draw(page) {
-    await page.getByRole('button', { name: '钢笔', exact: true }).click();
+  async function draw(page, selectTool = true) {
+    if (selectTool) await page.getByRole('button', { name: '钢笔', exact: true }).click();
     await page.getByTestId('reader-content').scrollIntoViewIfNeeded();
     await page.getByTestId('reader-content').evaluate(root => {
       const target = root.querySelector('p'), box = target.getBoundingClientRect();
@@ -52,11 +56,15 @@ export async function annotationRegressions(browser, expect) {
       return false;
     }));
   }
-  for (const verification of ['401', 'owner-mismatch']) await scenario(`focused annotation session ${verification} locks pending notes`, async ({ page, context, state, fixture }) => {
+  for (const verification of ['401', '401-marker-failure', 'owner-mismatch']) await scenario(`focused annotation session ${verification} locks pending notes`, async ({ page, context, state, fixture }) => {
     state.failure = 503;
     await newNote(page, '必须隔离的草稿');
     await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
-    await context.route('**/api/session', route => verification === '401'
+    if (verification === '401-marker-failure') await page.evaluate(() => {
+      const set = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key, value) { if (['feedink-private-purge-pending', 'feedink-logout-pending'].includes(key)) throw new DOMException('marker unavailable', 'QuotaExceededError'); return set.call(this, key, value); };
+    });
+    await context.route('**/api/session', route => verification.startsWith('401')
       ? route.fulfill({ status: 401, json: { error: { code: 'UNAUTHORIZED', message: '登录失效' } } })
       : route.fulfill({ json: { user: { ...fixture.control.user, id: 'bob' }, settings: fixture.control.settings, csrfToken: 'csrf-bob' } }));
     await page.getByRole('button', { name: '保存备注', exact: true }).click();
@@ -136,6 +144,104 @@ export async function annotationRegressions(browser, expect) {
     await expect(page.getByTestId('annotation-status')).toContainText('已同步');
     await page.getByTestId('reader').getByRole('button', { name: '返回', exact: true }).click();
     await expect(page.getByTestId('reader-content')).toHaveCount(0);
+  });
+  await scenario('slow same-context load rearms pending debounce when editing resumes', async ({ page, state }) => {
+    state.loadHold = deferred();
+    await newNote(page, 'pending through slow load');
+    await page.getByText('正文版本 · 当前正文', { exact: true }).click();
+    const loads = state.loads;
+    await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
+    await expect.poll(() => state.loads).toBe(loads + 1);
+    await page.waitForTimeout(1300); assert.equal(state.writes, 0);
+    state.loadHold.resolve(); state.loadHold = null;
+    await expect.poll(() => state.document.marks[0]?.text).toBe('pending through slow load');
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+  });
+  await scenario('already-rejected retirement resumes the retained pen without switching tools', async ({ page, fixture }) => {
+    fixture.control.holdDetail = deferred();
+    await page.getByRole('button', { name: '下一篇 (J)', exact: true }).click();
+    await expect.poll(() => fixture.control.detailCaptured).toBe(true);
+    await page.evaluate(() => {
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function(value, ...args) {
+        if (value.kind === 'annotations') throw new DOMException('Controlled immediate pen failure', 'QuotaExceededError');
+        return put.call(this, value, ...args);
+      };
+    });
+    await draw(page);
+    await expect(page.getByTestId('annotation-status')).toContainText('未保存');
+    fixture.control.holdDetail.resolve();
+    await expect(page.getByRole('alert').filter({ hasText: 'Controlled immediate pen failure' }).last()).toBeVisible();
+    // Wait for the replacement attempt to finish; the old article and selected tool must survive.
+    await expect(page.locator('.reader-loading')).toHaveCount(0);
+    await expect(page.getByTestId('reader-content')).toContainText('第一篇');
+    await expect(page.getByRole('button', { name: '钢笔', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await draw(page, false);
+    await expect(page.getByTestId('annotations-panel').getByRole('heading', { name: /手写 2 笔/ })).toBeVisible();
+    const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
+    assert.equal(JSON.parse(await readFile(await (await downloaded).path(), 'utf8')).ink.strokes.length, 2);
+  });
+  await scenario('locked exit quarantines durable notes without discarding or publishing identity', async ({ page, state }) => {
+    state.failure = 503; await newNote(page, 'durable locked exit witness');
+    await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await page.getByRole('button', { name: '锁定笔记并退出', exact: true }).click();
+    await expect(page.getByTestId('app-shell')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => new Promise(resolve => {
+      const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => {
+        const read = open.result.transaction('rows').objectStore('rows').getAll();
+        read.onsuccess = () => { resolve({ identity: read.result.some(row => row.key === 'identity'), recovery: read.result.some(row => row.kind === 'annotation-recovery' && row.value.document.marks.some(mark => mark.text === 'durable locked exit witness')) }); open.result.close(); };
+      };
+    }))).toEqual({ identity: false, recovery: true });
+    assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
+  });
+  for (const blockedMarker of [false, true]) await scenario(`unreadable storage locked exit preserves memory, guard and recovery (marker blocked: ${blockedMarker})`, async ({ page, context, fixture, state }) => {
+    state.failure = 503;
+    await newNote(page, 'locked exit memory witness');
+    await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
+    let logins = 0;
+    await context.route('**/api/auth/login', route => {
+      logins++; fixture.control.loggedIn = true;
+      return route.fulfill({ json: { user: fixture.control.user, settings: fixture.control.settings, csrfToken: 'csrf-alice' } });
+    });
+    await page.evaluate(blockedMarker => {
+      const transaction = IDBDatabase.prototype.transaction, setItem = Storage.prototype.setItem;
+      IDBDatabase.prototype.transaction = function(...args) { if (this.name === 'feedink-private-v1') throw new DOMException('Controlled unreadable notes', 'UnknownError'); return transaction.apply(this, args); };
+      if (blockedMarker) Storage.prototype.setItem = function() { throw new DOMException('Controlled marker failure', 'QuotaExceededError'); };
+      window.restoreExitStorage = () => { IDBDatabase.prototype.transaction = transaction; Storage.prototype.setItem = setItem; };
+    }, blockedMarker);
+    // This latest edit exists only in the mounted component, not the old persisted row.
+    await page.getByTestId('note-editor').fill('latest memory-only locked exit witness');
+    await expect(page.getByTestId('annotation-status')).toContainText('未保存');
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await page.getByRole('button', { name: '锁定笔记并退出', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible();
+    await expect(page.getByTestId('reader-content')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '导出 JSON', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('alert').filter({ hasText: '无法确认存储已持久保存时' })).toBeVisible();
+    assert.equal(await page.evaluate(() => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; }), true);
+    if (blockedMarker) assert.equal(fixture.control.logouts, 0);
+    else assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), '1');
+    await page.getByLabel('邮箱', { exact: true }).fill('bob@example.test');
+    await page.getByLabel('密码', { exact: true }).fill('synthetic-password');
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('alert').filter({ hasText: '请先登录原账号' })).toBeVisible(); assert.equal(logins, 0);
+    await page.getByLabel('邮箱', { exact: true }).fill('alice@example.test');
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'Controlled unreadable notes' })).toBeVisible(); assert.equal(logins, 0);
+    await page.evaluate(() => window.restoreExitStorage()); state.failure = 0;
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByTestId('app-shell')).toBeVisible();
+    await page.getByTestId('article-card').filter({ hasText: '第一篇' }).click();
+    await page.getByTestId('annotation-toggle').click();
+    await expect(page.getByTestId('annotations-panel')).toContainText('latest memory-only locked exit witness');
+    // The older persisted version is preserved as a conflict, never silently overwritten.
+    await expect(page.getByTestId('annotation-status')).toContainText('冲突');
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: '保留本地版本', exact: true }).click();
+    await expect.poll(() => state.document.marks[0]?.text).toBe('latest memory-only locked exit witness');
+    assert.equal(logins, 1);
+    assert.equal(await page.evaluate(() => localStorage.getItem('feedink-private-purge-pending')), null);
   });
   await scenario('only explicit owned cached history opens on precise 409 or 404', async ({ page, state }) => {
     state.failure = 503; await newNote(page, 'H1 local pending');

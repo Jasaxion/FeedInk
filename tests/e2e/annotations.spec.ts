@@ -127,10 +127,13 @@ test('selected quotes produce all four text marks, survive reload and do not mov
   await showAnnotations(page);
   await page.getByRole('combobox', { name: '正文模式', exact: true }).selectOption('fulltext');
   await expect(page.getByTestId('reader-content')).toContainText('第1段');
+  await showAnnotations(page);
   expect((await getAnnotation(api, first.id, 'fulltext')).context.mode).toBe('fulltext');
   await expect(page.getByTestId('annotations-panel')).not.toContainText(fixtureRemark);
   expect((await getAnnotation(api, first.id, 'feed')).marks).toEqual(saved.marks);
   await page.getByRole('combobox', { name: '正文模式', exact: true }).selectOption('feed');
+  await expect(page.getByTestId('annotation-toggle')).toHaveAttribute('aria-expanded', 'false');
+  await showAnnotations(page);
   await expect(page.getByTestId('annotations-panel')).toContainText(fixtureRemark);
 });
 
@@ -146,24 +149,28 @@ test('browser pen preserves pressure, scopes input to the reader, and whole-stro
   if (!outside) throw new Error('Annotation status must have visible geometry');
   await penPath(page, [{ x: outside.x + 4, y: outside.y + 4, pressure: 0.2 }, { x: outside.x + 20, y: outside.y + 5, pressure: 0.8 }]);
   const paragraph = page.getByTestId('reader-content').locator('p').filter({ hasText: fixtureQuote }).first();
-  await paragraph.scrollIntoViewIfNeeded();
-  const box = await paragraph.boundingBox(); if (!box) throw new Error('Reader paragraph is not visible');
-  const points = [0.15, 0.3, 0.45, 0.6, 0.75].map((fraction, index) => ({ x: box.x + box.width * fraction, y: box.y + 12 + (index % 2) * 4, pressure: 0.15 + index * 0.18 }));
-  await penPath(page, points);
+  async function paragraphPoints() {
+    // Toolbar clicks can scroll the narrow reader; CDP requires current viewport coordinates.
+    await paragraph.scrollIntoViewIfNeeded();
+    const box = await paragraph.boundingBox(); if (!box) throw new Error('Reader paragraph is not visible');
+    return [0.15, 0.3, 0.45, 0.6, 0.75].map((fraction, index) => ({ x: box.x + box.width * fraction, y: box.y + 12 + (index % 2) * 4, pressure: 0.15 + index * 0.18 }));
+  }
+  await penPath(page, await paragraphPoints());
   await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(1);
   const pen = (await getAnnotation(api, first.id)).ink!.strokes[0];
   expect(pen.tool).toBe('pen');
   expect(pen.points.length).toBeGreaterThanOrEqual(3);
   expect(Math.max(...pen.points.map(point => point.p)) - Math.min(...pen.points.map(point => point.p))).toBeGreaterThan(0.3);
   await toolbar.getByRole('button', { name: '荧光笔', exact: true }).click();
-  await penPath(page, points.map(point => ({ ...point, y: point.y + 25 })));
+  await penPath(page, (await paragraphPoints()).map(point => ({ ...point, y: point.y + 25 })));
   await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(2);
   const both = await getAnnotation(api, first.id);
   expect(both.ink!.url).toBe(first.url);
   expect(both.ink!.strokes[1].tool).toBe('highlighter');
   expect(both.ink!.strokes[1].opacity).toBeLessThan(1);
   await toolbar.getByRole('button', { name: '橡皮', exact: true }).click();
-  await penPath(page, [points[2], { ...points[2], x: points[2].x + 3 }]);
+  const erasePoint = (await paragraphPoints())[2];
+  await penPath(page, [erasePoint, { ...erasePoint, x: erasePoint.x + 3 }]);
   await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.map(stroke => stroke.id)).toEqual([both.ink!.strokes[1].id]);
   await toolbar.getByRole('button', { name: '撤销笔迹', exact: true }).click();
   await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes).toEqual(both.ink!.strokes);
@@ -313,7 +320,7 @@ test('failed local draft storage is visible, retains the in-memory note and retr
     await expect(page.getByTestId('annotations-panel')).toContainText(fixtureRemark);
     expect((await getAnnotation(api, first.id, 'feed', undefined, process.env.FEEDINK_API_WITNESS_URL)).revision).toBe(0);
     await page.evaluate(() => (window as Window & { restoreNoteStorage?: () => void }).restoreNoteStorage?.());
-    await page.getByRole('button', { name: '重试同步', exact: true }).click();
+    await page.getByTestId('annotations-panel').getByRole('button', { name: '重试同步', exact: true }).click();
     await expect(page.getByTestId('annotation-status')).toContainText(pending);
   } finally {
     await page.evaluate(() => (window as Window & { restoreNoteStorage?: () => void }).restoreNoteStorage?.());
@@ -347,7 +354,7 @@ test('a delayed backend save stays locally pending and a real 412 preserves both
     await expect(page.getByTestId('annotation-status')).toContainText(/冲突/);
     await expect(page.getByTestId('annotations-panel')).toContainText('本地冲突草稿');
     expect((await getAnnotation(api, first.id)).marks).toEqual(winner.marks);
-    await page.getByRole('button', { name: '重试同步', exact: true }).click();
+    await page.getByTestId('annotations-panel').getByRole('button', { name: '重试同步', exact: true }).click();
     await expect(page.getByTestId('annotation-status')).toContainText(/冲突/);
     expect((await getAnnotation(api, first.id)).revision).toBe(winner.revision);
     await page.reload();
@@ -466,7 +473,10 @@ test('Markdown ZIP includes all quotes/remarks and decodable relative handwritin
   expect(markdownNames).toHaveLength(1);
   for (const name of Object.keys(entries)) expect(name.startsWith('/') || name.split('/').includes('..') || name.includes('\\'), 'ZIP path is portable and bounded').toBe(false);
   const markdown = strFromU8(entries[markdownNames[0]]);
-  expect(markdown).toContain(fixtureQuote); expect(markdown).toContain(fixtureRemark); expect(markdown).toContain(fixtureUnlocatedQuote);
+  // Markdown backslash escapes are presentation syntax, not changes to the plain-text note.
+  const plainMarkdown = markdown.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, '$1');
+  expect(plainMarkdown).toContain(fixtureQuote); expect(plainMarkdown).toContain(fixtureRemark); expect(plainMarkdown).toContain(fixtureUnlocatedQuote);
+  expect(JSON.parse(strFromU8(entries['notes.json']))).toEqual(notesBackup(saved));
   for (const kind of [/高亮|highlight/i, /下划线|underline/i, /波浪线|wave/i, /备注|note/i]) expect(markdown).toMatch(kind);
   expect(markdown).not.toContain('<img src=x');
   expect(markdown).not.toMatch(/\]\(javascript:/i);
@@ -508,6 +518,7 @@ test('UI JSON import/export and actual Chromium PDF retain every quote, remark a
   const cleared = await api.delete(annotationPath(first.id, 'feed', saved.contentHash), { headers: { ...csrf(session), 'If-Match': `"${saved.revision}"` } });
   expect(cleared.status()).toBe(200);
   await page.reload(); await showAnnotations(page);
+  page.once('dialog', dialog => dialog.accept());
   await page.getByLabel('导入笔记 JSON', { exact: true }).setInputFiles({ name: 'owned-notes.json', mimeType: 'application/json', buffer: backupBytes });
   await expect.poll(async () => (await getAnnotation(api, first.id)).marks).toEqual(saved.marks);
   expect((await getAnnotation(api, first.id)).ink).toEqual(saved.ink);

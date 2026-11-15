@@ -65,9 +65,9 @@ export function instrumentStorage() {
   const indexGetAll = IDBIndex.prototype.getAll;
   IDBIndex.prototype.getAll = function(query, ...args) { const hold = window.__audit.queueHold && Array.isArray(query) && query[1] === 'queue'; if (hold) window.__audit.queueHold = false; return wrap(indexGetAll.call(this, query, ...args), hold); };
   const get = IDBObjectStore.prototype.get;
-  IDBObjectStore.prototype.get = function(key) { if (this.name === 'coordination' && key === 'lock') window.__audit.authLockReads++; const identity = window.__audit.identityHold && key === 'identity'; const queue = window.__audit.queueHold && String(key).includes(':queue:'); if (identity) window.__audit.identityHold = false; if (queue) window.__audit.queueHold = false; return wrap(get.call(this, key), identity || queue || window.__audit.imageHold && String(key).includes(':image:')); };
+  IDBObjectStore.prototype.get = function(key) { if (this.name === 'coordination' && key === 'lock') window.__audit.authLockReads++; const queue = window.__audit.queueHold && String(key).includes(':queue:'); if (queue) window.__audit.queueHold = false; return wrap(get.call(this, key), queue || window.__audit.imageHold && String(key).includes(':image:')); };
   const put = IDBObjectStore.prototype.put;
-  IDBObjectStore.prototype.put = function(value, ...args) { if (window.__audit.quota && value.key?.includes(':queue:') || window.__audit.bodyQuota && value.key?.includes(':article:') || window.__audit.identityQuota && value.key === 'identity') throw new DOMException('fixture quota', 'QuotaExceededError'); return put.call(this, value, ...args); };
+  IDBObjectStore.prototype.put = function(value, ...args) { if (window.__audit.quota && value.key?.includes(':queue:') || window.__audit.bodyQuota && value.key?.includes(':article:') || window.__audit.identityQuota && value.key === 'identity') throw new DOMException('fixture quota', 'QuotaExceededError'); const hold = window.__audit.identityHold && value.key === 'identity'; if (hold) window.__audit.identityHold = false; return wrap(put.call(this, value, ...args), hold); };
   const clear = IDBObjectStore.prototype.clear;
   IDBObjectStore.prototype.clear = function() { if (window.__audit.clearFailure) throw new DOMException('fixture clear failure', 'UnknownError'); return clear.call(this); };
 }

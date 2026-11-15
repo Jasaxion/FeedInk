@@ -35,7 +35,8 @@ try {
   // An existing host is not used or overwritten by browser annotation persistence.
   await page.evaluate(() => { window.__hostCalls = 0; window.__existingHost = { postMessage() { window.__hostCalls++; } }; window.WebInkHost = window.__existingHost; });
   await page.getByTestId('annotation-toggle').click(); await expect(page.getByTestId('annotation-toolbar')).toBeVisible(); await expect(page.getByTestId('annotations-panel')).toBeVisible();
-  await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+  try { await expect(page.getByTestId('annotation-status')).toContainText('已同步'); }
+  catch (error) { throw new Error(`Initial annotation load: ${await page.getByTestId('annotations-panel').getByRole('alert').allTextContents()}`, { cause: error }); }
   for (const label of ['高亮', '下划线', '波浪线']) { await selectText(); await page.getByRole('button', { name: label, exact: true }).click(); await page.getByTestId('note-editor').fill(`${label} <img src=x onerror=alert(1)>`); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('已同步'); }
   await page.getByRole('button', { name: '备注', exact: true }).click(); await page.getByTestId('note-editor').fill('整篇备注保留'); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('已同步');
   assert.equal(docs.get('one:feed').marks.length, 4); assert.equal(await page.locator('.annotations-panel img').count(), 0);
@@ -64,12 +65,13 @@ try {
   // Explicit conflict: repeated retry must retain local data and must not adopt the new revision.
   conflict = true; docs.get('one:feed').revision += 1;
   await page.getByRole('button', { name: '备注', exact: true }).click(); await page.getByTestId('note-editor').fill('冲突草稿'); await page.getByRole('button', { name: '保存备注', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('冲突');
-  const before = writes; await page.getByRole('button', { name: '重试同步', exact: true }).click(); await expect(page.getByTestId('annotation-status')).toContainText('冲突'); assert.equal(writes, before); await expect(page.getByTestId('annotations-panel')).toContainText('冲突草稿');
+  const before = writes; await page.getByRole('button', { name: '重试同步', exact: true }).click(); await expect(page.getByRole('button', { name: '重试同步', exact: true })).toBeEnabled(); await expect(page.getByTestId('annotation-status')).toContainText('冲突'); assert.equal(writes, before); await expect(page.getByTestId('annotations-panel')).toContainText('冲突草稿');
   // Forced expiry must remove active identity, hide content and retain pending notes in quarantine.
   fixture.control.loggedIn = false;
-  await page.getByTestId('reader').getByRole('button', { name: '稍后阅读', exact: true }).click();
+  // Target the annotation session check itself; a state button can detach after the correct 401 lock.
+  await page.getByTestId('annotations-panel').getByRole('button', { name: '重试同步', exact: true }).click();
   await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible(); await expect(page.getByTestId('reader-content')).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => new Promise(resolve => { const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => { const request = open.result.transaction('rows').objectStore('rows').getAll(); request.onsuccess = () => { const rows = request.result; resolve({ identity: rows.some(row => row.key === 'identity'), recovery: rows.some(row => row.kind === 'annotation-recovery'), article: rows.some(row => row.kind === 'article') }); open.result.close(); }; }; }))).toEqual({ identity: false, recovery: true, article: false });
+  await expect.poll(() => page.evaluate(() => new Promise(resolve => { const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => { const request = open.result.transaction('rows').objectStore('rows').getAll(); request.onsuccess = () => { const rows = request.result; resolve({ identity: rows.some(row => row.key === 'identity'), recovery: rows.some(row => row.kind === 'annotation-recovery' && row.value.document.marks.some(mark => mark.text === '冲突草稿')), article: rows.some(row => row.kind === 'article') }); open.result.close(); }; }; }))).toEqual({ identity: false, recovery: true, article: false });
   assert.deepEqual(errors, []);
   console.log('PASS annotations-browser: text/pressure/CAS/export/print/forced-auth client fixtures');
   await annotationRegressions(browser, expect);

@@ -24,7 +24,7 @@ export async function synchronizeAnnotations(store: OfflineStore, owner: string,
       const current = await store.annotations(owner, row.document.context); await guard();
       if (current?.localVersion !== row.localVersion) continue;
       try {
-        const result = await api<AnnotationDocument>(annotationPath(row.document.context), { method: 'PUT', headers: { 'If-Match': `"${row.document.revision}"` }, body: JSON.stringify(payloadOf(validateAnnotations(row.document))) });
+        const result = await api<AnnotationDocument>(annotationPath({ articleId: row.document.context.articleId, mode: row.document.context.mode }), { method: 'PUT', headers: { 'If-Match': `"${row.document.revision}"` }, body: JSON.stringify(payloadOf(validateAnnotations(row.document))) });
         await guard(); assertContext(result, row.document.context);
         await store.acknowledgeAnnotations(owner, row, result); await guard();
       } catch (error) {
@@ -53,9 +53,14 @@ if (typeof window !== 'undefined') window.addEventListener('beforeunload', event
 export function guardLockedAnnotationLogin(email: string, demo: boolean) {
   if ([...locked.values()].some(value => demo || value.email.toLowerCase() !== email.toLowerCase())) throw new Error('请先登录原账号恢复未同步笔记；草稿仍锁定在此标签页。');
 }
+export function lockAnnotationOwner(owner: string, email: string) {
+  if (!locked.has(owner)) locked.set(owner, { email, rows: [] });
+}
 export async function recoverLockedAnnotations(store: OfflineStore, owner: string) {
   if ([...locked.keys()].some(id => id !== owner)) throw new Error('未同步笔记属于另一账号，未启用此账号。');
   const retained = locked.get(owner); if (!retained) return;
+  // Even an unreadable-store exit with no known rows needs verified owner storage.
+  await store.annotationDocuments(owner);
   for (const row of retained.rows) {
     const existing = await store.annotations(owner, row.document.context);
     if (existing?.localVersion === row.localVersion && !existing.pending) continue;

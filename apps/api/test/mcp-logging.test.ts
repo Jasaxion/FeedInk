@@ -14,7 +14,7 @@ test('production logs and failure bodies omit rejected URL/header credentials an
     try {
       const sentinel = 'synthetic-credential-sentinel';
       const response = await app.inject({ method: 'POST', url: '/mcp?token=' + sentinel, headers: { host: 'localhost:3000', authorization: 'Bearer ' + sentinel, cookie: 'feedink_session=' + sentinel, 'x-csrf-token': sentinel }, payload: { text: 'synthetic-note-body-sentinel' } });
-      if (response.statusCode !== 400 || response.body.includes(sentinel)) throw new Error('Unsafe credential failure');
+      if (response.statusCode !== 401 || response.body.includes(sentinel)) throw new Error('Unsafe credential failure');
       const api = await app.inject({ method: 'POST', url: '/api/mcp-tokens?token=' + sentinel, headers: { cookie: 'feedink_session=' + sentinel }, payload: { name: 'synthetic-note-body-sentinel' } });
       if (api.statusCode !== 401 || api.body.includes(sentinel)) throw new Error('Unsafe API failure');
     } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
