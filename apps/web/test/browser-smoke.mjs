@@ -135,7 +135,9 @@ try {
     assert.equal(await page.getByTestId('reader-content').isVisible(), true);
     await page.screenshot({ path: join(artifacts, `reader-${width}.png`) });
   }
+  const settleReads = async () => { await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0); await page.waitForLoadState('networkidle'); await page.waitForFunction(() => window.__fixtureRuntimeWitness.pendingRequestCount() === 0); };
   step('scoped CSS settings');
+  await settleReads();
   await page.goto(`${url}/settings/interface/article-contents?article=article-one`);
   await page.getByLabel('自定义正文 CSS').fill('@import "https://invalid.test/steal";');
   await page.getByRole('button', { name: '保存设置', exact: true }).click();
@@ -147,10 +149,12 @@ try {
   await page.getByRole('button', { name: '关闭对话框' }).click();
   step('e-ink');
   settings = { ...settings, theme: 'eink', fontSize: 22 };
+  await settleReads();
   await page.reload(); await page.getByTestId('reader-content').waitFor();
   const style = await page.getByTestId('reader-content').evaluate(element => { const style = getComputedStyle(element); return [style.color, style.fontSize, style.animationName, style.boxShadow]; });
   assert.deepEqual(style, ['rgb(0, 0, 0)', '22px', 'none', 'none']);
   step('logout and purge');
+  await settleReads();
   await page.goto(`${url}/settings`); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.getByRole('heading', { name: '欢迎回来' }).waitFor();
   await setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByRole('heading', { name: '欢迎回来' }).waitFor(); assert.equal(await page.getByTestId('reader-content').count(), 0);
   await errors.assertClean(); await context.close();
