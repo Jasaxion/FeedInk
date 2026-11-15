@@ -125,7 +125,7 @@ test('fixture-page-errors native probe calls fetch unchanged and preserves respo
   assert.equal(calls[0].receiver, window);
   assert.equal(calls[0].args[0], '/api/session');
   assert.equal(calls[0].args[1], init);
-  assert.deepEqual(reports, []);
+  assert.equal(reports.length, 0);
   fail = true;
   await assert.rejects(window.fetch('/api/session', init), error => error === rejection);
   assert.equal(reports.length, 1);
