@@ -39,6 +39,14 @@ Results and active jobs are keyed by owner/article/mode/source hash/source metad
 
 Use a durable PostgreSQL job queue, bounded worker concurrency/leases and request/output budgets rather than one unbounded HTTP request. A crash/ambiguous provider outcome must be reported as interrupted work requiring explicit retry, not silently billed again. Queue/lease queries need selective indexes and must not scan articles. Document process and proxy timeouts.
 
+## Durable results and explicit cleanup
+
+Terminal summaries/translations and their original source identity are retained indefinitely. There is no age-based, per-owner or global history eviction. Queue/concurrency/rate/input/output budgets still apply to active work. Disk and PostgreSQL capacity remain an operator responsibility.
+
+`GET /api/ai/results?limit=20&cursor=...` returns `{items,total,nextCursor}` with owned terminal metadata and an exact snapshot total. `DELETE /api/ai/results` accepts `{ids:string[]}` with 1–100 unique IDs and atomically removes only the selected owned terminal records. Missing, foreign or active records reject the entire selection. It does not cancel active work, call a provider, or change article/image/annotation/credential data. Settings offers an explicitly opened, paginated selection manager and one confirmation warning that later regeneration can incur charges.
+
+`GET /api/ai/results/:id` retrieves the owned stored terminal result with its original identity, even after current source/model/key settings change. Current-job polling may reject stale presentation without mutating stored result bytes/status/timestamps. Historical retrieval must not replace the current reader or annotation context. A new history-viewer UI is not part of this iteration.
+
 ## Completeness and rendering
 
 Detect language before translation. Skip only confidently matching target-language content; unknown or mixed-language input must not be silently classified as complete target text. Translate all eligible visible prose/title/captions in bounded segments, including long individual text nodes; preserve code and document why it is excluded. Report coverage and missing segments. A length-limited or missing-segment result must not be marked complete or cached as success.

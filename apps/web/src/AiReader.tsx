@@ -6,6 +6,8 @@ import { api } from './api';
 import { useApp } from './context';
 import { Field } from './components';
 import { aiRequestError, useAiIdentity } from './aiIdentity';
+import { authEpoch } from './authEpoch';
+import { AI_RESULT_RETIRE_EVENT, type AiResultRetirement } from './aiResultData';
 import { activeAiJob, aiDisplayMatches, assertAiJob, verifiedAiSource, type AiJobIdentity } from './aiJobs';
 import { AiLanguageOptions } from './AiSettings';
 import { AiBilingual } from './AiBilingual';
@@ -25,14 +27,23 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
   const [expanded, setExpanded] = useState(true), [cancelRequested, setCancelRequested] = useState(false);
   const generation = useRef(0), controller = useRef<AbortController | null>(null), timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const task = useRef<{ identity: AiJobIdentity; id: string } | null>(null);
+  const retiredResultIds = useRef(new Set<string>());
   const online = useRef(app.online); online.current = app.online;
   const current = (run: number) => isCurrent() && generation.current === run;
-  function stop() { generation.current++; controller.current?.abort(); controller.current = null; if (timer.current) clearTimeout(timer.current); timer.current = null; }
+  function stop() { generation.current++; controller.current?.abort(); controller.current = null; if (timer.current) clearTimeout(timer.current); timer.current = null; retiredResultIds.current.clear(); }
+  function retirePresentation() { stop(); task.current = null; setOperation(null); setJob(null); setConfig(null); setBusy(false); }
   useEffect(() => {
-    const retireConfiguration = () => { stop(); task.current = null; setOperation(null); setJob(null); setConfig(null); setBusy(false); };
-    window.addEventListener('feedink:ai-config-changed', retireConfiguration);
-    return () => { stop(); window.removeEventListener('feedink:ai-config-changed', retireConfiguration); };
-  }, []);
+    const retireSelectedResults = (event: Event) => {
+      const detail = (event as CustomEvent<AiResultRetirement>).detail;
+      if (!isCurrent() || !detail || detail.owner !== app.session.user.id || detail.epoch !== authEpoch() || !Array.isArray(detail.ids)) return;
+      if (task.current && detail.ids.includes(task.current.id)) retirePresentation();
+      // A cached POST reply may still be in flight and not have exposed its job ID yet.
+      else if (!task.current && controller.current) for (const id of detail.ids) retiredResultIds.current.add(id);
+    };
+    window.addEventListener('feedink:ai-config-changed', retirePresentation);
+    window.addEventListener(AI_RESULT_RETIRE_EVENT, retireSelectedResults);
+    return () => { stop(); window.removeEventListener('feedink:ai-config-changed', retirePresentation); window.removeEventListener(AI_RESULT_RETIRE_EVENT, retireSelectedResults); };
+  }, [isCurrent, app.session.user.id]);
   useEffect(() => { if (operation) bodyHost?.querySelector<HTMLElement>('.ai-card')?.focus(); }, [operation, bodyHost]);
   useEffect(() => {
     if (!app.online || locked) { stop(); setBusy(false); if (task.current) setPaused(true); }
@@ -50,7 +61,7 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
     stop(); const run = generation.current;
     task.current = null; setJob(null); setError(''); setPaused(false); setCancelRequested(false); setConfig(null); setTargetLanguage('zh-CN'); setExpanded(true);
     setOperation(next); setBusy(false);
-    if (!isCurrent() || !online.current || !displayedSourceMatches || app.session.user.isDemo || mode === 'webpage' || mode === 'fulltext' && !article.fulltextHtml) return;
+    if (!isCurrent() || !online.current || !displayedSourceMatches || app.session.user.isDemo || mode === 'fulltext' && !article.fulltextHtml) return;
     setBusy(true);
     try { const saved = await request<AiConfig>('/ai/config', {}, run); if (current(run)) { setConfig(saved); setTargetLanguage(saved.targetLanguage || 'zh-CN'); setBusy(false); } }
     catch (reason) { report(reason, run); }
@@ -72,7 +83,7 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
     }, POLL_INTERVAL);
   }
   async function start(force = false) {
-    if (!displayedSourceMatches || !operation || !config?.enabled || !config.hasKey || busy || controller.current || job && activeAiJob(job) || !online.current || app.session.user.isDemo || mode === 'webpage' || mode === 'fulltext' && !article.fulltextHtml || !isCurrent()) return;
+    if (!displayedSourceMatches || !operation || !config?.enabled || !config.hasKey || busy || controller.current || job && activeAiJob(job) || !online.current || app.session.user.isDemo || mode === 'fulltext' && !article.fulltextHtml || !isCurrent()) return;
     stop(); const run = generation.current;
     setBusy(true); setError(''); setJob(null); setPaused(false); setExpanded(true); setCancelRequested(false); task.current = null;
     try {
@@ -84,7 +95,9 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
       const identity: AiJobIdentity = { articleId: article.id, mode, contentHash, operation, targetLanguage, sourceUrl: article.url, sourceTitle: article.title };
       const response = await request<{ job: AiJob }>(`/articles/${encodeURIComponent(article.id)}/ai`, { method: 'POST', body: JSON.stringify({ operation, mode, targetLanguage, contentHash, ...(force ? { force: true } : {}) }) }, run);
       if (!current(run)) return;
-      assertAiJob(response.job, identity); task.current = { identity, id: response.job.id }; setJob(response.job); setBusy(false);
+      assertAiJob(response.job, identity);
+      if (retiredResultIds.current.has(response.job.id)) { retirePresentation(); return; }
+      retiredResultIds.current.clear(); task.current = { identity, id: response.job.id }; setJob(response.job); setBusy(false);
       if (activeAiJob(response.job)) poll(identity, response.job.id, run);
     } catch (reason) { report(reason, run); }
   }

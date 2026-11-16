@@ -19,6 +19,7 @@ const errors = {
   AI_DEMO: [403, 'Demo accounts cannot configure or invoke AI'],
   AI_NOT_FOUND: [404, 'AI job or owned article not found'],
   AI_REQUEST: [400, 'Invalid AI request'],
+  AI_RESULT_SELECTION: [409, 'Select only existing terminal AI results owned by this account; nothing was deleted'],
 } as const;
 export type AiErrorCode = keyof typeof errors;
 export function aiFailure(code: AiErrorCode): ApiFailure {

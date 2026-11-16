@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import type { AiConfig, AiJob, AiLanguage } from '@feedink/shared';
+import type { AiConfig, AiJob, AiLanguage, AiResultSummary } from '@feedink/shared';
 import { type DB, type SQL, type Row, hash, id, iso, withConnection } from './core.js';
 import { Annotations } from './annotations.js';
+import { aiResultsQuery, aiResultsCursor, aiResultIds, aiResultSummary } from './ai-results.js';
 import { aiFailure, aiErrorFromCode, safeAiError, encryptAiKey, decryptAiKey, type AiEnvironment } from './ai-security.js';
 import { PinnedAiProvider, type AiProvider, type AiMessage, type AiProviderConfig } from './ai-provider.js';
 import { AI_PROMPT_VERSION, AI_MAX_CALLS, prepareAiDocument, detectAiLanguage, segmentBatches, splitAiText,
@@ -21,9 +22,10 @@ export function aiJobDto(row: Row): AiJob {
     totalChunks: row.total_chunks, detectedLanguage: row.detected_language, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
     ...(row.result ? { result: row.result } : {}), ...(row.error_code ? { error: (() => { const e = aiErrorFromCode(row.error_code); return { code: e.code, message: e.message }; })() } : {}) };
 }
-async function transaction<T>(db: DB, task: (sql: SQL) => Promise<T>): Promise<T> {
+async function transaction<T>(db: DB, task: (sql: SQL) => Promise<T>, readOnly = false): Promise<T> {
   return withConnection(db, async sql => {
-    await sql`BEGIN`;
+    if (readOnly) await sql`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+    else await sql`BEGIN`;
     try { await sql`SET LOCAL lock_timeout='5s'`; await sql`SET LOCAL statement_timeout='15s'`; const result = await task(sql); await sql`COMMIT`; return result; }
     catch (error) { await sql`ROLLBACK`; throw error; }
   });
@@ -42,7 +44,8 @@ export class AiService {
     this.destinations = new PinnedAiProvider(environment); this.provider = provider ?? this.destinations;
   }
   private async account(sql: SQL, owner: string, lock = false): Promise<void> {
-    const rows = lock ? await sql`SELECT is_demo,disabled FROM users WHERE id=${owner} FOR UPDATE`
+    // Serialize AI/account mutation without blocking child FK key-share checks held after article locks.
+    const rows = lock ? await sql`SELECT is_demo,disabled FROM users WHERE id=${owner} FOR NO KEY UPDATE`
       : await sql`SELECT is_demo,disabled FROM users WHERE id=${owner}`;
     if (!rows.length || rows[0].disabled) throw aiFailure('AI_NOT_FOUND');
     if (rows[0].is_demo) throw aiFailure('AI_DEMO');
@@ -121,7 +124,7 @@ export class AiService {
       await sql`SELECT pg_advisory_xact_lock(71244009)`;
       await this.account(sql, owner, true);
       await this.providerConfig(sql, owner);
-      const [config] = await sql`SELECT revision,target_language FROM ai_configs WHERE user_id=${owner}`;
+      const [config] = await sql`SELECT revision,model,target_language FROM ai_configs WHERE user_id=${owner}`;
       const snapshot = await this.snapshot(sql, owner, articleId, input.mode);
       if (input.contentHash !== undefined && input.contentHash !== snapshot.contentHash) throw aiFailure('AI_STALE_SOURCE');
       const document = prepareAiDocument(snapshot.html, snapshot.title, input.operation);
@@ -135,17 +138,13 @@ export class AiService {
       }
       const [previous] = await sql`SELECT * FROM ai_jobs WHERE user_id=${owner} AND cache_key=${key} ORDER BY created_at DESC,id DESC LIMIT 1`;
       if (!input.force && previous) {
-        if (['succeeded', 'skipped'].includes(previous.status) && new Date(previous.updated_at).getTime() > Date.now() - 7 * 86400000) return { job: aiJobDto(previous), cached: true };
+        if (['succeeded', 'skipped'].includes(previous.status)) return { job: aiJobDto(previous), cached: true };
         if (['failed', 'cancelled'].includes(previous.status)) throw aiFailure('AI_INTERRUPTED');
       }
       const [counts] = await sql`SELECT count(*)::integer AS total,count(*) FILTER(WHERE user_id=${owner})::integer AS owned FROM ai_jobs WHERE status IN ('queued','running')`;
       if (counts.total >= 128 || counts.owned >= 8) throw aiFailure('AI_QUEUE_FULL');
-      // Cap retained jobs as well as active work. Cleanup never touches the source or notes.
-      await sql`DELETE FROM ai_jobs WHERE id IN (SELECT id FROM ai_jobs WHERE user_id=${owner} AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC OFFSET 127)`;
-      const [retained] = await sql`SELECT count(*)::integer AS total FROM ai_jobs`;
-      if (retained.total >= 4096) await sql`DELETE FROM ai_jobs WHERE id IN (SELECT id FROM ai_jobs WHERE status NOT IN ('queued','running') ORDER BY updated_at,id LIMIT 128)`;
-      const [row] = await sql`INSERT INTO ai_jobs(id,user_id,article_id,mode,content_hash,snapshot_hash,cache_key,config_revision,prompt_version,operation,target_language,source_html,source_title,source_url,total_chunks)
-        VALUES(${id()},${owner},${articleId},${input.mode},${snapshot.contentHash},${snapshot.snapshotHash},${key},${config.revision},${AI_PROMPT_VERSION},${input.operation},${language},${snapshot.html},${snapshot.title},${snapshot.url},${document.segments.length}) RETURNING *`;
+      const [row] = await sql`INSERT INTO ai_jobs(id,user_id,article_id,mode,content_hash,snapshot_hash,cache_key,config_revision,model,prompt_version,operation,target_language,source_html,source_title,source_url,total_chunks)
+        VALUES(${id()},${owner},${articleId},${input.mode},${snapshot.contentHash},${snapshot.snapshotHash},${key},${config.revision},${config.model},${AI_PROMPT_VERSION},${input.operation},${language},${snapshot.html},${snapshot.title},${snapshot.url},${document.segments.length}) RETURNING *`;
       return { job: aiJobDto(row), cached: false };
     });
   }
@@ -157,21 +156,63 @@ export class AiService {
   }
   async getJob(owner: string, jobId: string): Promise<AiJob> {
     return transaction(this.db, async sql => {
+      await this.account(sql, owner, true);
       const [row] = await sql`SELECT * FROM ai_jobs WHERE id=${jobId} AND user_id=${owner}`;
       if (!row) throw aiFailure('AI_NOT_FOUND');
+      if (['failed', 'cancelled'].includes(row.status)) return aiJobDto(row);
       try { await this.assertFresh(sql, row); }
       catch (error) {
-        if (row.status !== 'cancelled') {
-          const safe = safeAiError(error);
-          const [updated] = await sql`UPDATE ai_jobs SET status='failed',stage='stale',result=NULL,error_code=${safe.code},lease_token=NULL,lease_until=NULL,updated_at=now()
-            WHERE id=${jobId} AND user_id=${owner} AND status<>'cancelled' RETURNING *`;
-          if (updated) return aiJobDto(updated);
-        }
+        const safe = safeAiError(error);
+        // Current-reader fencing must not erase or rewrite permanent historical results.
+        if (['succeeded', 'skipped'].includes(row.status)) return aiJobDto({ ...row, status: 'failed', stage: 'stale', result: null, error_code: safe.code });
+        const [updated] = await sql`UPDATE ai_jobs SET status='failed',stage='stale',result=NULL,error_code=${safe.code},lease_token=NULL,lease_until=NULL,updated_at=now()
+          WHERE id=${jobId} AND user_id=${owner} AND status IN ('queued','running') RETURNING *`;
+        if (updated) return aiJobDto(updated);
       }
-      // Cancellation/config writes can race the initial read; return the latest fenced row, not a stale result.
+      // Cancellation can race the initial read; return the latest fenced row, not a stale result.
       const [latest] = await sql`SELECT * FROM ai_jobs WHERE id=${jobId} AND user_id=${owner}`;
       if (!latest) throw aiFailure('AI_NOT_FOUND');
       return aiJobDto(latest);
+    });
+  }
+  async listResults(owner: string, value: unknown): Promise<{ items: AiResultSummary[]; total: number; nextCursor: string | null }> {
+    const query = aiResultsQuery(owner, value);
+    return transaction(this.db, async sql => {
+      await this.account(sql, owner);
+      const terminal = sql`user_id=${owner} AND status NOT IN ('queued','running')`;
+      const [count] = await sql`SELECT count(*)::text AS total FROM ai_jobs WHERE ${terminal}`;
+      const total = Number(count.total);
+      if (!Number.isSafeInteger(total)) throw aiFailure('AI_LIMIT');
+      const after = query.cursor ? sql`AND (created_at,id)<(${query.cursor.date}::text::timestamptz,${query.cursor.id}::uuid)` : sql``;
+      // Metadata only. The cursor retains PostgreSQL microseconds, never a JS Date roundtrip.
+      const rows = await sql`SELECT id,article_id,source_title,mode,content_hash,operation,target_language,status,model,
+        to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_text,
+        to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_text
+        FROM ai_jobs WHERE ${terminal} ${after} ORDER BY created_at DESC,id DESC LIMIT ${query.limit + 1}`;
+      const visible = rows.slice(0, query.limit), last = visible.at(-1);
+      return { items: visible.map(aiResultSummary), total,
+        nextCursor: rows.length > query.limit && last ? aiResultsCursor(owner, last.created_at_text, last.id) : null };
+    }, true);
+  }
+  /** Explicit historical access: identity/results remain those of the stored terminal snapshot. */
+  async getResult(owner: string, jobId: string): Promise<AiJob> {
+    return transaction(this.db, async sql => {
+      await this.account(sql, owner);
+      const [row] = await sql`SELECT * FROM ai_jobs WHERE id=${jobId} AND user_id=${owner} AND status NOT IN ('queued','running')`;
+      if (!row) throw aiFailure('AI_NOT_FOUND');
+      return aiJobDto(row);
+    }, true);
+  }
+  async deleteResults(owner: string, value: unknown): Promise<{ deleted: number }> {
+    const ids = aiResultIds(value);
+    return transaction(this.db, async sql => {
+      await this.account(sql, owner, true);
+      // Serialize with publications and lock the whole selected set before deleting any record.
+      const rows = await sql`SELECT id,status FROM ai_jobs WHERE user_id=${owner} AND id IN ${sql(ids)} ORDER BY id FOR UPDATE`;
+      if (rows.length !== ids.length || rows.some(row => ['queued', 'running'].includes(row.status))) throw aiFailure('AI_RESULT_SELECTION');
+      const deleted = await sql`DELETE FROM ai_jobs WHERE user_id=${owner} AND id IN ${sql(ids)} AND status NOT IN ('queued','running') RETURNING id`;
+      if (deleted.length !== ids.length) throw aiFailure('AI_RESULT_SELECTION');
+      return { deleted: deleted.length };
     });
   }
   async cancel(owner: string, jobId: string): Promise<AiJob> {
@@ -183,7 +224,6 @@ export class AiService {
   async recoverExpired(): Promise<void> {
     await this.db`UPDATE ai_jobs SET status='failed',stage='interrupted',result=NULL,error_code='AI_INTERRUPTED',lease_token=NULL,lease_until=NULL,updated_at=now()
       WHERE status='running' AND lease_until<=now() AND id IN (SELECT id FROM ai_jobs WHERE status='running' AND lease_until<=now() ORDER BY lease_until,id LIMIT 128)`;
-    await this.db`DELETE FROM ai_jobs WHERE id IN (SELECT id FROM ai_jobs WHERE status NOT IN ('queued','running') AND updated_at<now()-interval '7 days' ORDER BY updated_at,id LIMIT 128)`;
   }
   async claim(): Promise<Row | undefined> {
     return transaction(this.db, async sql => {

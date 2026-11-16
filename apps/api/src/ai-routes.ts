@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { AiService } from './ai.js';
+import { ApiFailure } from './core.js';
 import { aiFailure, safeAiError } from './ai-security.js';
 
 /** Install AFTER Auth.install so every endpoint inherits session, Origin and CSRF checks. */
@@ -22,10 +23,11 @@ export function installAiRoutes(root: FastifyInstance, ai: AiService, options: {
         CSRF: { status: 403, message: 'Missing or invalid CSRF token' },
         RATE_LIMIT: { status: 429, message: 'Too many requests; retry later' },
       };
-      const auth = authErrors[error.code];
-      if (auth) return reply.code(auth.status).send({ error: { code: error.code, message: auth.message } });
+      const code = error instanceof ApiFailure ? error.code : undefined;
+      const auth = code && Object.hasOwn(authErrors, code) ? authErrors[code] : undefined;
+      if (code && auth) return reply.code(auth.status).send({ error: { code, message: auth.message } });
       const safe = safeAiError(error);
-      if ((error as { statusCode?: number }).statusCode === 413) return reply.code(413).send({ error: { code: 'AI_LIMIT', message: 'The AI request exceeds the size limit' } });
+      if (typeof error === 'object' && error !== null && 'statusCode' in error && error.statusCode === 413) return reply.code(413).send({ error: { code: 'AI_LIMIT', message: 'The AI request exceeds the size limit' } });
       return reply.code(safe.statusCode).send({ error: { code: safe.code, message: safe.message } });
     });
     app.addHook('onRequest', async (request, reply) => {
@@ -51,6 +53,9 @@ export function installAiRoutes(root: FastifyInstance, ai: AiService, options: {
       const result = await ai.enqueue(owner(request), resource(request), request.body);
       reply.code(result.cached ? 200 : 202); return { job: result.job };
     });
+    app.get('/api/ai/results', request => ai.listResults(owner(request), request.query));
+    app.get('/api/ai/results/:id', async request => ({ job: await ai.getResult(owner(request), resource(request)) }));
+    app.delete('/api/ai/results', outbound, request => ai.deleteResults(owner(request), request.body));
     app.get('/api/ai/jobs/:id', async request => ({ job: await ai.getJob(owner(request), resource(request)) }));
     app.delete('/api/ai/jobs/:id', async (request, reply) => {
       const job = await ai.cancel(owner(request), resource(request));

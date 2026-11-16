@@ -23,6 +23,14 @@
 .ai-bilingual .feedink-ai-target { padding-inline-start:12px; border-inline-start:2px solid var(--line); margin-block-start:12px; }
 .ai-settings fieldset { border:0; padding:0; margin:0; min-width:0; }
 .ai-settings .field { margin-block:16px; }
+.ai-results-management { margin-block-start:20px; border-block-start:1px solid var(--line); padding-block-start:8px; min-width:0; }
+.ai-results { min-width:0; overflow-wrap:anywhere; }
+.ai-result-list { list-style:none; padding:0; margin:12px 0; }
+.ai-result-list>li { border-block-end:1px solid var(--line); }
+.ai-result-row { display:flex; gap:10px; align-items:flex-start; min-height:44px; padding-block:12px; cursor:pointer; }
+.ai-result-row>input { flex:none; margin-block-start:4px; }
+.ai-result-row>span { min-width:0; }
+.ai-result-meta { display:block; font-size:12px; color:var(--muted); line-height:1.7; }
 @container(max-width:360px) { .reader-pane .reader-ai-toolbar { gap:2px; padding-inline:6px; } .ai-card { padding:10px; } }
 :root[data-theme=eink] .ai-card { border:2px solid #000; border-radius:0; }
 :root[data-theme=eink] .ai-bilingual .feedink-ai-target { border-color:#000; }

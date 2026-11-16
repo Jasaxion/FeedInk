@@ -1,6 +1,7 @@
 // Hosted-only synthetic UI acceptance. Build the integrated web/shared/ink workspaces first.
 import assert from 'node:assert/strict';
 import { aiFixture } from './ai-fixture.mjs';
+import { aiResultsRegressions } from './ai-results-browser.mjs';
 import { deferred, emptyAnnotationDocument } from './audit-fixture.mjs';
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('AI browser fixtures run only on approved GitHub-hosted runners.');
 const { chromium, webkit, expect } = await import(process.env.FEEDINK_PLAYWRIGHT_MODULE || '@playwright/test');
@@ -280,4 +281,14 @@ try {
     await expect(page.getByTestId('ai-card')).toContainText('演示账号不能调用'); assert.equal(ai.calls.length, 0);
     await inAppPath(page, '/settings/ai'); await expect(page.getByRole('form', { name: 'AI 模型设置' })).toContainText('演示账号不能配置密钥'); assert.equal(ai.calls.length, 0);
   }, async ({ fixture }) => { fixture.control.user.isDemo = true; });
+  await scenario('webpage mode is rejected by the displayed-source gate without AI requests', async ({ page, ai }) => {
+    await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+    await page.getByRole('button', { name: '正文与排版', exact: true }).click();
+    await page.getByLabel('正文模式', { exact: true }).selectOption('webpage');
+    await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+    await page.getByRole('button', { name: 'AI 摘要', exact: true }).click();
+    await expect(page.getByTestId('ai-card')).toContainText('AI 只处理已归档正文');
+    assert.equal(ai.calls.length, 0); assert.equal(ai.providerCalls, 0);
+  });
+  await aiResultsRegressions(browser, expect);
 } finally { await browser.close(); }

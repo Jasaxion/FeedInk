@@ -10,6 +10,21 @@ export interface AiConfig {
   revision: number;
   updatedAt: string | null;
 }
+/** Stored terminal job metadata; listing never includes source bodies, results or credentials. */
+export interface AiResultSummary {
+  id: string;
+  articleId: string;
+  sourceTitle: string;
+  mode: 'feed' | 'fulltext';
+  contentHash: string;
+  operation: AiOperation;
+  targetLanguage: AiLanguage;
+  status: 'succeeded' | 'skipped' | 'failed' | 'cancelled';
+  /** Provider model captured when the job was enqueued, not the current configuration. */
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+}
 export interface AiJob {
   id: string;
   articleId: string;

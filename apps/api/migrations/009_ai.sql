@@ -18,6 +18,7 @@ CREATE TABLE ai_jobs (
   snapshot_hash text NOT NULL CHECK (snapshot_hash ~ '^[a-f0-9]{64}$'),
   cache_key text NOT NULL CHECK (cache_key ~ '^[a-f0-9]{64}$'),
   config_revision integer NOT NULL,
+  model text NOT NULL CHECK (length(model) BETWEEN 1 AND 200),
   prompt_version text NOT NULL,
   operation text NOT NULL CHECK (operation IN ('summary','translate')),
   target_language text NOT NULL CHECK (target_language IN ('zh-CN','en','ja','ko','fr','de','es')),
@@ -46,7 +47,8 @@ CREATE UNIQUE INDEX ai_jobs_active_key ON ai_jobs(user_id,cache_key) WHERE statu
 CREATE INDEX ai_jobs_queue ON ai_jobs(created_at,id) WHERE status='queued';
 CREATE INDEX ai_jobs_leases ON ai_jobs(lease_until,id) WHERE status='running';
 CREATE INDEX ai_jobs_owner_active ON ai_jobs(user_id,status) WHERE status IN ('queued','running');
-CREATE INDEX ai_jobs_cache ON ai_jobs(user_id,cache_key,created_at DESC,id) WHERE status IN ('succeeded','skipped');
-CREATE INDEX ai_jobs_terminal_cleanup ON ai_jobs(updated_at,id) WHERE status NOT IN ('queued','running');
-CREATE INDEX ai_jobs_owner_history ON ai_jobs(user_id,created_at,id);
+-- Point cache lookup remains selective as permanent terminal history grows.
+CREATE INDEX ai_jobs_key_history ON ai_jobs(user_id,cache_key,created_at DESC,id DESC);
+-- Metadata pagination and exact owned terminal totals; no age or count based eviction.
+CREATE INDEX ai_jobs_owner_results ON ai_jobs(user_id,created_at DESC,id DESC) WHERE status NOT IN ('queued','running');
 CREATE INDEX ai_jobs_article_owner ON ai_jobs(article_id,user_id);

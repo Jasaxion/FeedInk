@@ -102,8 +102,8 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
       const created = await request(a, 'POST', `/api/articles/${source}/ai`, { operation: 'summary', mode: 'feed', contentHash: context.contentHash });
       assert.equal(created.statusCode, 202); assert.equal(created.json().job.contentHash, context.contentHash);
       const job = created.json().job;
-      await assert.rejects(() => db`INSERT INTO ai_jobs(id,user_id,article_id,mode,content_hash,snapshot_hash,cache_key,config_revision,prompt_version,operation,target_language,source_html,source_title,source_url)
-        SELECT ${randomUUID()},${b.id},article_id,mode,content_hash,snapshot_hash,cache_key,config_revision,prompt_version,operation,target_language,source_html,source_title,source_url FROM ai_jobs WHERE id=${job.id}`, hasCode('23503'));
+      await assert.rejects(() => db`INSERT INTO ai_jobs(id,user_id,article_id,mode,content_hash,snapshot_hash,cache_key,config_revision,model,prompt_version,operation,target_language,source_html,source_title,source_url)
+        SELECT ${randomUUID()},${b.id},article_id,mode,content_hash,snapshot_hash,cache_key,config_revision,model,prompt_version,operation,target_language,source_html,source_title,source_url FROM ai_jobs WHERE id=${job.id}`, hasCode('23503'));
       assert.equal((await request(b, 'GET', `/api/ai/jobs/${job.id}`)).statusCode, 404);
       assert.equal((await request(b, 'DELETE', `/api/ai/jobs/${job.id}`)).statusCode, 404);
       assert.equal((await request(a, 'DELETE', `/api/ai/jobs/${job.id}`, undefined, { 'x-csrf-token': '' })).statusCode, 403);
@@ -202,7 +202,7 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
       assert.equal(fixture.requests.length, before + 1, 'stale worker cannot issue a paid call or publish');
       assert.equal((await ai.getJob(a.id, retry.job.id)).status, 'failed');
     });
-    await t.test('bounded owner admission, globally shared claims, cleanup and lifecycle drain', async () => {
+    await t.test('bounded owner admission, globally shared claims, no age eviction and lifecycle drain', async () => {
       const queued: string[] = [];
       for (let i = 0; i < 8; i++) queued.push((await ai.enqueue(a.id, await article(a), { operation: 'summary', mode: 'feed' })).job.id);
       const ninth = await article(a); await assert.rejects(() => ai.enqueue(a.id, ninth, { operation: 'summary', mode: 'feed' }), hasCode('AI_QUEUE_FULL'));
@@ -212,7 +212,7 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
       assert.equal(new Set(claimed.map(r => r?.user_id)).size, 2); assert.equal(await peer.claim(), undefined);
       for (const job of queued) await ai.cancel(a.id, job); await ai.cancel(b.id, other.job.id);
       await db`UPDATE ai_jobs SET updated_at=now()-interval '8 days' WHERE id=${other.job.id}`; await ai.recoverExpired();
-      assert.equal((await db`SELECT id FROM ai_jobs WHERE id=${other.job.id}`).length, 0);
+      assert.equal((await db`SELECT id FROM ai_jobs WHERE id=${other.job.id}`).length, 1);
       const source = await article(b), pending = await peer.enqueue(b.id, source, { operation: 'summary', mode: 'feed' });
       fixture.setBehavior('hold'); const start = fixture.requests.length; await peer.tick();
       await eventually(() => fixture.requests.length > start);

@@ -5,6 +5,7 @@ import { useApp } from './context';
 import { authEpoch } from './authEpoch';
 import { Field, Toggle } from './components';
 import { aiRequestError, useAiIdentity } from './aiIdentity';
+import { AiResults } from './AiResults';
 import './ai.css';
 
 export const AI_LANGUAGES: ReadonlyArray<readonly [AiLanguage, string]> = [
@@ -55,7 +56,7 @@ function AiSettingsSession() {
     });
   }
   if (locked || !isCurrent()) return null;
-  return <form className="settings-form ai-settings" onSubmit={save} aria-label="AI 模型设置">
+  return <section className="settings-form ai-settings"><form onSubmit={save} aria-label="AI 模型设置">
     <h3>可选 AI 阅读</h3>
     <p className="muted">仅在明确请求时处理所选正文，不自动处理文章库。服务端保存每账号独立配置，密钥保存后不再显示。</p>
     {app.session.user.isDemo ? <p role="status">演示账号不能配置密钥或调用 AI。</p> : !app.online && <p role="status">离线时无法读取或保存 AI 配置。未保存的输入仍保留在此页。</p>}
@@ -74,5 +75,5 @@ function AiSettingsSession() {
         <button type="button" className="secondary" disabled={busy || !available || !config.enabled || !config.hasKey} onClick={() => void run(async signal => { await api('/ai/config/test', { method: 'POST', signal }); if (isCurrent()) setMessage('已保存配置的连接测试成功。'); })}>测试已保存配置（会发送请求）</button></div>
       <p className="muted small">测试使用已保存配置，不使用未保存的输入；会向模型服务发送一次最小请求，可能产生费用。</p>
     </>}
-  </form>;
+  </form><AiResults /></section>;
 }
