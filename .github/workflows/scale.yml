@@ -8,6 +8,9 @@ on:
       publish_evidence:
         type: boolean
         default: false
+      search_indexes:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       tier:
@@ -17,6 +20,10 @@ on:
         default: '10000'
       publish_evidence:
         description: Explicitly publish synthetic structured plans/metrics (no raw logs)
+        type: boolean
+        default: false
+      search_indexes:
+        description: Compare additive search indexes on the same 10k fixture only
         type: boolean
         default: false
 permissions:
@@ -49,6 +56,8 @@ jobs:
       NODE_ENV: test
       TEST_DATABASE_URL: postgresql://scale_ci:ephemeral_scale_only@127.0.0.1:5432/scale_ci
       SCALE_ARTICLES: ${{ matrix.tier }}
+      SCALE_SEARCH_INDEXES: ${{ inputs.search_indexes && 'compare' || '' }}
+      SEARCH_INDEXES_TEST: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -1,0 +1,212 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { readFile, readdir } from 'node:fs/promises';
+import postgres from 'postgres';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { ArticleQuery } from '@feedink/shared';
+import { Articles } from '../src/articles.js';
+import { createMcpServer } from '../src/mcp.js';
+import { hash, migrate, type Store } from '../src/core.js';
+import type { Annotations } from '../src/annotations.js';
+
+const hosted = process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted';
+const enabled = hosted && process.env.TEST_DATABASE_URL && process.env.SEARCH_INDEXES_TEST === '1';
+const migration = new URL('../migrations/010_search_indexes.sql', import.meta.url);
+const indexNames = ['articles_content_text_trgm', 'articles_title_trgm', 'articles_url_trgm'];
+
+// Opt-in: needs CREATE DATABASE/CREATEROLE on a disposable hosted PostgreSQL.
+// Separate databases test extension placement without moving/dropping a shared extension.
+test('010_search_indexes: exact API/MCP parity, extension schemas, transactional failure and source/CAS preservation', {
+  skip: !enabled, timeout: 180000,
+}, async t => {
+  const admin = postgres(process.env.TEST_DATABASE_URL!, { max: 1, connection: { statement_timeout: '20000', lock_timeout: '3000' }, onnotice: () => {} });
+  const role = `search_restricted_${randomUUID().replaceAll('-', '')}`;
+  try {
+    await admin.unsafe(`CREATE ROLE ${role} NOLOGIN`);
+    for (const layout of ['install-public', 'existing-private'] as const) await t.test(layout, async () => {
+      const database = `search_test_${randomUUID().replaceAll('-', '')}`;
+      const schema = 'search_app', extensionSchema = 'search extension';
+      const url = new URL(process.env.TEST_DATABASE_URL!); url.pathname = `/${database}`;
+      await admin.unsafe(`CREATE DATABASE ${database} TEMPLATE template0`);
+      const setup = postgres(url.toString(), { max: 1, onnotice: () => {} });
+      const db = postgres(url.toString(), { max: 4, connection: { search_path: schema, statement_timeout: '20000', lock_timeout: '3000' }, onnotice: () => {} });
+      const articles = new Articles(db);
+      const owner = randomUUID(), other = randomUUID(), feed = randomUUID(), dormant = randomUUID();
+      const subscription = randomUUID(), folder = randomUUID(), tag = randomUUID(), foreignTag = randomUUID();
+      const clients: Client[] = [], servers: ReturnType<typeof createMcpServer>[] = [];
+      try {
+        await setup.unsafe(`CREATE SCHEMA ${schema}`);
+        await setup.unsafe(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+        if (layout === 'existing-private') {
+          await setup.unsafe(`CREATE SCHEMA "${extensionSchema}"`);
+          await setup.unsafe(`CREATE EXTENSION pg_trgm WITH SCHEMA "${extensionSchema}"`);
+        }
+        await db`CREATE TABLE schema_migrations(name text PRIMARY KEY,checksum text NOT NULL,applied_at timestamptz NOT NULL DEFAULT now())`;
+        const directory = new URL('../migrations/', import.meta.url);
+        for (const name of (await readdir(directory)).filter(n => n.endsWith('.sql') && n < '010_search_indexes.sql').sort()) {
+          const source = await readFile(new URL(name, directory), 'utf8');
+          await db.begin(async sql => {
+            await sql.unsafe(source);
+            await sql`INSERT INTO schema_migrations(name,checksum) VALUES(${name},${hash(source)})`;
+          });
+        }
+        for (const id of [owner, other]) await db`INSERT INTO users(id,email,name,password_hash) VALUES(${id},${id + '@example.invalid'},'Synthetic','disabled')`;
+        await db`INSERT INTO folders(id,user_id,name) VALUES(${folder},${owner},'Synthetic')`;
+        for (const id of [feed, dormant]) await db`INSERT INTO feeds(id,user_id,url,title) VALUES(${id},${owner},${'https://example.invalid/' + id},'Synthetic')`;
+        await db`INSERT INTO subscriptions(id,user_id,feed_id,folder_id,title) VALUES(${subscription},${owner},${feed},${folder},'Synthetic')`;
+        await db`INSERT INTO tags(id,user_id,name) VALUES(${tag},${owner},'Synthetic'),(${foreignTag},${other},'Foreign')`;
+        const fixture = [
+          ['TitleNeedle', 'neutral', 'plain'],
+          ['neutral', 'BodyNeedle', 'plain'],
+          ['orbit', 'distant launch', 'plain'], // FTS-only: no contiguous "orbit launch".
+          ['中文語 école Ελληνικά', 'x', 'plain'],
+          ['literal %', 'neutral', 'plain'],
+          ['literal _', 'neutral', 'plain'],
+          ['literal \\', 'neutral', 'plain'],
+          ['neutral', 'neutral', 'urlneedle%_\\'],
+          ['literal decoy', '100ABZ aXb', 'plain'],
+          ['100%_\\ a%b a_b', 'neutral', 'plain'],
+          ['TitleNeedle', 'BodyNeedle', 'plain'],
+          ['', '', 'plain'],
+        ];
+        const ids: string[][] = [];
+        for (const [account, userId] of [owner, other].entries()) {
+          ids[account] = [];
+          for (const [i, [title, body, urlPart]] of fixture.entries()) {
+            const id = randomUUID(); ids[account].push(id);
+            await db`INSERT INTO articles(id,user_id,feed_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash,read,saved)
+              VALUES(${id},${userId},${account || i % 3 === 0 ? null : i % 3 === 1 ? feed : dormant},${id},'Synthetic',${title},${'https://example.invalid/' + urlPart},
+                '2026-01-01'::timestamptz + ${i % 3} * interval '1 microsecond',${'<p>' + body + '</p>'},${body},${hash(body)},${i % 2 === 0},${i % 3 === 0})`;
+            if (!account && i % 2 === 0) await db`INSERT INTO article_tags(article_id,tag_id) VALUES(${id},${tag})`;
+          }
+        }
+        const tools = new Map<string, Client>();
+        for (const userId of [owner, other]) {
+          const server = createMcpServer(db, {} as Store, {} as Annotations, { userId, tokenId: randomUUID(), scopes: ['articles:read'] });
+          const client = new Client({ name: 'search-index-parity', version: '1.0.0' });
+          servers.push(server); clients.push(client);
+          const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+          await server.connect(serverTransport); await client.connect(clientTransport); tools.set(userId, client);
+        }
+        const mcpPage = async (userId: string, query: string, offset = 0, limit = 2) => {
+          const result = await tools.get(userId)!.callTool({ name: 'search_articles', arguments: { query, offset, limit } });
+          assert.ok(!result.isError);
+          return result.structuredContent as { total: number; items: { articleId: string; sourceUrl: string }[]; nextOffset: number | null };
+        };
+        const queries = ['', ' ', 'titleneedle', 'BodyNeedle', 'orbit launch', '中文', '文', 'école', 'Ελληνικά', 'x', '%', '_', '\\', '100%_\\', 'a%b', 'a_b', 'urlneedle', 'never-occurs'];
+        const snapshot = async () => {
+          const results: unknown[] = [];
+          for (const userId of [owner, other]) for (const q of queries) {
+            for (const sort of ['newest', 'oldest'] as const) {
+              const query: ArticleQuery = { scope: 'archive', q, sort, limit: 2 };
+              const seen: string[] = [], pages = []; let cursor: string | undefined;
+              const complete = await articles.page(userId, { ...query, limit: 100 });
+              do {
+                const page = await articles.page(userId, { ...query, cursor });
+                assert.equal(page.total, complete.total);
+                seen.push(...page.items.map(a => a.id)); pages.push(page);
+                assert.ok(pages.length <= fixture.length + 1, 'cursor must terminate');
+                cursor = page.nextCursor || undefined;
+              } while (cursor);
+              assert.deepEqual(seen, complete.items.map(a => a.id));
+              assert.equal(new Set(seen).size, complete.total);
+              assert.ok(seen.every(id => ids[userId === owner ? 0 : 1].includes(id)));
+              results.push(pages);
+            }
+            const complete = await mcpPage(userId, q, 0, 100), pages = [], seen: string[] = [];
+            let offset: number | null = 0;
+            do {
+              const page = await mcpPage(userId, q, offset);
+              assert.equal(page.total, complete.total); pages.push(page); seen.push(...page.items.map(a => a.articleId));
+              assert.ok(pages.length <= fixture.length + 1, 'offset must terminate'); offset = page.nextOffset;
+            } while (offset !== null);
+            assert.deepEqual(seen, complete.items.map(a => a.articleId));
+            assert.equal(new Set(seen).size, complete.total);
+            assert.ok(seen.every(id => ids[userId === owner ? 0 : 1].includes(id)));
+            results.push(pages);
+          }
+          for (const scope of ['archive', 'all', 'unread', 'saved'] as const) for (const filter of [{}, { subscriptionId: subscription }, { folderId: folder }, { tagId: tag }, { tagId: foreignTag }, { after: '2026-01-01T00:00:00Z' }, { before: '2026-01-02T00:00:00Z' }]) {
+            results.push(await articles.page(owner, { scope, ...filter, q: 'TitleNeedle' }));
+            assert.equal((await articles.page(other, { scope, ...filter, subscriptionId: subscription, q: 'TitleNeedle' })).total, 0);
+          }
+          // Hand-checked cases supplement parity: escaping must not act as wildcards;
+          // API retains FTS union semantics, while MCP remains literal + source URL only.
+          for (const [q, expected] of [['%', [4, 9]], ['_', [5, 9]], ['\\', [6, 9]], ['orbit launch', [2]], ['urlneedle', []]] as const) {
+            const page = await articles.page(owner, { scope: 'archive', q });
+            assert.deepEqual(page.items.map(a => a.id).sort(), expected.map(i => ids[0][i]).sort());
+          }
+          assert.equal((await mcpPage(owner, 'orbit launch')).total, 0);
+          assert.deepEqual((await mcpPage(owner, 'urlneedle')).items.map(a => a.articleId), [ids[0][7]]);
+          return results;
+        };
+        const before = await snapshot();
+        const sources = await db`SELECT row_to_json(a)::text AS source,ctid::text,xmin::text FROM articles a ORDER BY id`;
+        const [{ relfilenode }] = await db`SELECT relfilenode FROM pg_class WHERE oid='articles'::regclass`;
+        const source = await readFile(migration, 'utf8');
+        await assert.rejects(db.begin(async sql => {
+          await sql.unsafe(`SET LOCAL ROLE ${role}`);
+          await sql.unsafe(source);
+        }), (error: any) => error.code === '42501' && /pg_trgm/.test(error.message));
+        assert.equal((await db`SELECT 1 FROM schema_migrations WHERE name='010_search_indexes.sql'`).length, 0);
+        if (layout === 'install-public') {
+          // An actual conflicting writer lock must time out and leave no partial DDL/checksum.
+          await setup`BEGIN`;
+          try {
+            await setup.unsafe(`LOCK TABLE ${schema}.articles IN ROW EXCLUSIVE MODE`);
+            await assert.rejects(migrate(db), (error: any) => error.code === '55P03');
+          } finally { await setup`ROLLBACK`; }
+          assert.equal((await db`SELECT 1 FROM schema_migrations WHERE name='010_search_indexes.sql'`).length, 0);
+          assert.equal((await db`SELECT 1 FROM pg_indexes WHERE schemaname=${schema} AND indexname IN ${db(indexNames)}`).length, 0);
+        } else {
+          // Fail on the third build: the preceding two indexes must roll back,
+          // not leave a partially indexed schema or trust an unrelated namesake.
+          await db`CREATE INDEX articles_url_trgm ON articles(id)`;
+          await assert.rejects(migrate(db), (error: any) => error.code === '42P07');
+          assert.equal((await db`SELECT 1 FROM schema_migrations WHERE name='010_search_indexes.sql'`).length, 0);
+          const remaining = await db`SELECT indexname FROM pg_indexes WHERE schemaname=${schema} AND indexname IN ${db(indexNames)}`;
+          assert.deepEqual(remaining.map(i => i.indexname), ['articles_url_trgm']);
+          await db`DROP INDEX articles_url_trgm`;
+        }
+        await migrate(db);
+        const applied = await db`SELECT * FROM schema_migrations WHERE name='010_search_indexes.sql'`;
+        assert.equal(applied[0].checksum, hash(source));
+        await migrate(db); // checksum runner idempotence, not IF NOT EXISTS masking a bad index.
+        assert.deepEqual(await db`SELECT * FROM schema_migrations WHERE name='010_search_indexes.sql'`, applied);
+        assert.equal((await db`SHOW search_path`)[0].search_path, schema);
+        const [extension] = await db`SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'`;
+        assert.equal(extension.nspname, layout === 'install-public' ? 'public' : extensionSchema);
+        const indexes = await db`SELECT c.relname,i.indisvalid,i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='articles'::regclass AND c.relname IN ${db([...indexNames, 'articles_search'])} ORDER BY c.relname`;
+        assert.equal(indexes.length, 4); assert.ok(indexes.every(i => i.indisvalid && i.indisready));
+        assert.equal((await db`SELECT relfilenode FROM pg_class WHERE oid='articles'::regclass`)[0].relfilenode, relfilenode);
+        assert.deepEqual(await db`SELECT row_to_json(a)::text AS source,ctid::text,xmin::text FROM articles a ORDER BY id`, sources, 'no source tuple rewrite');
+        await db`ANALYZE articles`;
+        assert.deepEqual(await snapshot(), before, 'exact ordered API/MCP pages and totals before/after');
+        // Indexability only, NOT a default-planner or latency assertion on a tiny fixture.
+        for (const [column, index] of [['title', 'articles_title_trgm'], ['content_text', 'articles_content_text_trgm'], ['url', 'articles_url_trgm']]) {
+          const plan = await db.begin(async sql => {
+            await sql`SET LOCAL enable_seqscan=off`;
+            return sql.unsafe(`EXPLAIN (FORMAT JSON) SELECT id FROM articles WHERE ${column} ILIKE '%needle%'`);
+          });
+          assert.ok(JSON.stringify(plan).includes(index));
+        }
+        const changed = await articles.patch(owner, ids[0][0], { read: false, saved: true }, 0);
+        assert.equal(changed.stateVersion, 1);
+        await assert.rejects(articles.patch(owner, ids[0][0], { read: true }, 0), (e: any) => e.code === 'STATE_CONFLICT');
+        await assert.rejects(articles.patch(other, ids[0][0], { read: true }), (e: any) => e.code === 'NOT_FOUND');
+        const total = (await articles.page(owner, { scope: 'archive', q: 'TitleNeedle' })).total;
+        assert.equal((await articles.bulk(owner, true, undefined, { scope: 'archive', q: 'TitleNeedle' })).updated, total);
+        assert.equal((await db`SELECT scale_audit_counts()::integer AS drift`)[0].drift, 0);
+      } finally {
+        await Promise.all(clients.map(c => c.close()));
+        await Promise.all(servers.map(s => s.close()));
+        await db.end({ timeout: 5 }); await setup.end({ timeout: 5 });
+        await admin.unsafe(`DROP DATABASE ${database} WITH (FORCE)`);
+      }
+    });
+  } finally {
+    await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
+    await admin.end({ timeout: 5 });
+  }
+});
