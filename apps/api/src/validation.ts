@@ -1,6 +1,6 @@
 import { xmlCharacters } from "./metadata.js";
 import { z } from "zod";
-import { DEFAULT_SETTINGS } from "@feedink/shared";
+import { DEFAULT_SETTINGS, isSafeArticleCss } from "@feedink/shared";
 export const uuid = z.uuid();
 export const name = z
   .string()
@@ -39,24 +39,8 @@ export const settingsPatch = z
     hideToolbar: z.boolean(),
     tapToPage: z.boolean(),
     wrapCode: z.boolean(),
-    // Custom CSS is declaration-only: no selectors, URLs, at-rules or DOM overlays.
-    customCss: z
-      .string()
-      .max(2000)
-      .refine(
-        (s) =>
-          !s ||
-          s
-            .split(";")
-            .filter((s) => s.trim())
-            .every(
-              (s) =>
-                /^\s*(color|background-color|font-size|font-family|font-weight|line-height|letter-spacing|text-align|text-indent|word-spacing)\s*:\s*[#\w\s.,%()'"-]+\s*$/i.test(
-                  s,
-                ) && !/(url|expression|var)\s*\(/i.test(s),
-            ),
-        "Only safe typography declarations are accepted",
-      ),
+    // Same restricted article grammar as the browser; no remote resources or page overlays.
+    customCss: z.string().max(2000).refine(isSafeArticleCss, "Only safe article typography rules are accepted"),
     sidebarWidth: z.number().min(180).max(400),
     listWidth: z.number().min(240).max(800),
     speechRate: z.number().min(0.5).max(3),

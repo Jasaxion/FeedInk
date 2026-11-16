@@ -1,6 +1,6 @@
 # Deploying FeedInk
 
-FeedInk targets multi-user self-hosted **Web + installable PWA**, not native apps. React/TypeScript builds into a SPA served by the Node 24 API. PostgreSQL holds accounts, article bodies/state and migration history; an **independent `/data` volume** holds archived image bytes and generated files. Keep both. The behavioral contract in [reference.md](reference.md) is an acceptance target, not a claim that every scenario has passed.
+FeedInk targets multi-user self-hosted **Web + installable PWA**, not native apps. React/TypeScript builds into a SPA served by the Node 24 API. PostgreSQL holds accounts, article bodies/state and migration history; an **independent `/data` volume** holds archived image bytes and generated files. Keep both. The behavioral contract in [product requirements](requirements.md) is an acceptance target, not a claim that every scenario has passed.
 
 ## Requirements
 

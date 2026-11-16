@@ -139,6 +139,13 @@ test(
             a,
           );
           assert.equal(updated.json().name, "Updated reader");
+          const articleCss = "p { letter-spacing:1px } img { padding:40px }";
+          assert.equal((await request("PATCH", "/settings", { customCss: articleCss }, a)).statusCode, 200);
+          assert.equal((await request("GET", "/session", undefined, a)).json().settings.customCss, articleCss);
+          for (const customCss of ["body { color:red }", "p { background-color:url(https://example.invalid/track) }"])
+            assert.equal((await request("PATCH", "/settings", { customCss }, a)).statusCode, 400);
+          assert.equal((await request("GET", "/session", undefined, a)).json().settings.customCss, articleCss);
+          assert.equal((await request("PATCH", "/settings", { customCss: "" }, a)).statusCode, 200);
         },
       );
       let subscription: any, article: any, folder: any, tag: any;

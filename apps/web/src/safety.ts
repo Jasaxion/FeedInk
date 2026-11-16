@@ -1,4 +1,5 @@
 import DOMPurify from 'dompurify';
+import { ARTICLE_CSS_PROPERTIES, isSafeArticleCss } from '@feedink/shared';
 import { ownedAssetUrl, safeExternalUrl } from './logic';
 
 export function sanitizeArticle(html: string, lazyImages = true): string {
@@ -24,13 +25,15 @@ export function sanitizeArticle(html: string, lazyImages = true): string {
   return template.innerHTML;
 }
 
-const properties = new Set(['color', 'background-color', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-align', 'text-decoration', 'text-indent', 'word-break', 'overflow-wrap', 'white-space', 'margin', 'margin-top', 'margin-bottom', 'padding', 'padding-top', 'padding-bottom', 'border', 'border-color', 'border-width', 'border-style', 'border-radius', 'max-width']);
+const properties = ARTICLE_CSS_PROPERTIES;
 /** Parse, whitelist, and scope declarations. No imports, URLs, variables, positioning, or selectors outside article content. */
 export function scopedCss(css: string): string {
   if (!css.trim()) return '';
   if (/[\\@<>]|url\s*\(|expression\s*\(|var\s*\(/i.test(css)) throw new Error('自定义 CSS 不允许 @规则、URL、转义、变量或活动内容');
+  if (!isSafeArticleCss(css)) throw new Error('自定义 CSS 不允许此选择器或属性');
+  const declarationsOnly = !/[{}]/.test(css);
   const sheet = new CSSStyleSheet();
-  sheet.replaceSync(css);
+  sheet.replaceSync(declarationsOnly ? `p{${css}}` : css);
   const output: string[] = [];
   for (const rule of sheet.cssRules) {
     if (!(rule instanceof CSSStyleRule)) throw new Error('只允许正文样式规则');
@@ -42,7 +45,7 @@ export function scopedCss(css: string): string {
       if (!properties.has(property) || /[{};]|(?:fixed|absolute|sticky)/i.test(value)) throw new Error(`不允许样式属性：${property}`);
       declarations.push(`${property}:${value}`);
     }
-    output.push(`${selectors.map(selector => `.article-content ${selector}`).join(',')}{${declarations.join(';')}}`);
+    output.push(`${declarationsOnly ? '.article-content' : selectors.map(selector => `.article-content ${selector}`).join(',')}{${declarations.join(';')}}`);
   }
   return output.join('\n');
 }
