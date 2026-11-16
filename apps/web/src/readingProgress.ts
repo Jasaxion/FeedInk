@@ -12,8 +12,9 @@ export function originalScrollTop(progress: number, scrollHeight: number, client
   return top > block.top ? top + block.height : top;
 }
 function transientReadingBlock(element: HTMLElement): TransientReadingBlock {
-  // The flow-root host contains the card's margins as well as its content. It has
-  // no margins of its own, so source spacing and old no-AI progress stay intact.
+  // Inside the plain metadata wrapper, the host contains only added card content
+  // and its pre-card spacing. The wrapper's original bottom margin still collapses
+  // with the first source block whether AI is open or not; it is not transient.
   const host = element.querySelector<HTMLElement>('[data-reading-transient]');
   const rect = host?.getBoundingClientRect();
   return rect?.height ? { top: rect.top - element.getBoundingClientRect().top - element.clientTop + element.scrollTop, height: rect.height } : { top: 0, height: 0 };

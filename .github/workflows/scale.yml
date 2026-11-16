@@ -62,6 +62,9 @@ jobs:
           npm run build
           npm run typecheck
       - name: Retain existing API acceptance and add scale correctness
+        id: api_acceptance
+        continue-on-error: true
+        timeout-minutes: 15
         run: npm test -w @feedink/api
       - name: Bounded synthetic workload (no upstream services or real content)
         timeout-minutes: 35
@@ -74,3 +77,6 @@ jobs:
           path: ${{ runner.temp }}/scale-evidence-${{ matrix.tier }}/report.json
           retention-days: 7
           if-no-files-found: warn
+      - name: Require the API acceptance gate
+        if: always()
+        run: test '${{ steps.api_acceptance.outcome }}' = success

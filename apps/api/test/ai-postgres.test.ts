@@ -5,12 +5,14 @@ import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import postgres from 'postgres';
 import { Auth } from '../src/auth.js';
-import { hash, migrate, type Config } from '../src/core.js';
+import { hash, migrate, type Config, type Row } from '../src/core.js';
+import type { AiJob } from '@feedink/shared';
+import type { AiMessage } from '../src/ai-provider.js';
 import { Annotations } from '../src/annotations.js';
 import { AiService, DEFAULT_AI_CONFIG } from '../src/ai.js';
 import { installAiRoutes } from '../src/ai-routes.js';
 import { decryptAiKey } from '../src/ai-security.js';
-import { prepareAiDocument, segmentBatches } from '../src/ai-content.js';
+import { prepareAiDocument, segmentBatches, summaryMessages, validateSummary } from '../src/ai-content.js';
 import { aiFixture, hostedAiTests, syntheticAiKey, englishAiParagraph } from './ai-fixture.js';
 
 async function eventually(predicate: () => boolean | Promise<boolean>): Promise<void> {
@@ -47,6 +49,12 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
     const row = await ai.claim(); assert.equal(row?.id, jobId); await ai.runClaimed(row!);
     return (await db`SELECT * FROM ai_jobs WHERE id=${jobId}`)[0];
   };
+  const sourceState = async (source: string) => JSON.stringify({
+    article: await db`SELECT * FROM articles WHERE id=${source}`,
+    images: await db`SELECT * FROM images WHERE article_id=${source} ORDER BY id`,
+    annotations: await db`SELECT * FROM annotations WHERE article_id=${source} ORDER BY id`,
+    contexts: await db`SELECT * FROM annotation_contexts WHERE article_id=${source} ORDER BY mode,content_hash`,
+  });
   try {
     const a = await account(), b = await account(), demo = await account(true);
     await t.test('direct defaults, secret persistence/readback, retain/clear semantics and auth/CSRF/demo rejection', async () => {
@@ -231,6 +239,130 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
           assert.ok(!logs.join('').includes(credential));
         }
       } finally { fixture.setCompletion(); await ai.saveConfig(a.id, input); }
+    });
+    await t.test('final source-lane rejection publishes no result and preserves source, notes and credentials without replay', async () => {
+      const owner = await account(), admitted = await ai.saveConfig(owner.id, input);
+      const prefix = syntheticAiKey.slice(0, 19), suffix = syntheticAiKey.slice(19);
+      const source = await article(owner, `<p>${prefix}</p><p>${suffix}</p>`, ''), notes = new Annotations(db);
+      const context = await notes.get(owner.id, source, 'feed');
+      await notes.save(owner.id, source, 'feed', { schemaVersion: 1, contentHash: context.contentHash, ink: null,
+        marks: [{ id: 'source-lane-note', kind: 'note', color: 'yellow', anchor: null, text: 'Preserve this note', createdAt: 1, updatedAt: 1 }] }, 0);
+      const original = await sourceState(source), [credential] = await db`SELECT to_jsonb(c)::text AS fingerprint FROM ai_configs c WHERE user_id=${owner.id}`;
+      const params = { operation: 'translate', mode: 'feed', contentHash: context.contentHash, configRevision: admitted.revision };
+      assert.equal((await db`SELECT id FROM ai_jobs WHERE status IN ('queued','running')`).length, 0, 'claim must not consume unrelated work');
+      const before = fixture.requests.length;
+      fixture.setCompletion(segments => JSON.stringify({ segments: segments.map(segment => ({ id: segment.id, text: 'Target filler' })) }));
+      try {
+        const queued = await ai.enqueue(owner.id, source, params);
+        const active = await db`SELECT id,user_id FROM ai_jobs WHERE status IN ('queued','running')`;
+        assert.deepEqual([...active], [{ id: queued.job.id, user_id: owner.id }]);
+        const failed = await run(queued.job.id);
+        assert.equal(failed.status, 'failed'); assert.equal(failed.error_code, 'AI_OUTPUT'); assert.equal(failed.result, null);
+        assert.equal(failed.config_revision, admitted.revision); assert.equal(failed.content_hash, context.contentHash);
+        assert.equal(failed.provider_calls, 1);
+        assert.equal(failed.completed_chunks, failed.total_chunks, 'all earlier batch checks passed; final publication must reject');
+        const [terminal] = await db`SELECT to_jsonb(j)::text AS fingerprint FROM ai_jobs j WHERE id=${queued.job.id}`;
+        assert.ok(!terminal.fingerprint.includes(syntheticAiKey));
+        for (const path of [`/api/ai/jobs/${queued.job.id}`, `/api/ai/results/${queued.job.id}`, '/api/ai/results']) {
+          const response = await request(owner, 'GET', path);
+          assert.equal(response.statusCode, 200); assert.ok(!response.body.includes(syntheticAiKey));
+          if (path === '/api/ai/results') {
+            assert.equal(response.json().total, 1); assert.equal(response.json().items[0].id, queued.job.id);
+            assert.equal(response.json().items[0].status, 'failed'); assert.equal(response.json().items[0].result, undefined);
+          } else {
+            assert.equal(response.json().job.error.code, 'AI_OUTPUT'); assert.equal(response.json().job.result, undefined);
+            assert.equal(response.json().job.configRevision, admitted.revision); assert.equal(response.json().job.contentHash, context.contentHash);
+          }
+        }
+        await assert.rejects(() => ai.enqueue(owner.id, source, params), hasCode('AI_INTERRUPTED'));
+        await ai.recoverExpired();
+        assert.equal((await db`SELECT id FROM ai_jobs WHERE status IN ('queued','running')`).length, 0);
+        assert.equal(await ai.claim(), undefined);
+        assert.equal(fixture.requests.length, before + 1); assert.equal(fixture.requests[before].authorization, `Bearer ${syntheticAiKey}`);
+        assert.equal((await db`SELECT to_jsonb(j)::text AS fingerprint FROM ai_jobs j WHERE id=${queued.job.id}`)[0].fingerprint, terminal.fingerprint);
+        assert.equal(await sourceState(source), original);
+        assert.equal((await db`SELECT to_jsonb(c)::text AS fingerprint FROM ai_configs c WHERE user_id=${owner.id}`)[0].fingerprint, credential.fingerprint);
+        assert.ok(!logs.join('').includes(syntheticAiKey));
+      } finally { fixture.setCompletion(); }
+    });
+    await t.test('held HTTP rotation: call/publication seams retain admitted key identity and cannot replay or rewrite terminal history', async () => {
+      // Test-only observation of existing seams, not an end-to-end scheduler/heartbeat witness.
+      type WorkSeams = {
+        call<T>(row: Row, messages: AiMessage[], signal: AbortSignal, validate: (output: string, credential: string) => T): Promise<T>;
+        publish(row: Row, status: 'succeeded' | 'skipped', result: NonNullable<AiJob['result']>): Promise<void>;
+      };
+      const seams = ai as unknown as WorkSeams, owner = await account();
+      const keyA = 'synthetic-held-revision-A-credential', keyB = 'synthetic-held-revision-B-credential';
+      const admitted = await ai.saveConfig(owner.id, { ...input, apiKey: keyA });
+      const source = await article(owner), notes = new Annotations(db), context = await notes.get(owner.id, source, 'feed');
+      await notes.save(owner.id, source, 'feed', { schemaVersion: 1, contentHash: context.contentHash, ink: null,
+        marks: [{ id: 'held-revision-note', kind: 'note', color: 'yellow', anchor: null, text: 'Unchanged during rotation', createdAt: 1, updatedAt: 1 }] }, 0);
+      const original = await sourceState(source), [configA] = await db`SELECT * FROM ai_configs WHERE user_id=${owner.id}`;
+      assert.equal(decryptAiKey(key, owner.id, admitted.revision, configA.encrypted_key), keyA);
+      assert.equal((await db`SELECT id FROM ai_jobs WHERE status IN ('queued','running')`).length, 0, 'claim must not consume unrelated work');
+      const queued = await ai.enqueue(owner.id, source, { operation: 'summary', mode: 'feed', contentHash: context.contentHash, configRevision: admitted.revision });
+      const active = await db`SELECT id,user_id FROM ai_jobs WHERE status IN ('queued','running')`;
+      assert.deepEqual([...active], [{ id: queued.job.id, user_id: owner.id }]);
+      const row = await ai.claim(); assert.ok(row); assert.equal(row.id, queued.job.id); assert.equal(row.user_id, owner.id);
+      assert.equal(row.config_revision, admitted.revision);
+      const doc = prepareAiDocument(row.source_html, row.source_title, 'summary');
+      assert.equal(segmentBatches(doc.segments).length, 1);
+      const escapedB = [...keyB].map(char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+      fixture.setCompletion(segments => JSON.stringify({ coveredIds: segments.map(segment => segment.id), summaryText: keyB }).replaceAll(keyB, escapedB));
+      fixture.setBehavior('hold');
+      const before = fixture.requests.length, push = fixture.requests.push, controller = new AbortController();
+      // The fixture records a fully received HTTP request and installs its release callback before yielding.
+      const accepted = new Promise<void>(resolve => {
+        fixture.requests.push = (...requests) => { const length = push.apply(fixture.requests, requests); resolve(); return length; };
+      });
+      let validated = false;
+      const pending = seams.call(row, summaryMessages(doc.segments, 'zh-CN'), controller.signal, (output, credential) => {
+        validated = true;
+        assert.ok(!output.includes(keyA)); assert.ok(!output.includes(keyB), 'B is Unicode-escaped on the wire');
+        return { credential, summaryText: validateSummary(output, doc.segments) };
+      });
+      try {
+        await Promise.race([accepted, pending.then(() => { throw new Error('Provider response was not held at the HTTP acceptance barrier'); })]);
+        assert.equal(validated, false); assert.equal(fixture.requests.length, before + 1);
+        assert.equal(fixture.requests[before].authorization, `Bearer ${keyA}`);
+        const updated = await ai.saveConfig(owner.id, { ...input, apiKey: keyB });
+        assert.equal(updated.revision, admitted.revision + 1);
+        const [configB] = await db`SELECT *,to_jsonb(c)::text AS fingerprint FROM ai_configs c WHERE user_id=${owner.id}`;
+        assert.notEqual(configB.encrypted_key, configA.encrypted_key);
+        assert.equal(decryptAiKey(key, owner.id, updated.revision, configB.encrypted_key), keyB);
+        const [terminal] = await db`SELECT *,to_jsonb(j)::text AS fingerprint FROM ai_jobs j WHERE id=${row.id}`;
+        assert.equal(terminal.status, 'failed'); assert.equal(terminal.error_code, 'AI_STALE_SOURCE'); assert.equal(terminal.result, null);
+        assert.equal(terminal.config_revision, admitted.revision); assert.equal(terminal.provider_calls, 1);
+        assert.ok(!terminal.fingerprint.includes(keyA)); assert.ok(!terminal.fingerprint.includes(keyB));
+        fixture.setBehavior('ok'); fixture.release();
+        const response = await pending;
+        assert.equal(validated, true); assert.equal(response.credential, keyA); assert.notEqual(response.credential, keyB);
+        assert.equal(response.summaryText, keyB, 'escaped B must not be substituted as this admitted call’s reflection credential');
+        await assert.rejects(() => seams.publish(row, 'succeeded', { summaryText: response.summaryText, sourceTitle: row.source_title, sourceUrl: row.source_url }), hasCode('AI_STALE_SOURCE'));
+        await ai.runClaimed(row); await ai.recoverExpired();
+        assert.equal((await db`SELECT id FROM ai_jobs WHERE status IN ('queued','running')`).length, 0);
+        assert.equal(await ai.claim(), undefined);
+        for (const path of [`/api/ai/jobs/${row.id}`, `/api/ai/results/${row.id}`, '/api/ai/results']) {
+          const result = await request(owner, 'GET', path);
+          assert.equal(result.statusCode, 200); assert.ok(!result.body.includes(keyA)); assert.ok(!result.body.includes(keyB));
+          if (path === '/api/ai/results') {
+            assert.equal(result.json().total, 1); assert.equal(result.json().items[0].id, row.id); assert.equal(result.json().items[0].status, 'failed');
+            assert.equal(result.json().items[0].result, undefined);
+          } else {
+            assert.equal(result.json().job.configRevision, admitted.revision); assert.equal(result.json().job.contentHash, context.contentHash);
+            assert.equal(result.json().job.error.code, 'AI_STALE_SOURCE'); assert.equal(result.json().job.result, undefined);
+          }
+        }
+        assert.equal((await db`SELECT to_jsonb(j)::text AS fingerprint FROM ai_jobs j WHERE id=${row.id}`)[0].fingerprint, terminal.fingerprint);
+        assert.equal((await db`SELECT to_jsonb(c)::text AS fingerprint FROM ai_configs c WHERE user_id=${owner.id}`)[0].fingerprint, configB.fingerprint);
+        assert.equal(await sourceState(source), original);
+        assert.equal(fixture.requests.length, before + 1);
+        assert.ok(!logs.join('').includes(keyA)); assert.ok(!logs.join('').includes(keyB));
+        assert.ok(!configB.fingerprint.includes(keyA)); assert.ok(!configB.fingerprint.includes(keyB));
+      } finally {
+        fixture.requests.push = push; fixture.setCompletion(); fixture.setBehavior('ok'); fixture.release(); controller.abort();
+        await pending.catch(() => {});
+      }
     });
     await t.test('source title/body, config revision and selected feed/fulltext identity invalidate cache', async () => {
       const source = await article(a), first = await ai.enqueue(a.id, source, { operation: 'summary', mode: 'feed' }); await run(first.job.id);

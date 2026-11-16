@@ -3,8 +3,14 @@
 .reader-pane .reader-ai-toolbar .icon-button { flex:0 0 44px; width:44px; min-width:44px; height:44px; }
 .reader-pane .reader-ai-toolbar .toolbar-spacer { min-width:0; }
 .reader-ai-tools,.ai-toolbar { display:inline-flex; align-items:center; flex:none; gap:2px; }
-.reader-ai-results { display:flow-root; }
+/* Keep the original metadata/source margin collapse outside the transient host.
+   Metadata typography stays on its child, never on the AI results. */
+.reader-metadata { --reader-metadata-gap:24px; margin-bottom:var(--reader-metadata-gap); }
+.reader-metadata>.article-meta { margin-bottom:0; }
+.reader-ai-results { display:flow-root; padding-top:var(--reader-metadata-gap); }
 .reader-ai-results:empty { display:none; }
+.reader-ai-results>.ai-card { margin:0; }
+@media(max-width:700px) { .reader-metadata { --reader-metadata-gap:18px; } }
 .ai-card { margin:0 0 24px; padding:16px; border:1px solid var(--line); border-radius:6px; overflow-wrap:anywhere; min-width:0; }
 .ai-card>header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
 .ai-card h2 { font-size:18px; margin:0; }
@@ -35,4 +41,4 @@
 @container(max-width:360px) { .reader-pane .reader-ai-toolbar { gap:2px; padding-inline:6px; } .ai-card { padding:10px; } }
 :root[data-theme=eink] .ai-card { border:2px solid #000; border-radius:0; }
 :root[data-theme=eink] .ai-bilingual .feedink-ai-target { border-color:#000; }
-@media print { .ai-toolbar,.ai-card { display:none; } }
+@media print { .reader-ai-results,.ai-toolbar,.ai-card { display:none; } }

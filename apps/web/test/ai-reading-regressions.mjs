@@ -195,30 +195,102 @@ export async function aiReadingRegressions(browser, expect) {
     await expect(result.locator('[style],[href],[src],[onclick],.arbitrary')).toHaveCount(0);
   });
 
-  await scenario('long bilingual geometry is excluded from scroll persistence and immediate navigation capture/restore', async ({ page, ai, fixture }) => {
+  for (const width of [1280, 390]) for (const firstTag of ['h2', 'p']) await scenario(`${firstTag}-first original progress and visible Space paging at ${width}px`, async ({ page, ai, fixture }) => {
+    const scroll = page.locator('.reader-scroll'), source = page.getByTestId('reader-content');
+    const offset = 80;
+    const position = index => source.evaluate((root, { index, offset }) => {
+      const scroll = root.closest('.reader-scroll');
+      const witness = [...root.querySelectorAll('p')].find(node => node.textContent.startsWith(`Margin witness ${index}:`));
+      scroll.scrollTop += witness.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset;
+      return { top: scroll.scrollTop, range: scroll.scrollHeight - scroll.clientHeight, y: witness.getBoundingClientRect().top - scroll.getBoundingClientRect().top };
+    }, { index, offset });
+    const typography = await source.evaluate(root => {
+      window.__marginOriginal = root; window.__marginHtml = root.innerHTML;
+      const original = root.firstElementChild, meta = document.querySelector('.article-meta');
+      const text = getComputedStyle(document.querySelector('.article-document')), leading = getComputedStyle(original);
+      return { fontSize: text.fontSize, color: text.color, fontFamily: text.fontFamily, lineHeight: text.lineHeight,
+        gap: original.getBoundingClientRect().top - meta.getBoundingClientRect().bottom, leadingMargin: parseFloat(leading.marginTop), metadataFont: getComputedStyle(meta).fontSize };
+    });
+    // Legacy no-AI spacing: metadata's 24px/18px margin collapses with the first
+    // source block's margin, rather than being summed or globally zeroed.
+    assert.ok(Math.abs(typography.gap - Math.max(width > 700 ? 24 : 18, typography.leadingMargin)) < 1);
+    assert.equal(typography.metadataFont, '12px');
+
+    await scroll.focus();
+    const beforeSpace = await scroll.evaluate(node => ({ top: node.scrollTop, step: node.clientHeight * 0.85 }));
+    await page.keyboard.press('Space');
+    await expect.poll(() => scroll.evaluate(node => node.scrollTop)).toBeGreaterThan(beforeSpace.top + beforeSpace.step - 2);
+    await expect(page).toHaveURL(/article=one$/);
+
+    // Both references are measured BEFORE any AI exists. No transient-host height
+    // or implementation helper is used to derive either expected progress value.
+    const first = await position(10), firstProgress = first.top / first.range;
+    assert.ok(Math.abs(first.y - offset) < 1);
+    await expect.poll(() => Math.abs(fixture.control.articles[0].progress - firstProgress) * first.range).toBeLessThan(2);
+    const second = await position(30), secondProgress = second.top / second.range;
+    assert.ok(Math.abs(second.y - offset) < 1);
+    await expect.poll(() => Math.abs(fixture.control.articles[0].progress - secondProgress) * second.range).toBeLessThan(2);
+
     ai.autoComplete = true; await open(page, 'translate'); await generate(page, 'translate');
     await expect(page.getByTestId('ai-bilingual')).toBeVisible();
-    // Browser geometry, not the implementation helper, is the independent witness.
-    const position = async index => page.evaluate(index => {
-      const scroll = document.querySelector('.reader-scroll'), host = document.querySelector('[data-reading-transient]');
-      const witness = [...document.querySelectorAll('[data-reader-root] p')].find(node => node.textContent.startsWith(`Original segment ${index}:`));
-      scroll.scrollTop += witness.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 80;
-      return { progress: (scroll.scrollTop - host.getBoundingClientRect().height) / (scroll.scrollHeight - host.getBoundingClientRect().height - scroll.clientHeight), y: witness.getBoundingClientRect().top - scroll.getBoundingClientRect().top };
-    }, index);
-    const first = await position(40);
-    await expect.poll(() => fixture.control.articles[0].progress).toBeCloseTo(first.progress, 4);
-    const second = await position(70);
-    // Invoke immediately, before Reader's 700ms scroll debounce: exercises App's capture.
-    await page.getByRole('button', { name: '下一篇 (J)', exact: true }).evaluate(button => button.click());
-    await expect(page.getByTestId('reader-content')).toContainText('第二篇独立阅读正文');
-    await expect.poll(() => fixture.control.articles[0].progress).toBeCloseTo(second.progress, 4);
-    await page.getByRole('button', { name: '上一篇 (K)', exact: true }).click();
-    await expect(page.getByTestId('reader-content')).toContainText('Original long tail witness');
-    await expect(card(page)).toHaveCount(0);
-    await expect.poll(() => page.evaluate(() => {
+    assert.equal(await source.evaluate(root => root === window.__marginOriginal && root.innerHTML === window.__marginHtml), true);
+    const aiTypography = await card(page).evaluate(node => {
+      const style = getComputedStyle(node);
+      return { fontSize: style.fontSize, color: style.color, fontFamily: style.fontFamily, lineHeight: style.lineHeight };
+    });
+    assert.deepEqual(aiTypography, { fontSize: typography.fontSize, color: typography.color, fontFamily: typography.fontFamily, lineHeight: typography.lineHeight });
+    // Space must advance through visible bilingual content, not jump to original
+    // text or treat the original-progress coordinate as the paging coordinate.
+    const bilingualStart = page.locator('.ai-bilingual .feedink-ai-pair').first();
+    await bilingualStart.evaluate((node, offset) => {
+      const scroll = node.closest('.reader-scroll');
+      scroll.scrollTop += node.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset;
+    }, offset);
+    await scroll.focus();
+    const beforeAiSpace = await scroll.evaluate(node => ({ top: node.scrollTop, step: node.clientHeight * 0.85 }));
+    await page.keyboard.press('Space');
+    await expect.poll(() => scroll.evaluate(node => node.scrollTop)).toBeGreaterThan(beforeAiSpace.top + beforeAiSpace.step - 2);
+    await expect(page).toHaveURL(/article=one$/);
+    assert.ok(await source.evaluate(root => root.getBoundingClientRect().top > root.closest('.reader-scroll').getBoundingClientRect().bottom));
+
+    const firstWithAi = await position(10);
+    assert.ok(Math.abs(firstWithAi.y - first.y) < 1);
+    await expect.poll(() => Math.abs(fixture.control.articles[0].progress - firstProgress) * first.range).toBeLessThan(2);
+    // Position and click in ONE browser task, before the 700ms Reader debounce.
+    // The first/second references differ, so a stale persisted first value fails.
+    const secondWithAiY = await page.getByRole('button', { name: '下一篇 (J)', exact: true }).evaluate((button, offset) => {
       const scroll = document.querySelector('.reader-scroll');
-      const witness = [...document.querySelectorAll('[data-reader-root] p')].find(node => node.textContent.startsWith('Original segment 70:'));
-      return Math.abs(witness.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 80);
-    })).toBeLessThan(4);
+      const witness = [...document.querySelectorAll('[data-reader-root] p')].find(node => node.textContent.startsWith('Margin witness 30:'));
+      scroll.scrollTop += witness.getBoundingClientRect().top - scroll.getBoundingClientRect().top - offset;
+      const y = witness.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+      button.click(); return y;
+    }, offset);
+    assert.ok(Math.abs(secondWithAiY - second.y) < 1);
+    await expect(page.getByTestId('reader-content')).toContainText('第二篇独立阅读正文');
+    await expect.poll(() => Math.abs(fixture.control.articles[0].progress - secondProgress) * second.range).toBeLessThan(2);
+    await page.getByRole('button', { name: '上一篇 (K)', exact: true }).click();
+    await expect(source).toContainText('Margin witness 30:'); await expect(card(page)).toHaveCount(0);
+    await expect.poll(() => source.evaluate((root, offset) => {
+      const witness = [...root.querySelectorAll('p')].find(node => node.textContent.startsWith('Margin witness 30:'));
+      return Math.abs(witness.getBoundingClientRect().top - root.closest('.reader-scroll').getBoundingClientRect().top - offset);
+    }, offset)).toBeLessThan(2);
+  }, async ({ page, fixture }) => {
+    await page.setViewportSize({ width, height: 900 });
+    // No images/fonts with deferred geometry: the witness isolates boundary margin
+    // collapse, at both metadata breakpoints, without mutating archived source UI.
+    fixture.control.articles[0].contentHtml = `<${firstTag}>Leading original block</${firstTag}>` + Array.from({ length: 60 }, (_, index) => `<p>Margin witness ${index}: ${'Original source prose '.repeat(18)}</p>`).join('');
   });
+
+  await scenario('Space traverses a long bilingual result even when the original already fits the viewport', async ({ page, ai }) => {
+    const scroll = page.locator('.reader-scroll');
+    assert.equal(await scroll.evaluate(node => node.scrollHeight <= node.clientHeight), true);
+    ai.autoComplete = true; await open(page, 'translate'); await generate(page, 'translate');
+    await expect(page.getByTestId('ai-bilingual')).toBeVisible();
+    await scroll.evaluate(node => { node.scrollTop = 0; }); await scroll.focus();
+    const step = await scroll.evaluate(node => node.clientHeight * 0.85);
+    await page.keyboard.press('Space');
+    await expect.poll(() => scroll.evaluate(node => node.scrollTop)).toBeGreaterThan(step - 2);
+    await expect(page).toHaveURL(/article=one$/);
+    assert.ok(await page.getByTestId('reader-content').evaluate(root => root.getBoundingClientRect().top > root.closest('.reader-scroll').getBoundingClientRect().bottom));
+  }, async ({ fixture }) => { fixture.control.articles[0].contentHtml = '<p>Short original source.</p>'; });
 }

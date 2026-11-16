@@ -63,12 +63,13 @@ export class PinnedAiProvider implements AiProvider {
           if (response.statusCode !== 200 || !/^application\/json(?:\s*;|$)/i.test(String(response.headers['content-type'] ?? ''))
             || !['', 'identity'].includes(String(response.headers['content-encoding'] ?? ''))
             || Number(response.headers['content-length'] ?? 0) > AI_RESPONSE_BYTES) {
-            response.destroy(); reject(aiFailure('AI_PROVIDER')); return;
+            reject(aiFailure('AI_PROVIDER')); response.destroy(); return;
           }
           let length = 0; const chunks: Buffer[] = [];
           response.on('data', (chunk: Buffer) => {
             length += chunk.length;
-            if (length > AI_RESPONSE_BYTES) { response.destroy(); reject(aiFailure('AI_OUTPUT')); }
+            // destroy() can emit aborted synchronously; settle the validation failure first.
+            if (length > AI_RESPONSE_BYTES) { reject(aiFailure('AI_OUTPUT')); response.destroy(); }
             else chunks.push(chunk);
           });
           response.on('end', () => resolve(Buffer.concat(chunks)));
