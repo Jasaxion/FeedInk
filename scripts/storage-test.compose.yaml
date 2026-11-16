@@ -14,9 +14,29 @@ services:
     environment:
       DATA_DIR: /data
       DATABASE_URL: postgres://feedink_drill:${POSTGRES_PASSWORD}@postgres:5432/feedink_drill
-      STORAGE_BACKEND: filesystem
+      STORAGE_BACKEND: ${DRILL_STORAGE_BACKEND:-filesystem}
+      STORAGE_S3_BUCKET: ${TEST_STORAGE_S3_BUCKET:-}
+      STORAGE_S3_REGION: ${TEST_STORAGE_S3_REGION:-us-east-1}
+      STORAGE_S3_ENDPOINT: ${TEST_STORAGE_S3_ENDPOINT:-}
+      STORAGE_S3_PREFIX: ${DRILL_STORAGE_PREFIX:-}
+      STORAGE_S3_FORCE_PATH_STYLE: ${TEST_STORAGE_S3_FORCE_PATH_STYLE:-true}
+      STORAGE_S3_ALLOW_HTTP: ${TEST_STORAGE_S3_ALLOW_HTTP:-false}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    extra_hosts:
+      - host.docker.internal:host-gateway
     volumes:
       - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      # Synthetic ENOSPC fixture only, separate from the persistent /data recovery volume.
+      - /storage-full:size=1m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 60s
 volumes:
   database:
   data:

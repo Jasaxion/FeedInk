@@ -6,6 +6,7 @@ import type { SQL } from "../core.js";
 import { createBackend, digest, durableDirectory, missing, storageKey, syncDirectory, type BlobBackend } from "./backend.js";
 import { FilesystemBackend } from "./filesystem.js";
 import { validateStorageConfig, type StorageConfig } from "./config.js";
+import { privateBlobStream } from "./stream.js";
 
 const sha256 = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const DEFAULT_RECOVERY_ENTRIES = 256;
@@ -20,7 +21,7 @@ export class Store {
   }
   private backend() { return this.backendPromise ||= createBackend(this.directory, this.config); }
   async init() {
-    await durableDirectory(this.stagingDirectory);
+    await durableDirectory(this.stagingDirectory, this.directory);
     await (await this.backend()).init();
   }
   /** Filesystem destination path; reads also support legacy root/<key>. Not a public URL. */
@@ -29,10 +30,14 @@ export class Store {
     return new FilesystemBackend(this.directory).path(key);
   }
   async size(key: string) { return (await this.backend()).size(storageKey(key)); }
-  async stream(key: string): Promise<Readable> { return (await this.backend()).read(storageKey(key)); }
+  async stream(key: string): Promise<Readable> {
+    storageKey(key);
+    try { return privateBlobStream(await (await this.backend()).read(key)); }
+    catch { throw new Error("Private blob read failed"); }
+  }
   async get(key: string): Promise<Buffer> {
     const chunks: Buffer[] = [];
-    for await (const chunk of await this.stream(key)) chunks.push(Buffer.from(chunk));
+    for await (const chunk of await (await this.backend()).read(storageKey(key))) chunks.push(Buffer.from(chunk));
     return Buffer.concat(chunks);
   }
   async referenced(sql: SQL, key: string) {
@@ -110,6 +115,7 @@ export class Store {
     await sql`SELECT pg_advisory_lock(71244004)`;
     let processed = 0, remainingPossible = false;
     try {
+      await durableDirectory(this.stagingDirectory, this.directory);
       for await (const entry of await opendir(this.stagingDirectory)) {
         if (processed >= budget) { remainingPossible = true; break; }
         if (!entry.isDirectory() || !/^txn-[A-Za-z0-9]+$/.test(entry.name)) throw new Error("Unexpected storage journal entry");
@@ -138,6 +144,7 @@ export class Store {
     await sql`SELECT pg_advisory_lock(71244004)`;
     let directory: string | undefined, finished = false, commitAttempted = false;
     try {
+      await durableDirectory(this.stagingDirectory, this.directory);
       directory = await mkdtemp(join(this.stagingDirectory, "txn-"));
       await syncDirectory(this.stagingDirectory);
       await this.intent(directory);

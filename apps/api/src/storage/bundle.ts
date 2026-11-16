@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, open, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { durableDirectory, storageKey, syncDirectory, type BlobBackend } from "./backend.js";
 
@@ -93,7 +93,7 @@ export async function unpackReferenced(input: Readable, expectedFingerprint?: st
   if (target) {
     await target.backend.assertEmpty();
     // Scratch is on the destination filesystem for hard-link publish, created only AFTER emptiness refusal.
-    await durableDirectory(target.scratch);
+    await durableDirectory(target.scratch, dirname(target.scratch));
   }
   const reader = new Reader(input);
   if (await reader.line() !== MAGIC) throw new Error("Unsupported referenced-blob bundle");

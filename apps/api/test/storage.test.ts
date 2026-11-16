@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { Store, type SQL } from "../src/core.js";
 import { FilesystemBackend } from "../src/storage/filesystem.js";
 import { copyBlob } from "../src/storage/copy.js";
-import { digest, fanoutKey } from "../src/storage/backend.js";
+import { digest, fanoutKey, syncDirectory } from "../src/storage/backend.js";
 import { storageConfigFromEnv, validateStorageConfig } from "../src/storage/config.js";
 
 const hash = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
@@ -33,6 +33,8 @@ async function fixture(t: TestContext) {
 
 test("storage config remains optional and deployment-only with explicit HTTP opt-in", () => {
   assert.equal(storageConfigFromEnv({}), undefined);
+  assert.deepEqual(storageConfigFromEnv({ STORAGE_BACKEND: "filesystem" }), { backend: "filesystem" });
+  assert.throws(() => storageConfigFromEnv({ STORAGE_BACKEND: "unsupported" }), /Unsupported storage backend/);
   assert.deepEqual(validateStorageConfig(), { backend: "filesystem" });
   for (const endpoint of ["http://127.0.0.1:9000", "https://user:secret@example.invalid", "https://example.invalid/path", "https://example.invalid/?token=x"]) {
     assert.throws(() => validateStorageConfig({ backend: "s3", bucket: "synthetic", region: "us-east-1", endpoint }));
@@ -142,6 +144,7 @@ test("Store recovery bounds journal work and leaves legacy root discovery to exp
 test("copyBlob retains exact source bytes, rejects missing/corrupt source and verifies preexisting targets", async t => {
   const { directory } = await fixture(t);
   const source = new FilesystemBackend(join(directory, "source")), target = new FilesystemBackend(join(directory, "target"));
+  await mkdir(source.directory); await mkdir(target.directory); await syncDirectory(directory);
   await source.init(); await target.init();
   const scratch = join(target.directory, ".scratch"); await mkdir(scratch);
   const bytes = Buffer.from([0, 1, 10, 255]), key = hash(bytes);

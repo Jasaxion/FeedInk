@@ -37,6 +37,8 @@ const cancel = () => { interrupted = true; runner?.kill('SIGTERM'); api?.kill('S
 process.once('SIGINT', cancel);
 process.once('SIGTERM', cancel);
 try {
+  const { durableDirectory } = await import('../apps/api/dist/storage/backend.js');
+  await durableDirectory(join(directory, 'data'), directory);
   if (annotations || project.endsWith('webkit')) proxy = await createOfflineProxy(upstreamUrl);
   const origin = proxy?.publicUrl || upstreamUrl;
   const env = {

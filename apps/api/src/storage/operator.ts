@@ -40,7 +40,7 @@ async function main() {
     await backend.init(); await backend.assertEmpty();
     // S3 restore also needs a fresh local journal/scratch volume.
     if (process.env.STORAGE_BACKEND === "s3") {
-      await durableDirectory(directory);
+      await durableDirectory(directory, directory);
       for await (const _entry of await opendir(directory)) throw new Error("Restore requires an empty DATA_DIR");
     }
     return;

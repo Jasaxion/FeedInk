@@ -3,10 +3,20 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      scale_tier:
+        description: Optional synthetic single-owner scale rehearsal
+        type: choice
+        options: ['none', '10000', '100000', '1000000', 'all']
+        default: 'none'
+      publish_scale_evidence:
+        description: Publish only structured synthetic scale evidence
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
-  group: feedink-${{ github.workflow }}-${{ github.ref }}
+  group: feedink-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 jobs:
   verify:
@@ -50,6 +60,12 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Production build (ink → shared → web → API)
         run: npm run build
+      - name: Prepare the owned CI data root
+        run: |
+          node --input-type=module <<'JS'
+          import { durableDirectory } from './apps/api/dist/storage/backend.js';
+          await durableDirectory(process.env.DATA_DIR, process.env.GITHUB_WORKSPACE);
+          JS
       - name: Typecheck workspaces and test contracts
         run: npm run typecheck
       - name: Production dependency audit
@@ -245,7 +261,9 @@ jobs:
           echo "::add-mask::$secret_key"
           echo "AWS_ACCESS_KEY_ID=$access_key" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$secret_key" >> "$GITHUB_ENV"
-          docker run --detach --name feedink-s3-ci --publish 127.0.0.1:19000:9000 \
+          bridge_gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
+          test -n "$bridge_gateway"
+          docker run --detach --name feedink-s3-ci --publish 127.0.0.1:19000:9000 --publish "$bridge_gateway:19000:9000" \
             --env "MINIO_ROOT_USER=$access_key" --env "MINIO_ROOT_PASSWORD=$secret_key" \
             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
           ready=false
@@ -262,8 +280,27 @@ jobs:
           try { await client.send(new CreateBucketCommand({ Bucket: process.env.TEST_STORAGE_S3_BUCKET })); }
           finally { client.destroy(); }
           JS
-      - name: PostgreSQL ownership and filesystem to S3 migration acceptance
-        run: npm exec -w @feedink/api -- tsx --test --test-concurrency=1 test/storage-postgres.test.ts
+      - name: Storage durability, ownership, stream and process-recovery acceptance
+        run: |
+          npm exec -w @feedink/api -- tsx --test --test-concurrency=1 \
+            test/storage.test.ts test/storage-durability.test.ts test/storage-stream.test.ts \
+            test/storage-s3.test.ts test/storage-bundle.test.ts test/storage-postgres.test.ts \
+            test/storage-http.test.ts test/storage-process.test.ts
+      - name: Build production image for private S3 paired recovery
+        run: docker build --tag feedink:storage-ci .
+      - name: Paired PostgreSQL restore into private S3 with runtime restrictions
+        env:
+          TEST_IMAGE: feedink:storage-ci
+          STORAGE_RESTORE_BACKEND: s3
+          TEST_STORAGE_S3_ENDPOINT: http://host.docker.internal:19000
+        run: scripts/test-storage-backup.sh
       - name: Stop owned synthetic S3 fixture
         if: always()
         run: docker rm --force feedink-s3-ci >/dev/null 2>&1 || true
+
+  scale:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scale_tier != 'none' }}
+    uses: ./.github/workflows/scale.yml
+    with:
+      tier: ${{ inputs.scale_tier || '10000' }}
+      publish_evidence: ${{ inputs.publish_scale_evidence || false }}

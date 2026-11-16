@@ -105,3 +105,11 @@ TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
 ```
 
 It compares PostgreSQL/retained-only fingerprints, restored reference bytes, deliberate unreferenced-volume exclusion, nonempty refusal and pre-write rejection of framing-preserving payload corruption. Also rerun the existing `scripts/test-backup.sh`, `node --test scripts/data-archive.test.mjs`, and new API storage tests from [storage.md](storage.md). These tests and real S3/process-kill/disk-full/large-scale drills were **not executed** in the implementation lane. No restored 1M corpus, memory figure, throughput or recovery time is asserted from source inspection.
+
+### Audit follow-up: durability boundaries and stronger hosted drills
+
+DATA_DIR, destination backend roots and checkpoint parents must be pre-provisioned, durable real directories. Their mount/link persistence is the operator/volume provisioner's responsibility. Application fsync barriers stop at the configured root, not at read-only/unrelated ancestors. Existing directories no longer bypass fanout/journal edge fsync on retry after an earlier failed mkdir/fsync.
+
+The version2 synthetic drill now uses the production read-only root, 64MiB `/tmp`, dropped capabilities and no-new-privileges, and verifies those restrictions inside the container. A separate test-only 1MiB tmpfs exercises actual ENOSPC with SQL rollback and staged cleanup; it is not a substitute for the persistent volume's crash certification. The drill also recomputes outer checksums after making a structurally invalid framed part: complete archive validation must still reject before either target is populated.
+
+Set `STORAGE_RESTORE_BACKEND=filesystem` or `s3` and run both variants on approved hosted infrastructure. S3 requires the job's synthetic SDK credentials, a provisioned bucket and `TEST_STORAGE_S3_ENDPOINT` reachable **inside the utility container**; see the exact hosted commands and host-gateway caveat in [storage.md](storage.md). Each target uses a new S3 prefix; the input PostgreSQL dump and archive are the same paired recovery format, not an S3-only copy test. These new fixtures and the actual owned writer-process/HTTP failure witnesses are authored acceptance work, **not executed or reviewed runtime success**.

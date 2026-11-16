@@ -30,7 +30,8 @@ export function validateStorageConfig(config?: StorageConfig): StorageConfig {
 /** Credentials use the official SDK deployment credential chain, never public API inputs. */
 export function storageConfigFromEnv(env: NodeJS.ProcessEnv = process.env, prefix = "STORAGE_"): StorageConfig | undefined {
   const backend = env[`${prefix}BACKEND`];
-  if (!backend || backend === "filesystem") return backend ? { backend } : undefined;
+  if (!backend) return undefined;
+  if (backend === "filesystem") return { backend: "filesystem" };
   if (backend !== "s3") throw new Error("Unsupported storage backend");
   return validateStorageConfig({
     backend,

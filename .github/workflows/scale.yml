@@ -1,5 +1,13 @@
 name: Manual synthetic scale rehearsal
 on:
+  workflow_call:
+    inputs:
+      tier:
+        type: string
+        default: '10000'
+      publish_evidence:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       tier:

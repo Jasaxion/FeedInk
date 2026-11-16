@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { open, lstat, mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { StorageConfig } from "./config.js";
 
 export function storageKey(key: string): string {
@@ -14,23 +14,31 @@ export async function syncDirectory(directory: string) {
   const handle = await open(directory, "r");
   try { await handle.sync(); } finally { await handle.close(); }
 }
-/** Sync each newly created directory and its parent; recursive mkdir alone is not durable. */
-export async function durableDirectory(directory: string): Promise<void> {
-  directory = resolve(directory);
-  try {
-    const info = await lstat(directory);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Storage requires real directories");
-  } catch (error) {
+export type DirectorySync = (directory: string) => Promise<void>;
+/** Existence/EEXIST is not a durability receipt. Re-sync every owned edge, leaf to the
+ * explicit pre-provisioned root, even after a previous mkdir or parent-fsync failure.
+ * The root's own mount/link persistence is the operator's responsibility; never sync its parent. */
+export async function durableDirectory(directory: string, root: string, synchronize: DirectorySync = syncDirectory): Promise<void> {
+  directory = resolve(directory); root = resolve(root);
+  const suffix = relative(root, directory);
+  if (isAbsolute(suffix) || suffix === ".." || suffix.startsWith(`..${sep}`) || resolve(root, suffix) !== directory)
+    throw new Error("Directory is outside its storage durability root");
+  const rootInfo = await lstat(root).catch((error: unknown) => {
     if (!missing(error)) throw error;
-    await durableDirectory(dirname(directory));
-    try { await mkdir(directory, { mode: 0o700 }); } catch (error) {
+    throw new Error("Storage durability root must be pre-provisioned");
+  });
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("Storage requires real directories");
+  const directories = [root];
+  for (const part of suffix ? suffix.split(sep) : []) {
+    const child = join(directories[directories.length - 1], part);
+    try { await mkdir(child, { mode: 0o700 }); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    const info = await lstat(directory);
+    const info = await lstat(child);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Storage requires real directories");
-    await syncDirectory(directory);
-    await syncDirectory(dirname(directory));
+    directories.push(child);
   }
+  for (let index = directories.length - 1; index >= 0; index--) await synchronize(directories[index]);
 }
 export async function digest(stream: Readable): Promise<{ key: string; size: number }> {
   const hash = createHash("sha256");

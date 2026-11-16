@@ -99,15 +99,17 @@ Before relying on offline reading, open/cache articles and their images while on
 
 ```sh
 npm ci
+npm run build -w @feedink/ink
 npm run build -w @feedink/shared
 # Start a dedicated development PostgreSQL instance; do not use production data.
 # Export DATABASE_URL, DATA_DIR, APP_URL and SESSION_SECRET in your shell.
+# Provision DATA_DIR on durable storage before starting (see the boundary below).
 npm run dev:api
 # A second terminal:
 npm run dev:web
 ```
 
-The API defaults to port3000; the web development server must proxy `/api` to it. Read the actual Vite configuration for its port. Keep `APP_URL` equal to the browser-facing development origin for CSRF checks. `DATA_DIR` must be an absolute writable directory separate from source. The production build order is shared → web → API (`npm run build`). Do not commit `node_modules`, `dist`, `.env`, article archives or captures.
+The API defaults to port3000; the web development server must proxy `/api` to it. Read the actual Vite configuration for its port. Keep `APP_URL` equal to the browser-facing development origin for CSRF checks. `DATA_DIR` must be an absolute, writable, **pre-provisioned** directory separate from source. Startup refuses a missing root rather than creating an unbounded ancestor chain. The operator/volume manager owns persistence and permissions of that root itself; the application synchronizes owned descendants through the root, not its unrelated or read-only parent. A plain existence check is not a durability proof. Normal Compose volumes already provide the root. Prepare migration destination roots and checkpoint parents in the same way; see [storage.md](storage.md). The production build order is ink → shared → web → API (`npm run build`). Do not commit `node_modules`, `dist`, `.env`, article archives or captures.
 
 To use Compose PostgreSQL from a host development process, add a **local-only** override publishing `127.0.0.1:<unused-port>:5432`; do not edit the production default or publish it on all interfaces. A host process cannot reach the Compose service name `postgres`.
 

@@ -7,7 +7,7 @@ import { databaseFingerprint, referencedKeys } from "./inventory.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 export async function durableJson(file: string, value: unknown) {
-  await durableDirectory(dirname(file));
+  await durableDirectory(dirname(file), dirname(file));
   // A unique temp file survives interruptions without clobbering another checkpoint generation.
   const directory = await mkdtemp(join(dirname(file), ".checkpoint-"));
   await syncDirectory(dirname(file));
@@ -53,7 +53,7 @@ interface Checkpoint {
 }
 /** Non-deleting, maintenance-only copy. Resume replays at most one page; final verification always scans all references. */
 export async function migrateStorage(sql: SQL, source: BlobBackend, target: BlobBackend, scratch: string, checkpointFile: string) {
-  await durableDirectory(scratch);
+  await durableDirectory(scratch, dirname(scratch));
   const fingerprint = await databaseFingerprint(sql);
   const expected = { version: 1 as const, source: sha256(source.identity()), target: sha256(target.identity()), fingerprint };
   let checkpoint: Checkpoint = { ...expected, lastKey: "", copied: 0, complete: false };

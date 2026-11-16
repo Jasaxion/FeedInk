@@ -4,7 +4,7 @@ This is an unreleased implementation/verification contract, **not measured milli
 
 ## Deployment and API integration
 
-`Config.storage` is optional. `new Store(directory)` remains filesystem-compatible; the application must construct `new Store(config.dataDir, config.storage)`. Filesystem is the default. New keys remain lowercase SHA256 and are published to `ab/cd/<full-key>`. Reads try fanout first, then legacy `<directory>/<full-key>`. Existing DB keys and authenticated asset URLs do not change. Verification reports a corrupt fanout object as an error, rather than silently selecting an older flat copy. Normal streaming reads do not perform a second full hash pass; use maintenance verification to detect out-of-band corruption.
+`Config.storage` is optional. `new Store(directory)` remains filesystem-default; the application constructs `new Store(config.dataDir, config.storage)`. DATA_DIR, filesystem backend roots, S3 local scratch roots and checkpoint parent directories must already be provisioned as real directories. A missing root fails clearly rather than recursively creating unrelated ancestors. The operator/volume provisioner owns persistence of each root's mount/link and writable permissions. The application re-syncs only owned descendants through that explicit root, never its parent (which can be the container's read-only `/`). New keys remain lowercase SHA256 and are published to `ab/cd/<full-key>`. Reads try fanout first, then legacy `<directory>/<full-key>`. Existing DB keys and authenticated asset URLs do not change. Verification reports a corrupt fanout object as an error, rather than silently selecting an older flat copy. Normal streaming reads do not perform a second full hash pass; use maintenance verification to detect out-of-band corruption.
 
 For optional S3-compatible storage, use private **deployment** settings, never user/account/request parameters:
 
@@ -23,9 +23,9 @@ Credentials use the official AWS SDK deployment credential chain (`AWS_ACCESS_KE
 
 The SDK uses conditional `If-None-Match: *`, SHA256 checksums and a **full GET/hash verification** after publishing, including an existing-key collision. ETags are not integrity hashes. The provider must support atomic conditional PUT, read-after-write visibility and the checksum protocol. No unconditional overwrite or alternate transport fallback exists. Single PUT is limited to 5GiB; existing bounded image/EPUB producers are much smaller. There is no speculative multipart upload/garbage collector. S3 connections have a 10s connection and 120s request timeout, with at most three SDK attempts; complete transfer/recovery duration remains dependent on service latency and bandwidth.
 
-`Store.stream(key)` returns a Node readable. Application asset/icon/EPUB routes should return that stream **after the unchanged owner joins/session checks**. Do not accept a hash as authorization. Cross-account rows can legitimately share the same physical bytes; deleting/changing one owner's reference cannot authorize or delete another owner's object. Buffer-based `get()` remains for bounded archive/image processing callers.
+`Store.stream(key)` returns a Node readable that masks backend error metadata and destroys its owned source on error, completion or HTTP cancellation, including cancellation before the first read. Application asset/icon/EPUB routes return that stream **after the unchanged owner joins/session checks**. Do not accept a hash as authorization. Cross-account rows can legitimately share the same physical bytes; deleting/changing one owner's reference cannot authorize or delete another owner's object. Buffer-based `get()` remains for bounded archive/image processing callers.
 
-Parent integration: add runtime dependency `@aws-sdk/client-s3` (`^3.922.0`, resolve/review/pin the exact hosted lockfile version), pass storage configuration into Store, wire the three existing owned download handlers to `stream`, and forward the above deployment variables through Compose. No other SDK package is required. The compiled operator is already included by `apps/api/src/**/*.ts` and the existing runtime `dist` copy. Shell tools run `node apps/api/dist/storage/operator.js`; optional API package aliases are `storage: "node dist/storage/operator.js"`. No manifest/lockfile edits are part of this storage patch.
+Parent integration supplies runtime dependency `@aws-sdk/client-s3` (parent candidate pins `3.1169.0`), passes storage configuration into Store, wires the three existing owned download handlers to `stream`, and forwards the above deployment variables through Compose. No other SDK package is required. The compiled operator is already included by `apps/api/src/**/*.ts` and the existing runtime `dist` copy. Shell tools run `node apps/api/dist/storage/operator.js`; optional API package aliases are `storage: "node dist/storage/operator.js"`. No manifest/lockfile edits are part of this storage patch.
 
 ## Publish, failures and bounded startup recovery
 
@@ -33,7 +33,7 @@ All production blob transactions still take PostgreSQL advisory lock **71244004*
 
 1. Create `.storage-staging/txn-*/intent.json` with a version and deployment-identity digest, fsync file/directory/parent before starting the SQL transaction.
 2. Stage each hash-keyed byte file, fsync it and the staging directory before `put()` returns. Key enumeration is on disk, not an archive-wide Set.
-3. Publish every staged object immutably, and verify bytes. Filesystem uses same-filesystem hard links and fsyncs new fanout parents and leaf directories. S3 uses conditional PUT + GET verification. Only then attempt PostgreSQL COMMIT.
+3. Publish every staged object immutably, and verify bytes. Filesystem uses same-filesystem hard links and re-fsyncs the complete fanout chain leaf→parent→explicit storage root on **every** publication, including existing directories after a failed earlier mkdir/fsync; it then fsyncs the published leaf entry. Existence or EEXIST is never treated as proof that an earlier parent barrier completed. S3 uses conditional PUT + GET verification. Only then attempt PostgreSQL COMMIT.
 4. On an acknowledged commit, remove only the transaction's own staging. On a known pre-COMMIT rollback, staging can be removed; published objects are conservatively retained. A failed COMMIT is **ambiguous even if a later ROLLBACK succeeds**: retain the durable intent for authoritative recovery.
 5. Recovery takes the same lock, checks current PostgreSQL references, re-publishes/verifies referenced staged objects, then removes processed staging. It never deletes final objects. Corrupt staging/collisions, missing permissions or S3 outages fail closed and retain evidence. Cleanup failures still release the writer lock.
 
@@ -58,7 +58,7 @@ For efficient keysets/reference checks, coordinate non-null blob-reference index
 
 All public tables are fingerprinted in primary-key order with server-side cursor batches of 32; exact PostgreSQL JSONB text includes bodies, owner relations, auth epochs, full note payloads/revisions/tombstones and retained-only contexts. Column metadata also participates. Every public table must have a primary key or the operation refuses. Fingerprints do not emit row contents. Match PostgreSQL version/collation and use the same code/schema for comparison; this is not a portable cross-engine semantic hash. Large rows still impose a per-row/batch memory cost. Fingerprints are full scans, not fast counter checks, and PG dump preserves additional catalog/sequence state beyond this row fingerprint.
 
-Stop **all** API replicas, workers, external SQL, mail delivery and other source/target writers for the entire operation. The shared lock is not a substitute for stopping non-blob database writers. Source settings are `DATA_DIR`/`STORAGE_*`. Destination settings are `TARGET_DATA_DIR`/`TARGET_STORAGE_*` with the same suffixes as the source table. Mount a durable target directory and checkpoint path inside the utility container. For filesystem destinations scratch must be on that filesystem; for S3 it remains local. Do not put a checkpoint inside a blob key namespace or use an ephemeral container filesystem. The shell does not mount arbitrary paths or chown host directories for you.
+Stop **all** API replicas, workers, external SQL, mail delivery and other source/target writers for the entire operation. The shared lock is not a substitute for stopping non-blob database writers. Source settings are `DATA_DIR`/`STORAGE_*`. Destination settings are `TARGET_DATA_DIR`/`TARGET_STORAGE_*` with the same suffixes as the source table. Mount an already-provisioned durable target root and checkpoint parent inside the utility container. The utility deliberately refuses to auto-create these durability boundaries. For filesystem destinations scratch must be on that filesystem; for S3 it remains local. Do not put a checkpoint inside a blob key namespace or use an ephemeral container filesystem. The shell does not mount arbitrary paths or chown host directories for you.
 
 ```sh
 # Set deployment-specific source/target env and mounts privately in Compose; no credentials on CLI.
@@ -85,3 +85,36 @@ No local service/build/typecheck/performance runs establish this feature. Run on
 - 10k/100k/1M synthetic references/articles, bounded process memory, exact plans, bytes/inodes, global-lock wait time, object requests, migration/backup/restore duration and fingerprint equality. No measured result or million-scale performance guarantee is claimed here.
 
 See [backup.md](backup.md) for paired referenced-blob recovery and the different scope of old full-volume archives.
+
+### Independent storage audit follow-up (hosted validation still required)
+
+The directory helper takes an explicit pre-provisioned durability root. Each invocation validates real directories, creates only descendants, and syncs the entire leaf-to-root chain even if all entries already exist. Initialization, retry publication, recovery, migration scratch and checkpoint handling use that boundary. This corrects a source-level defect where a visible directory left by a failed parent fsync could be trusted on retry. It does not certify a filesystem's power-loss behavior.
+
+Additional authored acceptance fixtures (not locally executed):
+
+- `storage-durability.test.ts`: deterministic one-time parent/root fsync failures, surviving mkdir entries, exact retry barriers before COMMIT, recovery/copy revalidation, missing-root refusal and no root-parent fsync.
+- `storage-postgres.test.ts`: **271 distinct keys** across both 128-checkpoint and 256-inventory boundaries, image/ebook/icon references including pending/failed images with retained keys, interruption after object 130, checkpoint replay and complete post-resume verification.
+- `storage-http.test.ts` plus its owned child fixture: real HTTP image/icon/ebook success and cross-owner denial; failures before opening/first byte and after a received body chunk; client cancellation; underlying close witnesses; production logger capture with synthetic raw error markers absent from responses/logs. `storage-stream.test.ts` also checks cancellation before consumption.
+- `storage-process.test.ts` plus its owned writer fixture: bounded actual SIGKILL before COMMIT and after server COMMIT but before Store cleanup, an independent committed-reference/lock observer, and a **new recovery process** verifying bytes and journal cleanup. These process kills are not power-loss or volume-driver certification and do not cover every possible lost COMMIT packet timing.
+- Paired restore drill: production-equivalent read-only runtime root, 64MiB `/tmp`, dropped capabilities/no-new-privileges; a separate 1MiB test-only tmpfs exercises real ENOSPC rollback. A malformed part sequence with **recomputed valid outer checksums** must fail before DB mutation or target population.
+
+Parent hosted command for all new and existing storage tests (dedicated synthetic DB; retain serial execution):
+
+```sh
+NODE_ENV=test npm exec -w @feedink/api -- tsx --test --test-concurrency=1 test/storage.test.ts test/storage-durability.test.ts test/storage-stream.test.ts test/storage-s3.test.ts test/storage-bundle.test.ts test/storage-postgres.test.ts test/storage-http.test.ts test/storage-process.test.ts
+```
+
+Run the paired drill twice on the approved GitHub-hosted runner, after building the image and provisioning a synthetic S3 bucket:
+
+```sh
+STORAGE_RESTORE_BACKEND=filesystem TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
+# Existing synthetic SDK credentials and TEST_STORAGE_S3_BUCKET are supplied by the job, not source.
+# Use an endpoint reachable from inside the utility container; a runner's 127.0.0.1 is not that container.
+STORAGE_RESTORE_BACKEND=s3 TEST_STORAGE_S3_ENDPOINT=http://host.docker.internal:9000 \
+  TEST_STORAGE_S3_ALLOW_HTTP=true TEST_STORAGE_S3_FORCE_PATH_STYLE=true \
+  TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
+```
+
+The fixture maps `host.docker.internal` to the Docker host gateway; the parent's MinIO port must be published on that gateway, or use another reviewed container-reachable synthetic endpoint. Source backup stays filesystem-backed; each restore gets a fresh per-project S3 prefix. The S3 bucket must exist beforehand. Both target types receive the full PostgreSQL + referenced-blob restore, reference fingerprints, nonempty refusal and malformed/checksum preflight checks. These are additional CI hooks, not evidence that the commands have run or passed.
+
+Outside this seam, `tests/run-project.mjs` must provision and persist its owned `join(directory, 'data')` child before spawning the API; creating only its outer `mkdtemp` directory is insufficient. Any direct server launch using the normal CI `.data/ci` setting likewise needs a provisioning step. Other helpers that construct missing `Config.dataDir` values must do the same before `createApp`/`Store.init`. Existing inspected API fixtures use `mkdtemp` roots; normal Docker `/data` is a pre-provisioned volume. These helper/normal-CI edits are parent-owned. Do not weaken the root boundary to accommodate an unprepared helper.

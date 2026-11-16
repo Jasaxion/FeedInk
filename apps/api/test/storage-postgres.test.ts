@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import postgres from "postgres";
@@ -9,16 +9,17 @@ import { createApp } from "../src/app.js";
 import { Auth } from "../src/auth.js";
 import { hash, id, type Config, type SQL } from "../src/core.js";
 import { storageConfigFromEnv } from "../src/storage/config.js";
-import { createBackend } from "../src/storage/backend.js";
-import { databaseFingerprint } from "../src/storage/inventory.js";
+import { createBackend, syncDirectory } from "../src/storage/backend.js";
+import { databaseFingerprint, referencedKeys } from "../src/storage/inventory.js";
 import { FilesystemBackend } from "../src/storage/filesystem.js";
 import { migrateStorage, verifyReferenced } from "../src/storage/copy.js";
 
 for (const mode of ["filesystem", "s3"] as const) {
   test(`storage ${mode}: owner-gated shared bytes, real unknown commit, checkpoint/fingerprint preservation`, {
-    skip: !process.env.TEST_STORAGE_DATABASE_URL || (mode === "s3" && process.env.TEST_STORAGE_BACKEND !== "s3"), timeout: 180000,
+    skip: !process.env.TEST_STORAGE_DATABASE_URL || (mode === "s3" && process.env.TEST_STORAGE_BACKEND !== "s3"), timeout: 600000,
   }, async t => {
     const directory = await mkdtemp(join(tmpdir(), "feedink-storage-pg-")), dataDir = join(directory, "source");
+    await mkdir(dataDir); await syncDirectory(directory);
     const storage = mode === "s3" ? storageConfigFromEnv(process.env, "TEST_STORAGE_") : undefined;
     if (storage?.backend === "s3") storage.prefix = (storage.prefix || "") + `fixture-${id()}/`;
     const config: Config = { databaseUrl: process.env.TEST_STORAGE_DATABASE_URL!, dataDir, storage,
@@ -33,11 +34,11 @@ for (const mode of ["filesystem", "s3"] as const) {
         await db`INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(${hash(token)},${userId},now()+interval '1 hour')`;
         return { id: userId, headers: { cookie: `feedink_session=${token}`, "x-csrf-token": new Auth(db, config).csrf(token) } };
       };
-      const a = await account(), b = await account(), bytes = Buffer.from([0, 255, 42, 10, 13]), key = hash(bytes), images: string[] = [];
+      const a = await account(), b = await account(), bytes = Buffer.from([0, 255, 42, 10, 13]), key = hash(bytes), images: string[] = [], articleIds: string[] = [];
       const sql = await db.reserve();
       try {
         for (const owner of [a, b]) {
-          const articleId = id(), imageId = id(); images.push(imageId);
+          const articleId = id(), imageId = id(); images.push(imageId); articleIds.push(articleId);
           await ctx.store.writeTransaction(sql, async put => {
             assert.equal(await put(bytes), key);
             await sql`INSERT INTO articles(id,user_id,guid,feed_title,published_at,title,url,content_html,content_text,content_hash) VALUES(${articleId},${owner.id},${articleId},'Synthetic',now(),'Original body','https://example.invalid/original','<p>Preserved body</p>','Preserved body',${hash('<p>Preserved body</p>')})`;
@@ -68,8 +69,28 @@ for (const mode of ["filesystem", "s3"] as const) {
           assert.equal(acquired, true);
         } finally { await probe`SELECT pg_advisory_unlock(71244004)`; probe.release(); }
 
+        // 271 distinct bytes, not just 271 references to a shared key. Every reference source
+        // participates, including noncached image rows whose retained key must not be skipped.
+        const expectedKeys = [key];
+        await ctx.store.writeTransaction(sql, async put => {
+          for (let index = 0; index < 270; index++) {
+            const distinct = await put(Buffer.from(`distinct migration fixture ${index}`));
+            expectedKeys.push(distinct);
+            if (index % 3 === 0) {
+              await sql`INSERT INTO images(id,article_id,original_url,status,file_key,content_hash,content_type) VALUES(${id()},${articleIds[0]},${`https://example.invalid/retained-${index}`},${index % 2 ? 'failed' : 'pending'},${distinct},${distinct},'image/png')`;
+            } else if (index % 3 === 1) {
+              await sql`INSERT INTO ebooks(id,user_id,title,article_count,file_key) VALUES(${id()},${a.id},'Retained ebook',1,${distinct})`;
+            } else {
+              await sql`INSERT INTO feeds(id,user_id,url,title,icon_file_key) VALUES(${id()},${a.id},${`https://example.invalid/icon-${index}`},'Retained icon',${distinct})`;
+            }
+          }
+        });
+        const inventory: string[] = [];
+        for await (const referenced of referencedKeys(sql)) inventory.push(referenced);
+        assert.deepEqual(inventory, expectedKeys.sort());
+        assert.equal(new Set(inventory).size, 271);
         const source = await createBackend(dataDir, storage), targetDirectory = join(directory, "copied"), target = new FilesystemBackend(targetDirectory);
-        await target.init();
+        await mkdir(targetDirectory); await syncDirectory(directory); await target.init();
         const checkpoint = join(directory, "checkpoint.json"), scratch = join(targetDirectory, ".copy");
         // This test DB must be dedicated to this fixture: every referenced blob must belong to its source backend.
         const before = await databaseFingerprint(sql);
@@ -78,11 +99,23 @@ for (const mode of ["filesystem", "s3"] as const) {
           await sql`UPDATE images SET file_key='' WHERE id=${images[0]}`;
           await assert.rejects(verifyReferenced(sql, source), /Empty referenced storage key/);
         } finally { await sql`ROLLBACK`; }
+        const publish = target.publish.bind(target);
+        let copiedBeforeInterruption = 0;
+        target.publish = async (key, file) => {
+          await publish(key, file);
+          if (++copiedBeforeInterruption === 130) throw new Error('copy acknowledgement lost after 128-checkpoint');
+        };
+        await assert.rejects(migrateStorage(sql, source, target, scratch, checkpoint), /acknowledgement lost/);
+        const partial = JSON.parse(await readFile(checkpoint, 'utf8'));
+        assert.equal(partial.copied, 128); assert.equal(partial.lastKey, inventory[127]); assert.equal(partial.complete, false);
+        target.publish = publish;
         const result = await migrateStorage(sql, source, target, scratch, checkpoint);
+        assert.equal(result.count, 271, 'resume must cross the 256-key inventory boundary');
         assert.equal(result.fingerprint, before);
         assert.equal(await databaseFingerprint(sql), before);
         assert.deepEqual(await verifyReferenced(sql, target), await verifyReferenced(sql, source));
         const saved = JSON.parse(await readFile(checkpoint, "utf8")); assert.equal(saved.complete, true);
+        assert.equal(saved.copied, 271); assert.equal(saved.lastKey, inventory[270]);
         // Simulate interruption before durable checkpoint: replaying a page is idempotent and source is retained.
         await writeFile(checkpoint, JSON.stringify({ ...saved, lastKey: "", copied: 0, complete: false }));
         await migrateStorage(sql, source, target, scratch, checkpoint);
@@ -94,7 +127,7 @@ for (const mode of ["filesystem", "s3"] as const) {
         assert.equal(await databaseFingerprint(sql), before);
         if (storage?.backend === "s3") {
           const reverseDirectory = join(directory, "reverse"), reverse = await createBackend(reverseDirectory, { ...storage, prefix: storage.prefix + "reverse/" });
-          await reverse.init();
+          await mkdir(reverseDirectory); await syncDirectory(directory); await reverse.init();
           const reversed = await migrateStorage(sql, target, reverse, join(reverseDirectory, ".copy"), join(directory, "reverse-checkpoint.json"));
           assert.equal(reversed.fingerprint, before);
           assert.deepEqual(await verifyReferenced(sql, reverse), await verifyReferenced(sql, source));
