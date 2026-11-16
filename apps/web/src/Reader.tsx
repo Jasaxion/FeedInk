@@ -48,6 +48,14 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
       if (detail.fulltextError) app.notify(`全文提取未完成：${detail.fulltextError}`, true); else app.notify('全文与可用图片已持久归档');
     }); setFetching(false);
   }
+  const fulltextLabel = fetching ? '正在提取全文' : mode === 'fulltext' ? '取消全文显示' : article?.fulltextHtml ? '显示全文' : '提取全文';
+  const fulltextDisabled = fetching || (mode !== 'fulltext' && !article?.fulltextHtml && !app.online);
+  function toggleFulltext() {
+    if (!article || fetching) return;
+    if (mode === 'fulltext') changeMode('feed');
+    else if (article.fulltextHtml) changeMode('fulltext');
+    else if (app.online) void extract();
+  }
   function scroll() {
     if (!article || !scrollRef.current) return;
     const element = scrollRef.current; const progress = progressAt(element.scrollTop, element.scrollHeight, element.clientHeight);
@@ -57,7 +65,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   return <main className={`reader-pane ${settings.wrapCode ? 'wrap-code' : ''}`} data-testid="reader" data-focus={focused && !!article || undefined} aria-label="文章阅读区">
     {!article ? <Empty title="留一点时间，给阅读"><p>从左侧选择一篇文章</p><small>J / K 切换 · Enter 打开 · ? 快捷键</small></Empty> : <>
       {toolbar ? <header className="reader-toolbar"><IconButton icon={focused ? 'focusExit' : 'back'} label={focused ? '退出专注阅读' : '返回'} onClick={focused ? () => setFocused(false) : back} /><IconButton icon="previous" label="上一篇 (K)" onClick={() => move(-1)} /><IconButton icon="next" label="下一篇 (J)" onClick={() => move(1)} /><span className="toolbar-spacer" />
-        <IconButton icon="article" label={fetching ? '正在提取全文' : '提取全文'} className="icon-button desktop-tool" aria-pressed={mode === 'fulltext'} disabled={fetching || !app.online} onClick={() => void extract()} />
+        <IconButton icon="article" label={fulltextLabel} className="icon-button desktop-tool" aria-pressed={mode === 'fulltext'} disabled={fulltextDisabled} onClick={toggleFulltext} />
         <IconButton icon="saved" label="稍后阅读" aria-pressed={article.saved} onClick={() => void app.task(() => app.patchArticle(article, { saved: !article.saved }))} />
         <IconButton icon="tag" label="管理文章标签" className="icon-button desktop-tool" onClick={more} />
         <IconButton icon={article.read ? 'unread' : 'check'} label={article.read ? '标记为未读' : '标记为已读'} className="icon-button desktop-tool" onClick={() => void app.task(() => app.patchArticle(article, { read: !article.read }))} />
@@ -69,7 +77,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
         {menuView === 'main' && <>
           <button onClick={() => setMenuView('reading')}><Icon name="filters" />正文与排版</button>
           <button onClick={() => { setSpeech(true); setMenuView('speech'); }}><Icon name="audio" />朗读</button>
-          <button disabled={fetching || !app.online} onClick={() => { setMenuOpen(false); void extract(); }}><Icon name="article" />提取全文</button>
+          <button disabled={fulltextDisabled} aria-pressed={mode === 'fulltext'} onClick={() => { setMenuOpen(false); toggleFulltext(); }}><Icon name="article" />{fulltextLabel}</button>
           <button onClick={() => { setFocused(value => !value); setMenuOpen(false); }}><Icon name={focused ? 'focusExit' : 'focus'} />{focused ? '退出专注阅读' : '专注阅读'}</button>
           <a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer" onClick={() => setMenuOpen(false)}><Icon name="external" />在新标签页打开原文</a>
           <button onClick={() => { setMenuOpen(false); more(); }}><Icon name="tag" />标签与文章操作</button>
@@ -90,7 +98,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
           <h1><a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">{article.title || '无标题文章'}</a></h1>
           <div className="article-meta"><time dateTime={article.publishedAt}>{formatDate(article.publishedAt)}</time>{article.author && <span>· {article.author}</span>}</div>
           {mode === 'webpage' ? <section className="original-page"><div className="original-page-actions"><a className="secondary" href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">在新标签页打开原文</a><button className="text-button" onClick={() => changeMode('feed')}>返回归档正文</button></div><p className="muted small">原网页在受限沙箱中显示。网站可能拒绝嵌入或需要脚本，此时请使用上方外部打开链接。页面不能导航本应用或读取账号。</p>{app.online && safeExternalUrl(article.url) ? <iframe key={article.url} className="original-frame" title={`原网页：${article.title}`} src={safeExternalUrl(article.url)!} sandbox="" referrerPolicy="no-referrer" /> : <p role="status">离线时原网页不可用，请返回已归档正文。</p>}</section> : <>
-            {mode === 'fulltext' && !article.fulltextHtml && <p className="notice">{article.fulltextError || (app.online ? '尚未取得全文，当前显示 RSS 正文。可点击上方“提取全文”重试。' : '此文章的全文尚未缓存，当前显示已缓存的 RSS 正文。')}</p>}
+            {mode === 'fulltext' && !article.fulltextHtml && <p className="notice">{article.fulltextError || (app.online ? '尚未取得全文，当前显示 RSS 正文。' : '此文章的全文尚未缓存，当前显示已缓存的 RSS 正文。')}{app.online && <button className="text-button" disabled={fetching} onClick={() => void extract()}>重试提取全文</button>}</p>}
             <AnnotatedArticle key={`${article.id}:${mode}:${mode === 'fulltext' ? article.fulltextHtml : article.contentHtml}`} toolbarHost={annotationHost} article={article} mode={mode === 'fulltext' && article.fulltextHtml ? 'fulltext' : 'feed'} onImage={setImage} onTap={() => { if (settings.tapToPage) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />
           </>}
           {article.enclosures.length > 0 && <section className="enclosures"><h3>播客与附件</h3>{article.enclosures.map((enclosure, index) => { const url = safeExternalUrl(enclosure.url); if (!url) return null; return <div key={index}>{enclosure.type.startsWith('audio/') ? <audio controls preload="none" src={url} aria-label={`播客音频 ${index + 1}`} /> : enclosure.type.startsWith('video/') ? <video controls preload="none" src={url} aria-label={`视频 ${index + 1}`} /> : <a href={url} target="_blank" rel="noopener noreferrer">打开附件 {index + 1} ({enclosure.type})</a>}<small className="muted">媒体由原站提供，未加入离线图片缓存。浏览器支持的格式才能播放。</small></div>; })}</section>}

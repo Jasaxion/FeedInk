@@ -24,7 +24,7 @@ const article = { stateVersion: 0, id: 'article-one', feedId: 'feed-one', subscr
 const secondArticle = { ...article, id: 'article-two', title: '把阅读变成持续的小习惯', contentHtml: '<p>第二篇的正文，继续朗读与异步阅读切换的回归夹具。</p>', contentText: '第二篇的正文，继续朗读。', images: [], thumbnailUrl: null };
 const articleRows = [article, secondArticle];
 let releaseFulltext;
-let fulltextRequested = false;
+let fulltextRequested = false, fulltextRequests = 0;
 const subscriptions = [{ id: 'sub-one', feedId: 'feed-one', title: 'FeedInk 原创阅读札记', url: 'https://example.test/feed', siteUrl: 'https://example.test', description: '', iconUrl: null, folderId: 'folder-one', unreadCount: 1, totalCount: 1, settings: {}, status: 'ok', lastFetchedAt: '2026-01-02T12:00:00Z', lastError: null, position: 0 }];
 const folders = [{ id: 'folder-one', name: '阅读与设计', unreadCount: 1, settings: {}, position: 0 }];
 const server = createServer(async (req, res) => {
@@ -50,7 +50,7 @@ const server = createServer(async (req, res) => {
     if (matchedArticle) return json(matchedArticle);
     const stateArticle = articleRows.find(item => url.pathname === `/api/articles/${item.id}/state`);
     if (stateArticle) { if (req.headers['if-match'] !== `"${stateArticle.stateVersion}"`) return json({ error: { code: 'STATE_CONFLICT', message: 'state conflict' } }, 412); let body = ''; for await (const chunk of req) body += chunk; const patch = JSON.parse(body); Object.assign(stateArticle, patch); stateArticle.stateVersion++; if (patch.tagIds) stateArticle.tags = patch.tagIds.includes(tag.id) ? [tag] : []; return json(stateArticle); }
-    if (url.pathname === '/api/articles/article-one/fulltext') { fulltextRequested = true; await new Promise(resolve => { releaseFulltext = resolve; }); article.fulltextHtml = '<p>第一篇提取全文，不得覆盖第二篇阅读。</p>'; return json(article); }
+    if (url.pathname === '/api/articles/article-one/fulltext') { fulltextRequested = true; fulltextRequests++; await new Promise(resolve => { releaseFulltext = resolve; }); article.fulltextHtml = '<p>第一篇提取全文，不得覆盖第二篇阅读。</p>'; return json(article); }
     if (url.pathname === '/api/assets/image-one') { res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' }); res.end(await readFile(resolve(dist, 'icon-192.png'))); return; }
     if (url.pathname === '/api/auth/logout') { loggedIn = false; res.writeHead(204); res.end(); return; }
     return json({ error: { code: 'fixture_missing', message: 'Fixture route intentionally not implemented' } }, 404);
@@ -116,6 +116,12 @@ try {
   await page.keyboard.press('Escape');
   await page.getByTestId('article-card').filter({ hasText: article.title }).click();
   await expect(page.getByTestId('reader-content')).toContainText('持久存档');
+  await page.getByRole('button', { name: '显示全文', exact: true }).click();
+  await expect(page.getByTestId('reader-content')).toContainText('第一篇提取全文');
+  await page.getByRole('button', { name: '取消全文显示', exact: true }).click();
+  await expect(page.getByTestId('reader-content')).toContainText('持久存档');
+  assert.equal(fulltextRequests, 1, 'cached display toggles must not fetch again');
+  assert.ok(article.fulltextHtml.includes('第一篇提取全文'), 'returning to RSS keeps the archived full text');
   await page.locator('.reader-scroll').focus(); await page.keyboard.press('y'); await page.waitForFunction(() => document.querySelector('[aria-label="稍后阅读"]').getAttribute('aria-pressed') === 'true');
   await expect.poll(() => article.saved).toBe(true);
   step('service worker and cache readiness');
@@ -124,6 +130,13 @@ try {
   step('offline body and image reload');
   await setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByTestId('reader-content').waitFor();
   await page.waitForFunction(() => { const image = document.querySelector('.article-content img[alt="归档图片"]'); return image?.src.startsWith('data:image/') && image.complete && image.naturalWidth > 0; });
+  await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+  await page.getByRole('button', { name: '显示全文', exact: true }).click();
+  await expect(page.getByTestId('reader-content')).toContainText('第一篇提取全文');
+  await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
+  await page.getByRole('button', { name: '取消全文显示', exact: true }).click();
+  await expect(page.getByTestId('reader-content')).toContainText('持久存档');
+  assert.equal(fulltextRequests, 1, 'offline toggles cannot send a new fulltext request');
   await page.locator('.reader-scroll').focus(); await page.keyboard.press('y'); await page.waitForFunction(() => document.querySelector('[data-testid="offline-status"]').textContent.includes('待同步'));
   step('reconnect state replay');
   assert.equal(article.saved, true); await setOffline(false);
