@@ -67,10 +67,13 @@ jobs:
           await durableDirectory(process.env.DATA_DIR, process.env.GITHUB_WORKSPACE);
           JS
       - name: Typecheck workspaces and test contracts
-        run: npm run typecheck
+        run: |
+          npm run typecheck
+          npx tsc --noEmit --strict --skipLibCheck --esModuleInterop --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2022,DOM apps/api/test/ai*.ts
       - name: Production dependency audit
         run: npm audit --omit=dev --audit-level=moderate
       - name: Unit, PostgreSQL integration and upstream fixture tests
+        timeout-minutes: 15
         env:
           NODE_ENV: test
         run: npm test
@@ -218,7 +221,7 @@ jobs:
 
   storage:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:17-alpine
@@ -253,6 +256,13 @@ jobs:
           npm run build -w @feedink/ink
           npm run build -w @feedink/shared
           npm run build -w @feedink/api
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.2'
+          cache: false
+      - name: Build fixed public-source S3 protocol fixture
+        timeout-minutes: 10
+        run: sh scripts/build-s3-fixture.sh
       - name: Start private synthetic S3 fixture
         run: |
           access_key="fixture$(openssl rand -hex 8)"
@@ -265,7 +275,7 @@ jobs:
           test -n "$bridge_gateway"
           docker run --detach --name feedink-s3-ci --publish 127.0.0.1:19000:9000 --publish "$bridge_gateway:19000:9000" \
             --env "MINIO_ROOT_USER=$access_key" --env "MINIO_ROOT_PASSWORD=$secret_key" \
-            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            feedink-s3-fixture:ci server /data
           ready=false
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:19000/minio/health/live; then ready=true; break; fi

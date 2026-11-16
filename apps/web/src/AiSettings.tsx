@@ -6,6 +6,7 @@ import { authEpoch } from './authEpoch';
 import { Field, Toggle } from './components';
 import { aiRequestError, useAiIdentity } from './aiIdentity';
 import { AiResults } from './AiResults';
+import { publishAiConfigChange } from './aiConfigSync';
 import './ai.css';
 
 export const AI_LANGUAGES: ReadonlyArray<readonly [AiLanguage, string]> = [
@@ -52,7 +53,7 @@ function AiSettingsSession() {
       const next = await api<AiConfig>('/ai/config', { method: 'PUT', signal, body: JSON.stringify({ enabled, baseUrl: baseUrl.trim(), model: model.trim(), targetLanguage, ...(clearKey ? { apiKey: null } : apiKey ? { apiKey } : {}) }) });
       if (!isCurrent()) return;
       adopt(next); setApiKey(''); setClearKey(false); setMessage('AI 配置已保存；密钥不会回传。');
-      window.dispatchEvent(new Event('feedink:ai-config-changed'));
+      publishAiConfigChange(app.session.user.id, next.revision);
     });
   }
   if (locked || !isCurrent()) return null;

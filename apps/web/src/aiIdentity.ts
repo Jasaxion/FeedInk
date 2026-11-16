@@ -23,6 +23,8 @@ export function aiRequestError(error: unknown): string {
   if (error instanceof Error && ['AI_JOB_CONTEXT', 'AI_JOB_COVERAGE', 'AI_JOB_SOURCE', 'AI_JOB_INCOMPLETE'].includes(error.message)) return '返回的结果与所选正文不匹配或覆盖不完整，已拒绝显示；未自动重试。';
   if (error instanceof HttpError) {
     if (error.status === 401 || error.status === 403) return '当前账号无法使用 AI，请检查登录状态。';
+    if (error.status === 409 && error.code === 'AI_INTERRUPTED') return '上次任务已失败、取消或结果未知；未自动重试。可明确重试，可能产生费用。';
+    if (error.status === 409 && error.code === 'AI_CONFIG_CHANGED') return 'AI 配置已变更，未发送模型请求。请重新读取配置后明确生成；未自动重试。';
     if (error.status === 409) return '正文或配置已变更，请重新打开 AI 操作；未自动重试。';
     if (error.status === 429) return '请求过于频繁，请稍后手动重试。';
     if (error.status === 400 || error.status === 422) return '配置或请求不可用，请检查模型、地址与密钥。';

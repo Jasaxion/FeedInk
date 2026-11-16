@@ -8,6 +8,7 @@ import { AnnotatedArticle } from './Annotations';
 import { retireActiveNotes } from './annotationSync';
 import { assertAuthEpoch, authEpoch } from './authEpoch';
 import { AiReader } from './AiReader';
+import { originalReadingProgress, restoreOriginalReadingProgress } from './readingProgress';
 
 export function Reader({ article, mode, setMode, back, move, more, onDetail, scrollRef }: {
   article: ArticleDetail | null; mode: ArticleMode; setMode: (mode: ArticleMode) => void; back: () => void; move: (direction: number) => void; more: () => void; onDetail: (article: ArticleDetail) => void; scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -36,7 +37,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   useEffect(() => { setMenuOpen(false); setArchiveOpen(false); if (!article) setFocused(false); }, [article?.id]);
   useEffect(() => {
     if (!menuOpen && !focused) return;
-    const key = (event: KeyboardEvent) => { if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return; if (menuOpen) { event.preventDefault(); event.stopImmediatePropagation(); setMenuOpen(false); menuButton.current?.focus(); return; } if (document.querySelector('.annotation-float')) return; event.preventDefault(); event.stopImmediatePropagation(); setFocused(false); };
+    const key = (event: KeyboardEvent) => { if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return; if (menuOpen) { event.preventDefault(); event.stopImmediatePropagation(); setMenuOpen(false); menuButton.current?.focus(); return; } if (document.querySelector('.annotation-float') || event.target instanceof Element && event.target.closest('.ai-card')) return; event.preventDefault(); event.stopImmediatePropagation(); setFocused(false); };
     const outside = (event: PointerEvent) => { if (menuOpen && !menu.current?.contains(event.target as Node) && !menuButton.current?.contains(event.target as Node)) setMenuOpen(false); };
     window.addEventListener('keydown', key, true); document.addEventListener('pointerdown', outside);
     return () => { window.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', outside); };
@@ -49,7 +50,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   useEffect(() => setToolbar(!settings.hideToolbar), [settings.hideToolbar]);
   useEffect(() => setZoom(1), [image]);
   useEffect(() => {
-    const id = requestAnimationFrame(() => { const element = scrollRef.current; if (element && article) element.scrollTop = article.progress * Math.max(0, element.scrollHeight - element.clientHeight); });
+    const id = requestAnimationFrame(() => { const element = scrollRef.current; if (element && article) restoreOriginalReadingProgress(element, article.progress); });
     return () => { cancelAnimationFrame(id); if (progressTimer.current) clearTimeout(progressTimer.current); };
   }, [article?.id, mode]);
   async function extract() {
@@ -71,7 +72,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   }
   function scroll() {
     if (!article || !scrollRef.current) return;
-    const element = scrollRef.current; const progress = progressAt(element.scrollTop, element.scrollHeight, element.clientHeight);
+    const element = scrollRef.current; const progress = originalReadingProgress(element);
     if (progressTimer.current) clearTimeout(progressTimer.current);
     progressTimer.current = setTimeout(() => void app.task(() => app.patchArticle(article, { progress })), 700);
   }
@@ -111,7 +112,7 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
         <article className="article-document"><div className="article-source"><SourceIcon subscriptionId={article.subscriptionId} /><span>{article.feedTitle || '网页存档'}</span></div>
           <h1><a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">{article.title || '无标题文章'}</a></h1>
           <div className="article-meta"><time dateTime={article.publishedAt}>{formatDate(article.publishedAt)}</time>{article.author && <span>· {article.author}</span>}</div>
-          <div ref={setAiBodyHost} className="reader-ai-results" />
+          <div ref={setAiBodyHost} className="reader-ai-results" data-reading-transient />
           {mode === 'webpage' ? <section className="original-page"><div className="original-page-actions"><a className="secondary" href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">在新标签页打开原文</a><button className="text-button" onClick={() => changeMode('feed')}>返回归档正文</button></div><p className="muted small">原网页在受限沙箱中显示。网站可能拒绝嵌入或需要脚本，此时请使用上方外部打开链接。页面不能导航本应用或读取账号。</p>{app.online && safeExternalUrl(article.url) ? <iframe key={article.url} className="original-frame" title={`原网页：${article.title}`} src={safeExternalUrl(article.url)!} sandbox="" referrerPolicy="no-referrer" /> : <p role="status">离线时原网页不可用，请返回已归档正文。</p>}</section> : <>
             {mode === 'fulltext' && !article.fulltextHtml && <p className="notice">{article.fulltextError || (app.online ? '尚未取得全文，当前显示 RSS 正文。' : '此文章的全文尚未缓存，当前显示已缓存的 RSS 正文。')}{app.online && <button className="text-button" disabled={fetching} onClick={() => void extract()}>重试提取全文</button>}</p>}
             <AnnotatedArticle key={`${article.id}:${mode}:${mode === 'fulltext' ? article.fulltextHtml : article.contentHtml}`} toolbarHost={annotationHost} onContextChange={onAiContextChange} article={article} mode={mode === 'fulltext' && article.fulltextHtml ? 'fulltext' : 'feed'} onImage={setImage} onTap={() => { if (settings.tapToPage) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />

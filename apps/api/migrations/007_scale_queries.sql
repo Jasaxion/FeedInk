@@ -33,7 +33,9 @@ RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   IF n = 0 AND u = 0 AND s = 0 THEN RETURN; END IF;
   -- A user cascade may already have removed the owner and its counters. Never
-  -- recreate children of a deleted owner. Negative/missing buckets fail closed.
+  -- recreate or update children of a deleted owner: repeated same-transaction
+  -- updates can recheck this FK during cascades. Live negative/missing buckets fail closed.
+  IF NOT EXISTS (SELECT 1 FROM users WHERE id=owner_id) THEN RETURN; END IF;
   UPDATE article_counts SET total=total+n, unread=unread+u, saved=saved+s
     WHERE user_id=owner_id AND tag_key=tag AND feed_key=feed;
   IF NOT FOUND THEN

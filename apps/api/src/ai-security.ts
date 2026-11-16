@@ -6,6 +6,7 @@ const errors = {
   AI_UNAVAILABLE: [503, 'AI encryption is not configured; contact the operator'],
   AI_SECRET: [409, 'The saved AI credential cannot be authenticated; save it again'],
   AI_CONFIG: [409, 'Save a complete AI configuration before requesting this operation'],
+  AI_CONFIG_CHANGED: [409, 'The AI configuration changed; review it before requesting a new job'],
   AI_DESTINATION: [400, 'The AI destination is not permitted'],
   AI_PROVIDER: [502, 'The provider request failed; retry explicitly if desired'],
   AI_INTERRUPTED: [409, 'Work was interrupted or its outcome is unknown; retry explicitly if desired'],
@@ -33,6 +34,15 @@ export function aiErrorFromCode(code: string): ApiFailure {
 export function safeAiError(error: unknown): ApiFailure {
   return error instanceof ApiFailure && Object.hasOwn(errors, error.code)
     ? aiFailure(error.code as AiErrorCode) : aiFailure('AI_INTERRUPTED');
+}
+/** Check literal decoded text and adjacent joins, not arbitrary encodings of a secret. */
+export function assertAiCredentialAbsent(parts: Iterable<string>, credential: string): void {
+  let tail = '';
+  for (const part of parts) {
+    const joined = tail + part;
+    if (joined.includes(credential)) throw aiFailure('AI_OUTPUT');
+    tail = credential.length > 1 ? joined.slice(-(credential.length - 1)) : '';
+  }
 }
 export interface AiEnvironment { encryptionKey?: Buffer; allowHosts: readonly string[] }
 /** Invalid/missing optional AI settings fail closed without breaking RSS startup. */

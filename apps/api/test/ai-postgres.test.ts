@@ -10,6 +10,7 @@ import { Annotations } from '../src/annotations.js';
 import { AiService, DEFAULT_AI_CONFIG } from '../src/ai.js';
 import { installAiRoutes } from '../src/ai-routes.js';
 import { decryptAiKey } from '../src/ai-security.js';
+import { prepareAiDocument, segmentBatches } from '../src/ai-content.js';
 import { aiFixture, hostedAiTests, syntheticAiKey, englishAiParagraph } from './ai-fixture.js';
 
 async function eventually(predicate: () => boolean | Promise<boolean>): Promise<void> {
@@ -91,6 +92,21 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
       assert.equal(fixture.requests.length, calls);
       await db`UPDATE ai_configs SET encrypted_key=${bConfig.encrypted_key},revision=${bConfig.revision} WHERE user_id=${b.id}`;
     });
+    await t.test('HTTP config revision precondition has a safe 409 and rejects invalid/mismatched requests without work', async () => {
+      const source = await article(a), current = await ai.getConfig(a.id), before = fixture.requests.length;
+      const params = { operation: 'summary', mode: 'feed' };
+      for (const configRevision of [-1, 1.5, 2147483648, '1', null]) {
+        assert.equal((await request(a, 'POST', `/api/articles/${source}/ai`, { ...params, configRevision })).statusCode, 400);
+      }
+      const mismatch = await request(a, 'POST', `/api/articles/${source}/ai`, { ...params, configRevision: current.revision - 1 });
+      assert.equal(mismatch.statusCode, 409); assert.equal(mismatch.json().error.code, 'AI_CONFIG_CHANGED');
+      assert.ok(!mismatch.body.includes(syntheticAiKey));
+      assert.equal((await db`SELECT id FROM ai_jobs WHERE article_id=${source}`).length, 0); assert.equal(fixture.requests.length, before);
+      const response = await request(a, 'POST', `/api/articles/${source}/ai`, { ...params, configRevision: current.revision });
+      assert.equal(response.statusCode, 202); assert.equal(response.json().job.configRevision, current.revision);
+      assert.equal((await ai.getJob(a.id, response.json().job.id)).configRevision, current.revision);
+      assert.equal((await ai.cancel(a.id, response.json().job.id)).configRevision, current.revision);
+    });
     await t.test('canonical context precondition, source/mode ownership, missing fulltext and no browser body replacement', async () => {
       const source = await article(a), context = await new Annotations(db).get(a.id, source, 'feed');
       const before = fixture.requests.length;
@@ -131,7 +147,7 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
       assert.ok(seen.includes(englishAiParagraph.repeat(100))); assert.ok(seen.includes('Final figure caption')); assert.ok(!seen.includes('constant_value'));
       assert.ok(!seen.includes('Keep this private note')); assert.ok(seen.includes('Synthetic image caption'));
       const cached = await request(a, 'POST', `/api/articles/${source}/ai`, params);
-      assert.equal(cached.statusCode, 200); assert.equal(cached.json().job.id, translated.id);
+      assert.equal(cached.statusCode, 200); assert.equal(cached.json().job.id, translated.id); assert.equal(cached.json().job.configRevision, translated.config_revision);
       const forced = await ai.enqueue(a.id, source, { ...params, force: true }); assert.notEqual(forced.job.id, translated.id); await ai.cancel(a.id, forced.job.id);
       const summary = await ai.enqueue(a.id, source, { operation: 'summary', mode: 'feed' });
       const summarized = await run(summary.job.id);
@@ -159,6 +175,62 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
         await assert.rejects(() => ai.enqueue(a.id, source, { operation: 'translate', mode: 'feed' }), hasCode('AI_INTERRUPTED'));
       }
       fixture.setBehavior('ok');
+    });
+    await t.test('escaped and reconstructed credentials fail without publication, logging or automatic retry', async () => {
+      const cases = [
+        { kind: 'escaped-summary', operation: 'summary' as const, html: '<p>Body</p>', title: 'Title' },
+        { kind: 'escaped-translation', operation: 'translate' as const, html: '<p>Body</p>', title: 'Title' },
+        { kind: 'text-segments', operation: 'translate' as const, html: `<p>${'x'.repeat(2400)}</p>`, title: '' },
+        { kind: 'text-batches', operation: 'translate' as const, html: `<p>${'x'.repeat(7200)}</p>`, title: '' },
+        { kind: 'inline-text', operation: 'translate' as const, html: '<p>First<strong>Second</strong></p>', title: '' },
+        // Segmentation visits sibling text before nested text; only rendered visible order joins this key.
+        { kind: 'visible-order', operation: 'translate' as const, html: '<p>First<strong>Second</strong>Third</p>', title: '' },
+        { kind: 'translated-title', operation: 'translate' as const, html: '', title: 'x'.repeat(2400) },
+        { kind: 'translated-alt', operation: 'translate' as const, html: `<img src="/api/assets/11111111-1111-4111-8111-111111111111" alt="${'x'.repeat(2400)}">`, title: '' },
+        { kind: 'translated-attribute-title', operation: 'translate' as const, html: `<a href="https://example.invalid" title="${'x'.repeat(2400)}"></a>`, title: '' },
+        { kind: 'summary-batches', operation: 'summary' as const, html: `<p>${'x'.repeat(7200)}</p>`, title: '' },
+      ];
+      try {
+        for (const sample of cases) {
+          const credential = sample.kind === 'escaped-summary' ? 'admitted&revision-fixture-key-not-real' : syntheticAiKey;
+          const admitted = await ai.saveConfig(a.id, { ...input, apiKey: credential });
+          const escaped = [...credential].map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+          const prefix = credential.slice(0, 19), suffix = credential.slice(19);
+          const source = await article(a, sample.html, sample.title), doc = prepareAiDocument(sample.html, sample.title, sample.operation);
+          if (sample.kind === 'translated-alt') await db`INSERT INTO images(id,article_id,original_url)
+            VALUES('11111111-1111-4111-8111-111111111111',${source},'https://example.invalid/credential-fixture.png')`;
+          const batches = segmentBatches(doc.segments), boundary = sample.kind === 'text-batches' ? batches[0].length - 1 : 0;
+          let responseCount = 0;
+          fixture.setCompletion((segments, summary) => {
+            responseCount++;
+            const split = sample.kind === 'summary-batches';
+            const text = split ? (responseCount === 1 ? prefix : suffix) : credential;
+            const output = summary ? { coveredIds: segments.map(s => s.id), summaryText: text }
+              : { segments: segments.map(s => ({ id: s.id, text: sample.kind === 'escaped-translation' ? credential
+                : sample.kind === 'visible-order' ? (s.text === 'First' ? prefix : s.text === 'Second' ? suffix : 'Safe prose')
+                : s.id === doc.segments[boundary].id ? prefix : s.id === doc.segments[boundary + 1].id ? suffix : 'Safe prose' })).reverse() };
+            const json = JSON.stringify(output);
+            return sample.kind.startsWith('escaped-') ? json.replaceAll(credential, escaped) : json;
+          });
+          const before = fixture.requests.length, params = { operation: sample.operation, mode: 'feed' };
+          const queued = await ai.enqueue(a.id, source, params), failed = await run(queued.job.id);
+          assert.equal(failed.status, 'failed', sample.kind); assert.equal(failed.error_code, 'AI_OUTPUT', sample.kind);
+          assert.equal(failed.result, null); assert.ok(!JSON.stringify(failed).includes(credential));
+          assert.equal(queued.job.configRevision, admitted.revision); assert.equal(failed.config_revision, admitted.revision);
+          const expected = sample.kind.endsWith('-batches') ? 2 : 1;
+          assert.equal(fixture.requests.length, before + expected, sample.kind);
+          assert.ok(fixture.requests.slice(before).every(request => request.authorization === `Bearer ${credential}`));
+          for (const path of [`/api/ai/jobs/${failed.id}`, `/api/ai/results/${failed.id}`, '/api/ai/results']) {
+            const response = await request(a, 'GET', path);
+            assert.equal(response.statusCode, 200); assert.ok(!response.body.includes(credential));
+            if (path !== '/api/ai/results') assert.equal(response.json().job.result, undefined);
+          }
+          await assert.rejects(() => ai.enqueue(a.id, source, params), hasCode('AI_INTERRUPTED'));
+          await ai.recoverExpired(); assert.equal(await ai.claim(), undefined);
+          assert.equal(fixture.requests.length, before + expected);
+          assert.ok(!logs.join('').includes(credential));
+        }
+      } finally { fixture.setCompletion(); await ai.saveConfig(a.id, input); }
     });
     await t.test('source title/body, config revision and selected feed/fulltext identity invalidate cache', async () => {
       const source = await article(a), first = await ai.enqueue(a.id, source, { operation: 'summary', mode: 'feed' }); await run(first.job.id);

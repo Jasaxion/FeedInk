@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { aiFixture } from './ai-fixture.mjs';
 import { aiResultsRegressions } from './ai-results-browser.mjs';
+import { aiReadingRegressions } from './ai-reading-regressions.mjs';
 import { deferred, emptyAnnotationDocument } from './audit-fixture.mjs';
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('AI browser fixtures run only on approved GitHub-hosted runners.');
 const { chromium, webkit, expect } = await import(process.env.FEEDINK_PLAYWRIGHT_MODULE || '@playwright/test');
@@ -141,7 +142,7 @@ try {
     await startAi(page, 'translate');
     await expect(page.getByTestId('ai-bilingual')).toContainText('译文末尾覆盖见证');
     await expect(page.locator('.ai-bilingual .feedink-ai-pair')).toHaveCount(131);
-    await expect(page.locator('.ai-bilingual .feedink-ai-target[lang="zh-CN"]')).toHaveCount(131);
+    await expect(page.locator('.ai-bilingual div.feedink-ai-target[lang="zh-CN"]')).toHaveCount(131);
     await expect(page.getByTestId('ai-progress')).toContainText('131 / 131');
     await expect(page.locator('.ai-bilingual img')).toHaveCount(1);
     await expect(page.locator('.ai-bilingual img')).toHaveJSProperty('complete', true);
@@ -290,5 +291,6 @@ try {
     await expect(page.getByTestId('ai-card')).toContainText('AI 只处理已归档正文');
     assert.equal(ai.calls.length, 0); assert.equal(ai.providerCalls, 0);
   });
+  await aiReadingRegressions(browser, expect);
   await aiResultsRegressions(browser, expect);
 } finally { await browser.close(); }

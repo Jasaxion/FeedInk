@@ -2,7 +2,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Languages, Sparkles } from 'lucide-react';
 import type { AiConfig, AiJob, AiLanguage, AiOperation, AnnotationContext, AnnotationDocument, ArticleDetail, ArticleMode } from '@feedink/shared';
-import { api } from './api';
+import { api, HttpError } from './api';
+import { isNewAiConfigRevision, subscribeAiConfigChange } from './aiConfigSync';
 import { useApp } from './context';
 import { Field } from './components';
 import { aiRequestError, useAiIdentity } from './aiIdentity';
@@ -24,7 +25,8 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
   const [operation, setOperation] = useState<AiOperation | null>(null), [config, setConfig] = useState<AiConfig | null>(null);
   const [targetLanguage, setTargetLanguage] = useState<AiLanguage>('zh-CN');
   const [job, setJob] = useState<AiJob | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [paused, setPaused] = useState(false);
-  const [expanded, setExpanded] = useState(true), [cancelRequested, setCancelRequested] = useState(false);
+  const [expanded, setExpanded] = useState(true), [cancelRequested, setCancelRequested] = useState(false), [interrupted, setInterrupted] = useState(false);
+  const configRevision = useRef(0);
   const generation = useRef(0), controller = useRef<AbortController | null>(null), timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const task = useRef<{ identity: AiJobIdentity; id: string } | null>(null);
   const retiredResultIds = useRef(new Set<string>());
@@ -40,11 +42,30 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
       // A cached POST reply may still be in flight and not have exposed its job ID yet.
       else if (!task.current && controller.current) for (const id of detail.ids) retiredResultIds.current.add(id);
     };
-    window.addEventListener('feedink:ai-config-changed', retirePresentation);
+    const unsubscribe = subscribeAiConfigChange(change => {
+      if (!isCurrent() || !isNewAiConfigRevision(change, app.session.user.id, configRevision.current)) return;
+      configRevision.current = change.revision; retirePresentation();
+    });
     window.addEventListener(AI_RESULT_RETIRE_EVENT, retireSelectedResults);
-    return () => { stop(); window.removeEventListener('feedink:ai-config-changed', retirePresentation); window.removeEventListener(AI_RESULT_RETIRE_EVENT, retireSelectedResults); };
+    return () => { stop(); unsubscribe(); window.removeEventListener(AI_RESULT_RETIRE_EVENT, retireSelectedResults); };
   }, [isCurrent, app.session.user.id]);
   useEffect(() => { if (operation) bodyHost?.querySelector<HTMLElement>('.ai-card')?.focus(); }, [operation, bodyHost]);
+  useEffect(() => {
+    // A missed cross-tab notification may be recovered only for an explicitly open
+    // action. This is not an admission fence: every paid POST still binds revision.
+    if (!operation || !config || !app.online || locked) return;
+    let pending: AbortController | null = null;
+    const recheck = () => {
+      if (pending || document.visibilityState !== 'visible' || !isCurrent()) return;
+      const run = generation.current, abort = new AbortController(); pending = abort;
+      const timeout = setTimeout(() => abort.abort(), 20_000);
+      void api<AiConfig>('/ai/config', { signal: abort.signal }).then(saved => {
+        if (current(run) && !abort.signal.aborted && Number.isSafeInteger(saved.revision) && saved.revision > configRevision.current) { configRevision.current = saved.revision; retirePresentation(); }
+      }).catch(() => { /* No automatic retry or paid work after an unavailable recheck. */ }).finally(() => { clearTimeout(timeout); if (pending === abort) pending = null; });
+    };
+    window.addEventListener('focus', recheck); document.addEventListener('visibilitychange', recheck);
+    return () => { pending?.abort(); window.removeEventListener('focus', recheck); document.removeEventListener('visibilitychange', recheck); };
+  }, [operation, config?.revision, app.online, locked, isCurrent]);
   useEffect(() => {
     if (!app.online || locked) { stop(); setBusy(false); if (task.current) setPaused(true); }
     if (locked) { setJob(null); setConfig(null); setOperation(null); }
@@ -59,11 +80,17 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
   function report(reason: unknown, run: number) { if (current(run)) { setError(aiRequestError(reason)); setBusy(false); } }
   async function choose(next: AiOperation) {
     stop(); const run = generation.current;
-    task.current = null; setJob(null); setError(''); setPaused(false); setCancelRequested(false); setConfig(null); setTargetLanguage('zh-CN'); setExpanded(true);
+    task.current = null; setJob(null); setError(''); setInterrupted(false); setPaused(false); setCancelRequested(false); setConfig(null); setTargetLanguage('zh-CN'); setExpanded(true);
     setOperation(next); setBusy(false);
     if (!isCurrent() || !online.current || !displayedSourceMatches || app.session.user.isDemo || mode === 'fulltext' && !article.fulltextHtml) return;
     setBusy(true);
-    try { const saved = await request<AiConfig>('/ai/config', {}, run); if (current(run)) { setConfig(saved); setTargetLanguage(saved.targetLanguage || 'zh-CN'); setBusy(false); } }
+    try {
+      const saved = await request<AiConfig>('/ai/config', {}, run);
+      if (current(run)) {
+        if (!Number.isSafeInteger(saved.revision) || saved.revision < configRevision.current || saved.revision < 0) throw new Error('AI_CONFIG_REVISION');
+        configRevision.current = saved.revision; setConfig(saved); setTargetLanguage(saved.targetLanguage || 'zh-CN'); setBusy(false);
+      }
+    }
     catch (reason) { report(reason, run); }
   }
   function close() { stop(); task.current = null; setOperation(null); setJob(null); setConfig(null); setBusy(false); toolbarHost?.querySelector<HTMLButtonElement>(`[data-ai-operation="${operation}"]`)?.focus({ preventScroll: true }); }
@@ -85,21 +112,27 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
   async function start(force = false) {
     if (!displayedSourceMatches || !operation || !config?.enabled || !config.hasKey || busy || controller.current || job && activeAiJob(job) || !online.current || app.session.user.isDemo || mode === 'fulltext' && !article.fulltextHtml || !isCurrent()) return;
     stop(); const run = generation.current;
-    setBusy(true); setError(''); setJob(null); setPaused(false); setExpanded(true); setCancelRequested(false); task.current = null;
+    setBusy(true); setError(''); setInterrupted(false); setJob(null); setPaused(false); setExpanded(true); setCancelRequested(false); task.current = null;
     try {
       // Verify the exact displayed source only on explicit action, BEFORE a paid POST.
       const document = await request<AnnotationDocument>(`/articles/${encodeURIComponent(article.id)}/annotations?${new URLSearchParams({ mode })}`, {}, run);
       if (!current(run)) return;
       const contentHash = verifiedAiSource(document, article, mode);
       if (contentHash !== displayedContext?.contentHash) throw new Error('AI_DISPLAY_CHANGED');
-      const identity: AiJobIdentity = { articleId: article.id, mode, contentHash, operation, targetLanguage, sourceUrl: article.url, sourceTitle: article.title };
-      const response = await request<{ job: AiJob }>(`/articles/${encodeURIComponent(article.id)}/ai`, { method: 'POST', body: JSON.stringify({ operation, mode, targetLanguage, contentHash, ...(force ? { force: true } : {}) }) }, run);
+      const identity: AiJobIdentity = { configRevision: config.revision, articleId: article.id, mode, contentHash, operation, targetLanguage, sourceUrl: article.url, sourceTitle: article.title };
+      const response = await request<{ job: AiJob }>(`/articles/${encodeURIComponent(article.id)}/ai`, { method: 'POST', body: JSON.stringify({ operation, mode, targetLanguage, contentHash, configRevision: config.revision, ...(force ? { force: true } : {}) }) }, run);
       if (!current(run)) return;
       assertAiJob(response.job, identity);
       if (retiredResultIds.current.has(response.job.id)) { retirePresentation(); return; }
       retiredResultIds.current.clear(); task.current = { identity, id: response.job.id }; setJob(response.job); setBusy(false);
       if (activeAiJob(response.job)) poll(identity, response.job.id, run);
-    } catch (reason) { report(reason, run); }
+    } catch (reason) {
+      if (current(run) && reason instanceof HttpError && reason.status === 409) {
+        if (reason.code === 'AI_INTERRUPTED') setInterrupted(true);
+        if (reason.code === 'AI_CONFIG_CHANGED') setConfig(null);
+      }
+      report(reason, run);
+    }
   }
   async function cancel() {
     const selected = task.current;
@@ -126,8 +159,8 @@ export function AiReader({ article, mode, displayedContext, toolbarHost, bodyHos
       {unavailable ? <p role="status">{unavailable}</p> : <>
         {busy && !job && <p role="status">正在验证配置与正文…</p>}
         {config && (!config.enabled || !config.hasKey) ? <p role="status">请先在 <button type="button" className="text-button" onClick={() => app.navigate(`/settings/ai${location.search}`)}>AI 模型设置</button> 中启用模型并保存密钥。</p> : config && <>
-          <Field label="本次目标语言"><select value={targetLanguage} disabled={busy || !!job && activeAiJob(job)} onChange={event => { stop(); task.current = null; setJob(null); setPaused(false); setError(''); setTargetLanguage(event.target.value as AiLanguage); }}><AiLanguageOptions /></select></Field>
-          {!job && <button type="button" className="secondary" disabled={busy} onClick={() => void start()}>{operation === 'summary' ? '生成摘要' : '生成双语翻译'}</button>}
+          <Field label="本次目标语言"><select value={targetLanguage} disabled={busy || !!job && activeAiJob(job)} onChange={event => { stop(); task.current = null; setJob(null); setInterrupted(false); setPaused(false); setError(''); setTargetLanguage(event.target.value as AiLanguage); }}><AiLanguageOptions /></select></Field>
+          {!job && <button type="button" className="secondary" disabled={busy} onClick={() => void start(interrupted)}>{interrupted ? '重试任务（可能产生费用）' : operation === 'summary' ? '生成摘要' : '生成双语翻译'}</button>}
           <p className="muted small">仅本次所选正文会发送至已配置模型，可能产生费用。匹配的账号内缓存结果可直接复用。</p>
         </>}
         {!config && !busy && <button type="button" className="secondary" onClick={() => void choose(operation)}>重新读取配置</button>}

@@ -79,7 +79,8 @@ function AiResultsSession() {
       {!page.items.length && <p>本页没有已保存的 AI 结果。</p>}
     </>}
     <p className="small" data-testid="ai-results-selected">已选 {selected.length} 条（可跨页，最多 {AI_RESULT_SELECTION_LIMIT} 条）</p>
-    <div className="button-row"><button type="button" className="secondary" disabled={busy || !available} onClick={() => void load()}>{page ? '刷新并返回首页' : '读取已保存结果'}</button>
+    <div className="button-row"><button type="button" className="text-button" disabled={busy || !selected.length} onClick={() => setSelected([])}>清空选择</button>
+      <button type="button" className="secondary" disabled={busy || !available} onClick={() => void load()}>{page ? '刷新并返回首页' : '读取已保存结果'}</button>
       {page?.nextCursor !== null && page?.nextCursor !== undefined && <button type="button" className="secondary" disabled={busy || !available} onClick={() => void load(page.nextCursor)}>下一页结果</button>}
       <button type="button" className="danger" disabled={!selected.length || busy || !available} onClick={() => void removeSelected()}>清理所选结果（{selected.length}）</button></div>
   </section>;

@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as cheerio from 'cheerio';
-import { prepareAiDocument, splitAiText, segmentBatches, validateTranslations, validateSummary, detectAiLanguage } from '../src/ai-content.js';
+import { JSDOM } from 'jsdom';
+import { assertAiCredentialAbsent } from '../src/ai-security.js';
+import { prepareAiDocument, splitAiText, segmentBatches, validateTranslations, validateSummary, detectAiLanguage, assertAiDecodedCredentialAbsent, assertAiResultCredentialAbsent } from '../src/ai-content.js';
 import { englishAiParagraph } from './ai-fixture.js';
 
 const hasCode = (code: string) => (error: any) => error.code === code;
@@ -65,4 +67,38 @@ test('ai-content: Unicode splitting is lossless and summary includes code as wel
   const doc = prepareAiDocument(`<p>${englishAiParagraph.repeat(100)}</p><pre><code>final_code()</code></pre><p>TAIL-MARKER conclusion</p>`, 'Summary title', 'summary');
   assert.ok(doc.segments.some(s => s.text.includes('final_code()')));
   assert.ok(doc.segments.some(s => s.text.includes('TAIL-MARKER')));
+});
+test('ai-content: disclosure labels keep one direct-child summary with bilingual phrasing and activation', () => {
+  const doc = prepareAiDocument('<details><summary><strong>Important</strong> caveats</summary><p>Body text</p><summary>Additional caveats</summary></details>', 'Title', 'translate');
+  const html = doc.render(new Map(doc.segments.map(s => [s.id, `Translated ${s.text}`])), 'zh-CN');
+  const dom = new JSDOM(html), details = dom.window.document.querySelector('details')!;
+  try {
+    const summary = details.querySelector(':scope > summary')!;
+    assert.equal(details.querySelectorAll(':scope > summary').length, 1);
+    assert.equal(details.querySelectorAll('section summary,div summary').length, 0);
+    assert.equal(summary.querySelectorAll('section,div,p,h1,h2').length, 0);
+    assert.equal(summary.querySelector('span.feedink-ai-source')!.textContent, 'Important caveats');
+    assert.match(summary.querySelector('span.feedink-ai-target')!.textContent!, /Translated Important/);
+    assert.equal(summary.querySelector('span.feedink-ai-target')!.getAttribute('lang'), 'zh-CN');
+    assert.ok(details.textContent!.includes('Additional caveats'));
+    assert.equal(details.querySelectorAll('section.feedink-ai-pair > div.feedink-ai-source > p').length, 1);
+    assert.equal(details.open, false); (summary as HTMLElement).click(); assert.equal(details.open, true);
+    (summary as HTMLElement).click(); assert.equal(details.open, false);
+  } finally { dom.window.close(); }
+});
+test('ai-content: decoded escapes, source-ordered joins, visible lanes and translated metadata reject literal credentials', () => {
+  const credential = 'synthetic&credential', escaped = [...credential].map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+  for (const output of [`{"coveredIds":["s0"],"summaryText":"${escaped}"}`, `{"segments":[{"id":"s0","text":"${escaped}"}]}`]) {
+    assert.ok(!output.includes(credential));
+    assert.throws(() => assertAiDecodedCredentialAbsent(output, credential), hasCode('AI_OUTPUT'));
+  }
+  assert.throws(() => assertAiCredentialAbsent(['synthetic', '&cred', 'ential'], credential), hasCode('AI_OUTPUT'));
+  const source = { sourceTitle: 'Title', sourceUrl: 'https://example.invalid' };
+  for (const bilingualHtml of [
+    '<div class="feedink-ai-target">synthetic&amp;<b>credential</b></div>',
+    '<div class="feedink-ai-target">synthetic&amp;</div><div class="feedink-ai-source">original</div><div class="feedink-ai-target">credential</div>',
+    '<img alt="synthetic&amp;credential">',
+    '<div class="feedink-ai-target"><a title="synthetic&amp;">label</a></div><div class="feedink-ai-target"><a title="credential">label</a></div>',
+  ]) assert.throws(() => assertAiResultCredentialAbsent({ ...source, bilingualHtml }, credential), hasCode('AI_OUTPUT'));
+  assert.doesNotThrow(() => assertAiResultCredentialAbsent({ ...source, summaryText: 'Ordinary text' }, credential));
 });

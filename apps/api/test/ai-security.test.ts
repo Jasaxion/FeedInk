@@ -61,6 +61,16 @@ test('ai-provider: pinned fresh DNS, no redirect leakage, output truncation, saf
     await assert.rejects(() => provider.complete(config, messages, new AbortController().signal), hasCode('AI_OUTPUT'));
     fixture.setBehavior('oversize');
     await assert.rejects(() => provider.complete(config, messages, new AbortController().signal), hasCode('AI_PROVIDER'));
+    for (const [behavior, code] of [['chunked-oversize', 'AI_OUTPUT'], ['invalid-utf8', 'AI_OUTPUT'], ['partial', 'AI_INTERRUPTED']] as const) {
+      fixture.setBehavior(behavior); const before = fixture.requests.length;
+      await assert.rejects(() => provider.complete(config, messages, new AbortController().signal), (error: any) => {
+        assert.equal(error.code, code);
+        assert.ok(!JSON.stringify(error).includes(syntheticAiKey));
+        assert.ok(!error.message.includes('choices'));
+        return true;
+      });
+      assert.equal(fixture.requests.length, before + 1, `${behavior} must fail without a second POST`);
+    }
     fixture.setBehavior('malformed');
     await assert.rejects(() => provider.complete(config, messages, new AbortController().signal), hasCode('AI_OUTPUT'));
     fixture.setBehavior('error');

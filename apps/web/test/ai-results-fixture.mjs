@@ -4,7 +4,7 @@ import { aiFixture } from './ai-fixture.mjs';
 
 export async function aiResultsFixture() {
   const fixture = await aiFixture();
-  const results = { rows: new Map(), calls: [], deleted: [], holdList: null, holdDeleteReply: null, failList: false, rejectDelete: false };
+  const results = { rows: new Map(), calls: [], deleted: [], holdList: null, holdDeleteReply: null, failList: false, rejectDelete: false, loseDeleteReply: false };
   const terminal = status => ['succeeded', 'skipped', 'failed', 'cancelled'].includes(status);
   for (let index = 1; index <= 23; index++) {
     const id = `retained-${String(index).padStart(2, '0')}`;
@@ -45,6 +45,7 @@ export async function aiResultsFixture() {
     for (const id of ids) { results.rows.delete(id); fixture.ai.jobs.delete(id); }
     results.deleted.push([...ids]);
     const hold = results.holdDeleteReply; results.holdDeleteReply = null; if (hold) await hold.promise;
+    if (results.loseDeleteReply) { results.loseDeleteReply = false; request.socket.destroy(); return; }
     return json({ deleted: ids.length });
   });
   return { ...fixture, results };

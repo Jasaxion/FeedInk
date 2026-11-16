@@ -53,7 +53,9 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost, onConte
   const closeInk = () => { engine.current?.flush(); setInkOpen(false); setTool('text'); toolbarHost?.querySelector<HTMLButtonElement>('[data-testid=ink-toggle]')?.focus({ preventScroll: true }); };
   function openEditor(id: string, range: Range | null = null) { returnFocus.current = document.activeElement as HTMLElement; setEditorRange(range); setSelection(null); setInkOpen(false); setTool('text'); setEditor(id); }
 
-  const displayedContext = !loading && !paused && !frozen.current && authEpoch() === epoch ? row?.document.context ?? null : null;
+  const displayedContext = !loading && !frozen.current && authEpoch() === epoch ? row?.document.context ?? null : null;
+  // A temporary edit pause (including a rejected navigation) does not change the source.
+  // Loading, freezing and identity retirement still invalidate it before paint.
   // This reports the actual retained body, not Reader's possibly newer article props.
   // Autosave creates fresh document objects without changing this source identity.
   useLayoutEffect(() => {

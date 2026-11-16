@@ -164,10 +164,11 @@ test('ai-results PostgreSQL: permanent history, exact keysets, selected cleanup 
       await ai.saveConfig(owner.id, { ...settings, enabled: false, model: 'new-model', apiKey: null });
       for (const saved of [summary, translation]) {
         const current = await request(owner, 'GET', `/api/ai/jobs/${saved.id}`);
-        assert.equal(current.json().job.status, 'failed'); assert.equal(current.json().job.result, undefined); assert.equal(current.json().job.stage, 'stale');
+        assert.equal(current.json().job.status, 'failed'); assert.equal(current.json().job.result, undefined); assert.equal(current.json().job.stage, 'stale'); assert.equal(current.json().job.configRevision, saved.config_revision);
         const history = await request(owner, 'GET', `/api/ai/results/${saved.id}`);
         assert.equal(history.statusCode, 200); assert.deepEqual(history.json().job, aiJobDto(saved));
-        assert.equal(history.json().job.result.sourceTitle, 'Original title'); assert.equal(history.json().job.contentHash, saved.content_hash);
+        assert.equal(history.json().job.result.sourceTitle, 'Original title'); assert.equal(history.json().job.contentHash, saved.content_hash); assert.equal(history.json().job.configRevision, saved.config_revision);
+        assert.notEqual(history.json().job.configRevision, (await ai.getConfig(owner.id)).revision);
         assert.equal((await request(foreign, 'GET', `/api/ai/results/${saved.id}`)).statusCode, 404);
         assert.equal((await request(demo, 'GET', `/api/ai/results/${saved.id}`)).statusCode, 403);
       }

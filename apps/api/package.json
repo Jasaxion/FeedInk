@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
-    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "test": "tsx --test --test-timeout=120000 --test-concurrency=1 test/*.test.ts",
     "bootstrap-admin": "node dist/operator-cli.js bootstrap-admin",
     "reconcile-ebook": "node dist/operator-cli.js reconcile-ebook"
   },

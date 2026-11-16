@@ -15,11 +15,18 @@ export function sanitizeAiBilingual(html: string, sourceHtml: string, article: P
   const sourceAssets = new Set(Array.from(source.content.querySelectorAll('img'), node => ownedAssetUrl(node.getAttribute('src') || '')));
   const images = new Set(article.images.filter(image => image.status === 'cached' && sourceAssets.has(image.url) && ownedAssetUrl(image.url)).map(image => image.url));
   const fragment = DOMPurify.sanitize(html, { ALLOWED_TAGS: tags, ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'colspan', 'rowspan', 'class', 'lang'], ALLOW_DATA_ATTR: false, ALLOW_ARIA_ATTR: false, RETURN_DOM_FRAGMENT: true });
+  // A disclosure has one native, direct activation target. Extra/misnested summaries
+  // are content, not additional controls. The API uses inline pairs inside this target.
+  for (const summary of fragment.querySelectorAll('summary')) {
+    if (summary.parentElement?.tagName !== 'DETAILS' || summary.parentElement.querySelector(':scope > summary') !== summary) summary.replaceWith(...summary.childNodes);
+  }
   for (const node of fragment.querySelectorAll('*')) {
-    const marker = node.tagName === 'SECTION' ? 'feedink-ai-pair' : node.tagName === 'DIV' && node.classList.contains('feedink-ai-source') ? 'feedink-ai-source' : node.tagName === 'DIV' ? 'feedink-ai-target' : '';
+    const inlinePair = node.tagName === 'SPAN' && node.parentElement?.tagName === 'SUMMARY' && node.parentElement.parentElement?.tagName === 'DETAILS';
+    const pairContent = node.tagName === 'DIV' || inlinePair;
+    const marker = node.tagName === 'SECTION' ? 'feedink-ai-pair' : pairContent && node.classList.contains('feedink-ai-source') ? 'feedink-ai-source' : pairContent ? 'feedink-ai-target' : '';
     if (marker && node.classList.contains(marker)) node.setAttribute('class', marker); else node.removeAttribute('class');
     const lang = node.getAttribute('lang') || '';
-    if (node.tagName !== 'DIV' || !node.hasAttribute('class') || !(marker === 'feedink-ai-target' ? languages.has(lang) : /^[a-z]{2,3}(?:-[a-zA-Z0-9]{2,8}){0,3}$/.test(lang))) node.removeAttribute('lang');
+    if (!pairContent || !node.hasAttribute('class') || !(marker === 'feedink-ai-target' ? languages.has(lang) : /^[a-z]{2,3}(?:-[a-zA-Z0-9]{2,8}){0,3}$/.test(lang))) node.removeAttribute('lang');
     // Strip URL attributes even from an unexpected allowed tag (e.g. a src on a div).
     const href = safeExternalUrl(node.getAttribute('href') || ''); node.removeAttribute('href');
     if (node.tagName === 'A' && href && links.has(href)) { node.setAttribute('href', href); node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); }

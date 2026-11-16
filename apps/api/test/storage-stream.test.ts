@@ -20,6 +20,26 @@ for (const afterBytes of [false, true]) {
   });
 }
 
+test("privateBlobStream cancels a pending backend read without waiting for another chunk", { timeout: 5000 }, async () => {
+  let entered!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  const source = new Readable({ read() { entered(); } });
+  const output = privateBlobStream(source);
+  const closed = Promise.all([once(source, "close"), once(output, "close")]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    output.resume();
+    await reading;
+    output.destroy();
+    await Promise.race([closed, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Cancellation waited on the idle backend")), 1000);
+    })]);
+    assert.equal(source.destroyed, true); assert.equal(output.closed, true);
+  } finally {
+    clearTimeout(timer); source.destroy(); output.destroy();
+  }
+});
+
 test("privateBlobStream cancellation before the first read still closes its owned source", async () => {
   const source = new Readable({ read() {} }), output = privateBlobStream(source), closed = once(source, "close");
   output.destroy(); await closed; assert.equal(source.destroyed, true);

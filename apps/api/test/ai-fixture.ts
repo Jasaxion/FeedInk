@@ -9,7 +9,8 @@ export interface AiFixtureRequest { authorization?: string; body: { messages: { 
 export async function aiFixture() {
   if (!hostedAiTests) throw new Error('Synthetic provider execution requires approved GitHub-hosted CI');
   const requests: AiFixtureRequest[] = [];
-  let behavior: 'ok' | 'missing' | 'truncated' | 'error' | 'redirect' | 'drop' | 'hold' | 'oversize' | 'malformed' = 'ok';
+  let behavior: 'ok' | 'missing' | 'truncated' | 'error' | 'redirect' | 'drop' | 'hold' | 'oversize' | 'chunked-oversize' | 'invalid-utf8' | 'partial' | 'malformed' = 'ok';
+  let completion: ((segments: AiSegment[], summary: boolean) => string) | undefined;
   let redirect = '', release: (() => void) | undefined;
   const server = http.createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -21,6 +22,17 @@ export async function aiFixture() {
       if (behavior === 'redirect') { response.writeHead(307, { location: redirect }).end(); return; }
       if (behavior === 'drop') { response.destroy(); return; }
       if (behavior === 'oversize') { response.writeHead(200, { 'content-type': 'application/json', 'content-length': 512 * 1024 + 1 }).end('x'); return; }
+      if (behavior === 'chunked-oversize') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        for (let i = 0; i < 9; i++) response.write(Buffer.alloc(64 * 1024, 0x20));
+        response.end(); return;
+      }
+      if (behavior === 'invalid-utf8') { response.writeHead(200, { 'content-type': 'application/json' }).end(Buffer.from([0xc3, 0x28])); return; }
+      if (behavior === 'partial') {
+        response.writeHead(200, { 'content-type': 'application/json', 'content-length': 100 });
+        response.write('{"choices":[');
+        setTimeout(() => response.destroy(), 20); return;
+      }
       if (behavior === 'malformed') { response.writeHead(200, { 'content-type': 'application/json' }).end('{broken JSON'); return; }
       const test = body.messages[1].content === 'Connectivity test.';
       const segments: AiSegment[] = test ? [] : JSON.parse(body.messages[1].content).segments;
@@ -32,7 +44,7 @@ export async function aiFixture() {
         if ('segments' in output) output.segments!.pop();
         else if ('coveredIds' in output) output.coveredIds!.pop();
       }
-      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ choices: [{ finish_reason: behavior === 'truncated' ? 'length' : 'stop', message: { content: JSON.stringify(output) } }] }));
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ choices: [{ finish_reason: behavior === 'truncated' ? 'length' : 'stop', message: { content: !test && completion ? completion(segments, summary) : JSON.stringify(output) } }] }));
     };
     if (behavior === 'hold') release = send; else send();
   });
@@ -40,6 +52,7 @@ export async function aiFixture() {
   return {
     baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, requests,
     setBehavior(value: typeof behavior, destination = '') { behavior = value; redirect = destination; },
+    setCompletion(value?: typeof completion) { completion = value; },
     release() { release?.(); release = undefined; },
     async close() { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); },
   };

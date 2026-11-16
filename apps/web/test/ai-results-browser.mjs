@@ -101,6 +101,31 @@ export async function aiResultsRegressions(browser, expect) {
     await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 2 条');
     assert.equal(fixture.results.rows.has('retained-23'), true); assert.deepEqual(fixture.results.deleted, []);
     assert.equal(calls(fixture, 'GET').length, 1); assert.equal(fixture.ai.providerCalls, 0);
+    await panel(page).getByRole('button', { name: '刷新并返回首页', exact: true }).click();
+    await expect(selected(page, 'retained-22')).toHaveCount(0);
+    await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 2 条');
+    await panel(page).getByRole('button', { name: '清空选择', exact: true }).click();
+    await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 0 条');
+    await selected(page, 'retained-23').check(); await confirmDelete(page);
+    await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 0 条');
+    assert.deepEqual(calls(fixture, 'DELETE').at(-1).ids, ['retained-23']);
+    assert.equal(fixture.results.rows.has('retained-23'), false);
+  });
+
+  await scenario('committed DELETE with lost reply retains hidden selection until explicit clear, then valid cleanup succeeds', async ({ fixture, page }) => {
+    await openSettings(page); await openResults(page); await selected(page, 'retained-23').check();
+    fixture.results.loseDeleteReply = true; await confirmDelete(page);
+    await expect(panel(page).getByRole('alert')).toContainText('已保留选择');
+    assert.equal(fixture.results.rows.has('retained-23'), false);
+    await panel(page).getByRole('button', { name: '刷新并返回首页', exact: true }).click();
+    await expect(selected(page, 'retained-23')).toHaveCount(0);
+    await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 1 条');
+    assert.equal(calls(fixture, 'DELETE').length, 1);
+    await panel(page).getByRole('button', { name: '清空选择', exact: true }).click();
+    await selected(page, 'retained-22').check(); await confirmDelete(page);
+    await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 0 条');
+    assert.deepEqual(calls(fixture, 'DELETE').map(call => call.ids), [['retained-23'], ['retained-22']]);
+    assert.equal(fixture.ai.providerCalls, 0);
   });
 
   await scenario('failed list preserves selections and failed post-delete refresh never repeats DELETE', async ({ fixture, page }) => {

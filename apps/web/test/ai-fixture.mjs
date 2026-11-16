@@ -7,16 +7,16 @@ export async function aiFixture() {
   const state = {
     config: { enabled: true, baseUrl: 'https://provider.example.test/v1', model: 'synthetic-model', hasKey: true, targetLanguage: 'zh-CN', revision: 1, updatedAt: '2026-01-01T00:00:00Z' },
     calls: [], jobs: new Map(), providerCalls: 0, autoComplete: false, saveFails: false, pollFails: false, cancelFails: false,
-    holdConfig: null, holdPost: null, holdPoll: null, holdContext: null, responsePatch: null, annotationWrites: [],
+    holdConfig: null, holdPost: null, holdPoll: null, holdContext: null, responsePatch: null, annotationWrites: [], losePostReply: false, rejectedAdmissions: 0,
   };
   const article = fixture.control.articles[0];
   article.contentHash = 'c'.repeat(64); // Deliberately NOT the canonical annotation hash.
-  article.contentHtml = '<p>Original first paragraph <a href="https://example.test/source-link">source link</a></p><img src="/api/assets/image-one" alt="owned image">' + Array.from({ length: 130 }, (_, index) => `<p>Original segment ${index}: ${'synthetic prose '.repeat(30)}</p>`).join('') + '<p>Original long tail witness</p>';
+  article.contentHtml = '<p>Original first paragraph <a href="https://example.test/source-link">source link</a></p><img src="/api/assets/image-one" alt="owned image">' + Array.from({ length: 130 }, (_, index) => `<p>Original segment ${index}: ${'synthetic prose '.repeat(30)}</p>`).join('') + '<p>Original long tail witness</p><details><summary>Disclosure source</summary><p>Disclosure original and translated body</p></details>';
   article.fulltextHtml = '<p>Fulltext original first</p><p>Fulltext original tail</p>';
   function complete(job) {
     const source = fixture.control.articles.find(article => article.id === job.articleId);
     return { ...job, status: 'succeeded', stage: 'complete', completedChunks: job.totalChunks, result: { sourceTitle: source.title, sourceUrl: source.url,
-      ...(job.operation === 'summary' ? { summaryText: 'Synthetic summary including long tail <img src=x onerror=alert(1)>' } : { bilingualHtml: '<img src="https://injected.invalid/tracker"><img src="/api/assets/not-in-this-article"><img src="/api/assets/image-one" alt="owned image"><a href="https://injected.invalid/link">injected link</a><a href="https://example.test/source-link">source link</a><script>window.__aiInjected=true</script>' + Array.from({ length: 130 }, (_, index) => `<section class="feedink-ai-pair injected-class" style="position:fixed"><div class="feedink-ai-source" lang="en"><p>Original segment ${index}</p></div><div class="feedink-ai-target" lang="${job.targetLanguage}" data-annotation-context="forged"><p>译文段落 ${index} ${'长正文测试 '.repeat(30)}</p></div></section>`).join('') + '<section class="feedink-ai-pair"><div class="feedink-ai-source" lang="en"><p>Original long tail witness</p></div><div class="feedink-ai-target" lang="zh-CN"><p>译文末尾覆盖见证</p></div></section><pre><code>const unchanged = true;</code></pre>' }),
+      ...(job.operation === 'summary' ? { summaryText: 'Synthetic summary including long tail <img src=x onerror=alert(1)>' } : { bilingualHtml: '<img src="https://injected.invalid/tracker"><img src="/api/assets/not-in-this-article"><img src="/api/assets/image-one" alt="owned image"><a href="https://injected.invalid/link">injected link</a><a href="https://example.test/source-link">source link</a><script>window.__aiInjected=true</script>' + Array.from({ length: 130 }, (_, index) => `<section class="feedink-ai-pair injected-class" style="position:fixed"><div class="feedink-ai-source" lang="en"><p>Original segment ${index}</p></div><div class="feedink-ai-target" lang="${job.targetLanguage}" data-annotation-context="forged"><p>译文段落 ${index} ${'长正文测试 '.repeat(30)}</p></div></section>`).join('') + '<section class="feedink-ai-pair"><div class="feedink-ai-source" lang="en"><p>Original long tail witness</p></div><div class="feedink-ai-target" lang="zh-CN"><p>译文末尾覆盖见证</p></div></section><details><summary><span class="feedink-ai-source" lang="en">Disclosure source</span><span class="feedink-ai-target" lang="zh-CN">展开译文详情</span></summary><p>Disclosure original and translated body 详情正文</p></details><pre><code>const unchanged = true;</code></pre>' }),
     } };
   }
   state.complete = id => { const job = state.jobs.get(id); state.jobs.set(id, complete(job)); };
@@ -52,14 +52,26 @@ export async function aiFixture() {
     const data = await body(), articleId = url.pathname.split('/')[3], owner = fixture.control.user.id;
     state.calls.push({ kind: 'post', owner, articleId, data });
     assert.equal(data.contentHash, (data.mode === 'fulltext' ? 'b' : 'a').repeat(64));
-    const cached = [...state.jobs.values()].find(job => job.owner === owner && job.articleId === articleId && job.mode === data.mode && job.operation === data.operation && job.targetLanguage === data.targetLanguage && job.revision === state.config.revision && job.status === 'succeeded');
-    if (cached && !data.force) return json({ job: cached });
-    state.providerCalls++;
-    let job = { id: `job-${state.providerCalls}`, owner, revision: state.config.revision, articleId, mode: data.mode, contentHash: data.contentHash, operation: data.operation, targetLanguage: data.targetLanguage, status: 'running', stage: 'segments', completedChunks: 1, totalChunks: 131, detectedLanguage: 'en', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
-    if (state.autoComplete) job = complete(job);
-    state.jobs.set(job.id, job);
+    if (!Number.isSafeInteger(data.configRevision) || data.configRevision < 0) return json({ error: { code: 'VALIDATION', message: 'configRevision required' } }, 400);
+    if (data.configRevision !== state.config.revision) {
+      state.rejectedAdmissions++;
+      return json({ error: { code: 'AI_CONFIG_CHANGED', message: 'Configuration changed; reopen the action' } }, 409);
+    }
+    const matches = [...state.jobs.values()].filter(job => job.owner === owner && job.articleId === articleId && job.mode === data.mode && job.contentHash === data.contentHash && job.operation === data.operation && job.targetLanguage === data.targetLanguage && job.configRevision === state.config.revision);
+    const active = matches.find(job => ['queued', 'running'].includes(job.status));
+    if (active && data.force) return json({ error: { code: 'AI_ACTIVE_JOB', message: 'Matching work is active' } }, 409);
+    const previous = matches.at(-1);
+    if (!active && previous && !data.force && ['failed', 'cancelled'].includes(previous.status)) return json({ error: { code: 'AI_INTERRUPTED', message: 'Work was interrupted or its outcome is unknown; retry explicitly if desired' } }, 409);
+    let job = active || (!data.force && previous);
+    if (!job) {
+      state.providerCalls++;
+      job = { id: `job-${state.providerCalls}`, owner, configRevision: state.config.revision, articleId, mode: data.mode, contentHash: data.contentHash, operation: data.operation, targetLanguage: data.targetLanguage, status: 'running', stage: 'segments', completedChunks: 1, totalChunks: 131, detectedLanguage: 'en', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
+      if (state.autoComplete) job = complete(job);
+      state.jobs.set(job.id, job);
+    }
     const captured = { ...job, ...state.responsePatch }; const hold = state.holdPost; state.holdPost = null;
     if (hold) await hold.promise;
+    if (state.losePostReply) { state.losePostReply = false; request.socket.destroy(); return; }
     return json({ job: captured }, 202);
   });
   fixture.route(/^\/api\/ai\/jobs\/[^/]+$/, async ({ request, url, json }) => {

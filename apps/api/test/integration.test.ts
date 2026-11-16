@@ -954,12 +954,17 @@ test(
         },
       );
     } finally {
-      await app.close();
-      for (const userId of ownedUsers)
-        await db`DELETE FROM users WHERE id=${userId}`;
-      await db.end();
-      await fixture.close();
-      await rm(dataDir, { recursive: true, force: true });
+      try {
+        await app.close();
+        for (const userId of ownedUsers)
+          await db`DELETE FROM users WHERE id=${userId}`;
+      } finally {
+        try { await db.end({ timeout: 5 }); }
+        finally {
+          try { await fixture.close(); }
+          finally { await rm(dataDir, { recursive: true, force: true }); }
+        }
+      }
     }
   },
 );

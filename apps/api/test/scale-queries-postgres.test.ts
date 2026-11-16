@@ -74,6 +74,26 @@ test("scale queries: backfill, exact snapshots, DML counters, CAS and reconcilia
       assert.equal((await articles.tags(owner))[0].count, 2);
       await reconcile();
     });
+    await t.test("owner cascade removes repeated shared tag/feed counter updates without missing-parent FK checks", async () => {
+      const deletedOwner = randomUUID(), deletedFeed = randomUUID(), deletedTag = randomUUID();
+      const othersBefore = await db`SELECT * FROM article_counts WHERE user_id IN ${db([owner, other])} ORDER BY user_id,tag_key,feed_key`;
+      await db`INSERT INTO users(id,email,name,password_hash) VALUES(${deletedOwner},${deletedOwner + "@example.invalid"},'Cascade fixture','disabled')`;
+      await db`INSERT INTO feeds(id,user_id,url,title) VALUES(${deletedFeed},${deletedOwner},'https://example.invalid/cascade','Cascade')`;
+      await db`INSERT INTO tags(id,user_id,name) VALUES(${deletedTag},${deletedOwner},'Shared cascade tag')`;
+      for (let i = 0; i < 4; i++) {
+        const articleId = randomUUID();
+        await insert(articleId, deletedOwner, deletedFeed);
+        await db`INSERT INTO article_tags(article_id,tag_id) VALUES(${articleId},${deletedTag})`;
+      }
+      await reconcile();
+      await db`DELETE FROM users WHERE id=${deletedOwner}`;
+      for (const table of ["articles", "feeds", "tags", "article_counts", "article_count_state"]) {
+        const [{ count }] = await db`SELECT count(*)::integer AS count FROM ${db(table)} WHERE user_id=${deletedOwner}`;
+        assert.equal(count, 0, table);
+      }
+      assert.deepEqual(await db`SELECT * FROM article_counts WHERE user_id IN ${db([owner, other])} ORDER BY user_id,tag_key,feed_key`, othersBefore);
+      await reconcile();
+    });
     await t.test("uppercase/mixed-case tag UUIDs preserve exact totals across scopes and deep pages", async () => {
       const caseTag = "abcdefab-cdef-4abc-8def-abcdefabcdef";
       const spellings = [caseTag, caseTag.toUpperCase(), "AbCdEfAb-CdEf-4aBc-8DeF-aBcDeFaBcDeF"];

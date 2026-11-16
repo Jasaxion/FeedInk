@@ -3,6 +3,7 @@
 .reader-pane .reader-ai-toolbar .icon-button { flex:0 0 44px; width:44px; min-width:44px; height:44px; }
 .reader-pane .reader-ai-toolbar .toolbar-spacer { min-width:0; }
 .reader-ai-tools,.ai-toolbar { display:inline-flex; align-items:center; flex:none; gap:2px; }
+.reader-ai-results { display:flow-root; }
 .reader-ai-results:empty { display:none; }
 .ai-card { margin:0 0 24px; padding:16px; border:1px solid var(--line); border-radius:6px; overflow-wrap:anywhere; min-width:0; }
 .ai-card>header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }

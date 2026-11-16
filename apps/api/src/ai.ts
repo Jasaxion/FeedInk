@@ -3,21 +3,22 @@ import type { AiConfig, AiJob, AiLanguage, AiResultSummary } from '@feedink/shar
 import { type DB, type SQL, type Row, hash, id, iso, withConnection } from './core.js';
 import { Annotations } from './annotations.js';
 import { aiResultsQuery, aiResultsCursor, aiResultIds, aiResultSummary } from './ai-results.js';
-import { aiFailure, aiErrorFromCode, safeAiError, encryptAiKey, decryptAiKey, type AiEnvironment } from './ai-security.js';
+import { aiFailure, aiErrorFromCode, safeAiError, encryptAiKey, decryptAiKey, assertAiCredentialAbsent, type AiEnvironment } from './ai-security.js';
 import { PinnedAiProvider, type AiProvider, type AiMessage, type AiProviderConfig } from './ai-provider.js';
 import { AI_PROMPT_VERSION, AI_MAX_CALLS, prepareAiDocument, detectAiLanguage, segmentBatches, splitAiText,
-  translationMessages, validateTranslations, summaryMessages, validateSummary, type AiSegment } from './ai-content.js';
+  translationMessages, validateTranslations, summaryMessages, validateSummary, assertAiDecodedCredentialAbsent, assertAiResultCredentialAbsent, type AiSegment } from './ai-content.js';
 
 export const aiLanguage = z.enum(['zh-CN', 'en', 'ja', 'ko', 'fr', 'de', 'es']);
 export const aiConfigInput = z.object({ enabled: z.boolean(), baseUrl: z.string().max(2048), model: z.string().trim().max(200),
   targetLanguage: aiLanguage, apiKey: z.string().min(1).max(4096).regex(/^[\x21-\x7e]+$/).nullable().optional() }).strict();
 export const aiJobInput = z.object({ operation: z.enum(['summary', 'translate']), mode: z.enum(['feed', 'fulltext']),
-  targetLanguage: aiLanguage.optional(), force: z.boolean().default(false), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
+  targetLanguage: aiLanguage.optional(), force: z.boolean().default(false), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  configRevision: z.number().int().min(0).max(2147483647).optional() }).strict();
 export const DEFAULT_AI_CONFIG: AiConfig = { enabled: false, baseUrl: '', model: '', hasKey: false, targetLanguage: 'zh-CN', revision: 0, updatedAt: null };
 const configDto = (row?: Row): AiConfig => row ? ({ enabled: row.enabled, baseUrl: row.base_url, model: row.model, hasKey: !!row.encrypted_key,
   targetLanguage: row.target_language, revision: row.revision, updatedAt: row.updated_at ? iso(row.updated_at) : null }) : { ...DEFAULT_AI_CONFIG };
 export function aiJobDto(row: Row): AiJob {
-  return { id: row.id, articleId: row.article_id, mode: row.mode, contentHash: row.content_hash, operation: row.operation,
+  return { id: row.id, articleId: row.article_id, mode: row.mode, contentHash: row.content_hash, configRevision: row.config_revision, operation: row.operation,
     targetLanguage: row.target_language, status: row.status, stage: row.stage, completedChunks: row.completed_chunks,
     totalChunks: row.total_chunks, detectedLanguage: row.detected_language, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
     ...(row.result ? { result: row.result } : {}), ...(row.error_code ? { error: (() => { const e = aiErrorFromCode(row.error_code); return { code: e.code, message: e.message }; })() } : {}) };
@@ -123,8 +124,9 @@ export class AiService {
       // Short admission/claim critical section bounds the queue globally without scanning articles.
       await sql`SELECT pg_advisory_xact_lock(71244009)`;
       await this.account(sql, owner, true);
-      await this.providerConfig(sql, owner);
       const [config] = await sql`SELECT revision,model,target_language FROM ai_configs WHERE user_id=${owner}`;
+      if (input.configRevision !== undefined && input.configRevision !== (config?.revision ?? 0)) throw aiFailure('AI_CONFIG_CHANGED');
+      await this.providerConfig(sql, owner);
       const snapshot = await this.snapshot(sql, owner, articleId, input.mode);
       if (input.contentHash !== undefined && input.contentHash !== snapshot.contentHash) throw aiFailure('AI_STALE_SOURCE');
       const document = prepareAiDocument(snapshot.html, snapshot.title, input.operation);
@@ -242,7 +244,7 @@ export class AiService {
       WHERE id=${row.id} AND status='running' AND lease_token=${row.lease_token} AND lease_until>now() RETURNING id`;
     if (!updated.length) throw aiFailure('AI_INTERRUPTED');
   }
-  private async call(row: Row, messages: AiMessage[], signal: AbortSignal): Promise<string> {
+  private async call<T>(row: Row, messages: AiMessage[], signal: AbortSignal, validate: (output: string, credential: string) => T): Promise<T> {
     if (signal.aborted || Date.now() - new Date(row.started_at).getTime() >= AI_JOB_DEADLINE_MS) throw aiFailure('AI_INTERRUPTED');
     const config = await transaction(this.db, async sql => {
       await this.assertFresh(sql, row);
@@ -256,12 +258,15 @@ export class AiService {
     if (signal.aborted) throw aiFailure('AI_INTERRUPTED');
     const output = await this.provider.complete(config, messages, signal);
     if (signal.aborted) throw aiFailure('AI_INTERRUPTED');
-    if (output.includes(config.apiKey)) throw aiFailure('AI_OUTPUT');
-    return output;
+    assertAiCredentialAbsent([output], config.apiKey);
+    assertAiDecodedCredentialAbsent(output, config.apiKey);
+    return validate(output, config.apiKey);
   }
   private async publish(row: Row, status: 'succeeded' | 'skipped', result: NonNullable<AiJob['result']>): Promise<void> {
     await transaction(this.db, async sql => {
       await this.assertFresh(sql, row);
+      const config = await this.providerConfig(sql, row.user_id, row.config_revision);
+      assertAiResultCredentialAbsent(result, config.apiKey);
       const updated = await sql`UPDATE ai_jobs SET status=${status},stage='complete',result=${sql.json(result)},error_code=NULL,completed_chunks=total_chunks,
         call_in_flight=false,lease_token=NULL,lease_until=NULL,updated_at=now()
         WHERE id=${row.id} AND status='running' AND lease_token=${row.lease_token} AND lease_until>now() RETURNING id`;
@@ -292,8 +297,12 @@ export class AiService {
       if (row.operation === 'translate') {
         const values = new Map<string, string>();
         for (const batch of segmentBatches(doc.segments)) {
-          const translated = validateTranslations(await this.call(row, translationMessages(batch, row.target_language), controller.signal), batch);
-          for (const [id, text] of translated) values.set(id, text);
+          await this.call(row, translationMessages(batch, row.target_language), controller.signal, (output, credential) => {
+            const translated = validateTranslations(output, batch);
+            for (const [id, text] of translated) values.set(id, text);
+            // Source order, not provider response order; includes title/alt metadata and prior batches.
+            assertAiCredentialAbsent(doc.segments.filter(segment => values.has(segment.id)).map(segment => values.get(segment.id)!), credential);
+          });
           completed += batch.length;
           await this.checkpoint(row, 'translating', completed, total, detected);
         }
@@ -303,7 +312,10 @@ export class AiService {
         while (true) {
           const summaries: string[] = [];
           for (const batch of segmentBatches(segments)) {
-            summaries.push(validateSummary(await this.call(row, summaryMessages(batch, row.target_language), controller.signal), batch));
+            await this.call(row, summaryMessages(batch, row.target_language), controller.signal, (output, credential) => {
+              summaries.push(validateSummary(output, batch));
+              assertAiCredentialAbsent(summaries, credential);
+            });
             completed += batch.length;
             await this.checkpoint(row, level ? 'reducing' : 'summarizing', completed, total, detected);
           }

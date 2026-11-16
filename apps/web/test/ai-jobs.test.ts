@@ -9,8 +9,8 @@ const article: ArticleDetail = {
   contentHtml: '<p>Original source</p>', contentText: 'Original source', fulltextHtml: '<p>Full source tail</p>', fetchedAt: '2026-01-01T00:00:00Z', contentHash: 'c'.repeat(64), images: [], fulltextError: null,
 };
 const document: AnnotationDocument = { schemaVersion: 1, id: null, revision: 0, updatedAt: null, versions: [], ink: null, marks: [], contentHash: 'a'.repeat(64), context: { articleId: 'one', mode: 'feed', contentHash: 'a'.repeat(64), sourceUrl: article.url, title: article.title, contentHtml: article.contentHtml } };
-const identity: AiJobIdentity = { articleId: 'one', mode: 'feed', contentHash: document.contentHash, sourceTitle: article.title, sourceUrl: article.url, operation: 'summary', targetLanguage: 'zh-CN' };
-const job: AiJob = { id: 'job-one', articleId: 'one', mode: 'feed', contentHash: document.contentHash, operation: 'summary', targetLanguage: 'zh-CN', status: 'succeeded', stage: 'complete', completedChunks: 3, totalChunks: 3, detectedLanguage: 'en', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', result: { summaryText: 'Summary including tail', sourceTitle: article.title, sourceUrl: article.url } };
+const identity: AiJobIdentity = { configRevision: 1, articleId: 'one', mode: 'feed', contentHash: document.contentHash, sourceTitle: article.title, sourceUrl: article.url, operation: 'summary', targetLanguage: 'zh-CN' };
+const job: AiJob = { configRevision: 1, id: 'job-one', articleId: 'one', mode: 'feed', contentHash: document.contentHash, operation: 'summary', targetLanguage: 'zh-CN', status: 'succeeded', stage: 'complete', completedChunks: 3, totalChunks: 3, detectedLanguage: 'en', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', result: { summaryText: 'Summary including tail', sourceTitle: article.title, sourceUrl: article.url } };
 
 test('verifiedAiSource uses the canonical selected context, not ArticleDetail.contentHash', () => {
   assert.notEqual(verifiedAiSource(document, article, 'feed'), article.contentHash);
@@ -30,9 +30,9 @@ test('aiDisplayMatches refuses unknown or retained historical annotation context
   assert.equal(aiDisplayMatches({ ...document.context, contentHtml: '<p>retained historical source</p>' }, article, 'feed'), false);
   assert.equal(aiDisplayMatches(document.context, article, 'fulltext'), false);
 });
-test('assertAiJob binds owned completion to requested article/source/mode/operation/target/job', () => {
+test('assertAiJob binds owned completion to requested config revision/article/source/mode/operation/target/job', () => {
   assert.doesNotThrow(() => assertAiJob(job, identity, job.id));
-  for (const patch of [{ id: '../other' }, { articleId: 'two' }, { mode: 'fulltext' as const }, { contentHash: 'd'.repeat(64) }, { operation: 'translate' as const }, { targetLanguage: 'en' as const }]) assert.throws(() => assertAiJob({ ...job, ...patch }, identity));
+  for (const patch of [{ configRevision: 2 }, { configRevision: 0 }, { configRevision: undefined }, { configRevision: NaN }, { id: '../other' }, { articleId: 'two' }, { mode: 'fulltext' as const }, { contentHash: 'd'.repeat(64) }, { operation: 'translate' as const }, { targetLanguage: 'en' as const }]) assert.throws(() => assertAiJob({ ...job, ...patch } as AiJob, identity));
   assert.throws(() => assertAiJob(job, identity, 'new-job'));
   assert.throws(() => assertAiJob({ ...job, result: { ...job.result!, sourceUrl: 'https://example.test/other' } }, identity));
 });

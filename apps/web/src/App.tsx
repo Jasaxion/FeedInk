@@ -8,10 +8,11 @@ import { assertAuthEpoch, authEpoch, beginAuthTransition, mergeSessionMetadata, 
 import { ObsoleteMutationError, OwnerMismatchError, queueState, synchronizeState } from './stateSync';
 import { AppContext, type AppContextValue } from './context';
 import { AssetImage, Empty, Icon, IconButton, Logo, Modal, ResizeHandle, SourceIcon } from './components';
-import { articleQuery, formatDate, ownedAssetUrl, ownedImageUrl, newestArticleState, progressAt, queryString, safeExternalUrl, shortcutAction } from './logic';
+import { articleQuery, formatDate, ownedAssetUrl, ownedImageUrl, newestArticleState, queryString, safeExternalUrl, shortcutAction } from './logic';
 import { adjustCounts, CacheInvalidatedError, OfflineStore, type Library, type VersionedArticle } from './offline';
 import { DiscoveryPanel, OrganizationPanel, SaveUrlPanel, TransferPanel, type OrganizationTarget } from './Panels';
 import { Reader } from './Reader';
+import { originalReadingProgress } from './readingProgress';
 import { scopedCss } from './safety';
 import { SettingsPanel } from './Settings';
 import { PendingNotesOwnerError } from './offline';
@@ -210,7 +211,7 @@ function Workspace({ session, epoch, store, online, setOnline, locationKey, navi
   function selectScope(values: Record<string, string>) { const next = new URLSearchParams(values); navigate(`/?${next}`); setDrawer(false); }
   function changeParam(key: string, value: string) { const next = new URLSearchParams(location.search); if (value) next.set(key, value); else next.delete(key); next.delete('article'); navigate(`/?${next}`); }
   function openArticle(id: string) { const next = new URLSearchParams(location.search); next.set('article', id); navigate(`/?${next}`); }
-  function retainProgress() { const current = articleRef.current; const element = viewRef.current; if (current && element) void task(() => patchArticle(current, { progress: progressAt(element.scrollTop, element.scrollHeight, element.clientHeight) })); }
+  function retainProgress() { const current = articleRef.current; const element = viewRef.current; if (current && element) void task(() => patchArticle(current, { progress: originalReadingProgress(element) })); }
   function back() { retainProgress(); const next = new URLSearchParams(location.search); next.delete('article'); navigate(`/?${next}`); listRef.current?.querySelector<HTMLButtonElement>(`[data-article-id="${CSS.escape(selectedId || '')}"]`)?.focus(); }
   function move(direction: number) { retainProgress(); const current = Math.max(0, articles.findIndex(item => item.id === selectedId)); const next = current + direction; if (next >= 0 && next < articles.length) { setFocusedIndex(next); openArticle(articles[next].id); } else notify(direction > 0 ? cursor ? '已到当前页末尾，请加载更多文章' : '已经是最后一篇' : '已经是第一篇'); }
   async function clearCache(enabled = cacheEnabled.current) {

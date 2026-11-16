@@ -4,7 +4,7 @@ import type { AnyNode } from 'domhandler';
 import { francAll } from 'franc';
 import type { AiJob, AiLanguage, AiOperation } from '@feedink/shared';
 import { cleanHtml } from './content.js';
-import { aiFailure } from './ai-security.js';
+import { aiFailure, assertAiCredentialAbsent } from './ai-security.js';
 import type { AiMessage } from './ai-provider.js';
 
 export const AI_PROMPT_VERSION = 'feedink-text-segments-1';
@@ -79,11 +79,20 @@ export function prepareAiDocument(html: string, title: string, operation: AiOper
         return $.html(copy);
       };
       const pair = (original: string, translation: string) => `<section class="feedink-ai-pair"><div class="feedink-ai-source">${original}</div><div class="feedink-ai-target" lang="${target}">${translation}</div></section>`;
+      // A disclosure label must remain one direct-child summary containing phrasing content.
+      const disclosureLabel = (node: AnyNode): string => {
+        const phrasing = (translate: boolean) => sanitizeHtml(children(node).map(child => serialize(child, translate)).join(''), {
+          allowedTags: ['span', 'br', 'b', 'strong', 'i', 'em', 's', 'del', 'u', 'code', 'a', 'img', 'sub', 'sup'],
+          allowedAttributes: { '*': ['lang', 'dir'], a: ['href', 'title', 'rel', 'target'], img: ['src', 'alt', 'title', 'width', 'height', 'loading'] },
+          allowedSchemes: ['http', 'https', 'mailto'], allowProtocolRelative: false,
+        });
+        return `<summary><span class="feedink-ai-source">${phrasing(false)}</span><span class="feedink-ai-target" lang="${target}">${phrasing(true)}</span></summary>`;
+      };
       const blocks = new Set(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'table', 'thead', 'tbody', 'tr', 'td', 'th', 'caption', 'figure', 'figcaption', 'details', 'summary', 'pre', 'hr']);
       const structural = new Set(['ul', 'ol', 'dl', 'table', 'thead', 'tbody', 'tr', 'td', 'th', 'li', 'details', 'figure', 'caption', 'figcaption']);
       const hasBlock = (node: AnyNode): boolean => children(node).some(child => blocks.has(name(child)) || hasBlock(child));
-      const renderChildren = (nodes: AnyNode[]): string => {
-        let result = '', inline: AnyNode[] = [];
+      const renderChildren = (nodes: AnyNode[], disclosure = false): string => {
+        let result = '', inline: AnyNode[] = [], labelled = false;
         const flush = () => {
           if (!inline.length) return;
           const original = inline.map(node => serialize(node, false)).join('');
@@ -93,6 +102,13 @@ export function prepareAiDocument(html: string, title: string, operation: AiOper
         for (const node of nodes) {
           if (!blocks.has(name(node))) { inline.push(node); continue; }
           flush();
+          if (name(node) === 'details') {
+            result += $.html($(node).clone().empty().append(renderChildren(children(node), true))); continue;
+          }
+          if (name(node) === 'summary') {
+            result += disclosure && labelled ? renderChildren(children(node)) : disclosureLabel(node);
+            labelled = true; continue;
+          }
           if (!hasText(node)) { result += serialize(node, false); continue; }
           if (!structural.has(name(node)) && !hasBlock(node)) result += pair(serialize(node, false), serialize(node, true));
           else {
@@ -106,8 +122,8 @@ export function prepareAiDocument(html: string, title: string, operation: AiOper
       if (result.length > 8 * 1024 * 1024) throw aiFailure('AI_LIMIT');
       return sanitizeHtml(result, {
         allowedTags: [...sanitizeHtml.defaults.allowedTags, 'img', 'figure', 'figcaption', 'details', 'summary', 'del'],
-        allowedAttributes: { '*': ['lang', 'dir'], section: ['class'], div: ['class', 'lang', 'dir'], a: ['href', 'title', 'rel', 'target'], img: ['src', 'alt', 'title', 'width', 'height', 'loading'] },
-        allowedClasses: { section: ['feedink-ai-pair'], div: ['feedink-ai-source', 'feedink-ai-target'] },
+        allowedAttributes: { '*': ['lang', 'dir'], section: ['class'], div: ['class', 'lang', 'dir'], span: ['class', 'lang', 'dir'], a: ['href', 'title', 'rel', 'target'], img: ['src', 'alt', 'title', 'width', 'height', 'loading'] },
+        allowedClasses: { section: ['feedink-ai-pair'], div: ['feedink-ai-source', 'feedink-ai-target'], span: ['feedink-ai-source', 'feedink-ai-target'] },
         allowedSchemes: ['http', 'https', 'mailto'], allowProtocolRelative: false,
         exclusiveFilter: frame => frame.tag === 'img' && !/^\/api\/assets\/[a-f0-9-]{36}$/.test(frame.attribs.src ?? ''),
       });
@@ -150,6 +166,30 @@ function outputObject(text: string): Record<string, unknown> {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
     return parsed;
   } catch { throw aiFailure('AI_OUTPUT'); }
+}
+/** Decode JSON escapes before checking provider values; nothing rejected is returned or persisted. */
+export function assertAiDecodedCredentialAbsent(text: string, credential: string): void {
+  const pending: unknown[] = [outputObject(text)];
+  while (pending.length) {
+    const value = pending.pop();
+    if (typeof value === 'string') assertAiCredentialAbsent([value], credential);
+    else if (value && typeof value === 'object') for (const child of Object.values(value)) pending.push(child);
+  }
+}
+/** Final publication guard also inspects entity-decoded visible lanes and translated attributes. */
+export function assertAiResultCredentialAbsent(result: NonNullable<AiJob['result']>, credential: string): void {
+  assertAiCredentialAbsent(Object.values(result), credential);
+  if (!result.bilingualHtml) return;
+  const $ = cheerio.load(result.bilingualHtml, {}, false);
+  assertAiCredentialAbsent([$.root().text()], credential);
+  for (const lane of ['feedink-ai-source', 'feedink-ai-target']) {
+    assertAiCredentialAbsent($(`.${lane}`).toArray().map(node => $(node).text()), credential);
+  }
+  for (const attribute of ['alt', 'title']) {
+    assertAiCredentialAbsent($(`[${attribute}]`).toArray().map(node => $(node).attr(attribute)!), credential);
+    assertAiCredentialAbsent($(`.feedink-ai-target [${attribute}]`).toArray().map(node => $(node).attr(attribute)!), credential);
+  }
+  $('*').each((_, node) => { assertAiCredentialAbsent(Object.values(node.attribs), credential); });
 }
 function validText(text: unknown, max: number): text is string {
   return typeof text === 'string' && text.trim().length > 0 && text.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(text)

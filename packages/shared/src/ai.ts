@@ -31,6 +31,8 @@ export interface AiJob {
   mode: 'feed' | 'fulltext';
   /** Same canonical selected-context identity as annotations, not the ingest body hash. */
   contentHash: string;
+  /** Configuration revision admitted with this stored job, including historical retrieval. */
+  configRevision: number;
   operation: AiOperation;
   targetLanguage: AiLanguage;
   status: 'queued' | 'running' | 'succeeded' | 'skipped' | 'failed' | 'cancelled';
