@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import sanitizeHtml from 'sanitize-html';
-import type { AnyNode } from 'domhandler';
+import { isTag, type AnyNode } from 'domhandler';
 import { francAll } from 'franc';
 import type { AiJob, AiLanguage, AiOperation } from '@feedink/shared';
 import { cleanHtml } from './content.js';
@@ -189,7 +189,7 @@ export function assertAiResultCredentialAbsent(result: NonNullable<AiJob['result
     assertAiCredentialAbsent($(`[${attribute}]`).toArray().map(node => $(node).attr(attribute)!), credential);
     assertAiCredentialAbsent($(`.feedink-ai-target [${attribute}]`).toArray().map(node => $(node).attr(attribute)!), credential);
   }
-  $('*').each((_, node) => { assertAiCredentialAbsent(Object.values(node.attribs), credential); });
+  $('*').each((_, node) => { if (isTag(node)) assertAiCredentialAbsent(Object.values(node.attribs), credential); });
 }
 function validText(text: unknown, max: number): text is string {
   return typeof text === 'string' && text.trim().length > 0 && text.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(text)

@@ -12,6 +12,7 @@ import { createApp } from "../src/app.js";
 import { type Config, connect, migrate } from "../src/core.js";
 import { readZip, makeZip } from "../src/zip.js";
 import { upstreamFixture } from "./fixture.js";
+import { cleanupFixture } from "./fixture-cleanup.js";
 
 test(
   "PostgreSQL API: tenant isolation, durable archives, imports, OPML, EPUB and scheduling",
@@ -83,6 +84,7 @@ test(
         "content-type": "multipart/form-data; boundary=test-boundary",
       },
     });
+    let primary: { error: unknown } | undefined;
     try {
       const a = await register(),
         b = await register();
@@ -953,18 +955,18 @@ test(
           );
         },
       );
+    } catch (error) {
+      primary = { error };
     } finally {
-      try {
-        await app.close();
-        for (const userId of ownedUsers)
-          await db`DELETE FROM users WHERE id=${userId}`;
-      } finally {
-        try { await db.end({ timeout: 5 }); }
-        finally {
-          try { await fixture.close(); }
-          finally { await rm(dataDir, { recursive: true, force: true }); }
-        }
-      }
+      await cleanupFixture([
+        ["application close and owned-user deletion", async () => {
+          await app.close();
+          for (const userId of ownedUsers) await db`DELETE FROM users WHERE id=${userId}`;
+        }],
+        ["database shutdown", () => db.end({ timeout: 5 })],
+        ["upstream fixture shutdown", () => fixture.close()],
+        ["temporary directory removal", () => rm(dataDir, { recursive: true, force: true })],
+      ], primary);
     }
   },
 );

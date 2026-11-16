@@ -8,7 +8,7 @@ import { assertAuthEpoch, authEpoch, beginAuthTransition, mergeSessionMetadata, 
 import { ObsoleteMutationError, OwnerMismatchError, queueState, synchronizeState } from './stateSync';
 import { AppContext, type AppContextValue } from './context';
 import { AssetImage, Empty, Icon, IconButton, Logo, Modal, ResizeHandle, SourceIcon } from './components';
-import { articleQuery, formatDate, ownedAssetUrl, ownedImageUrl, newestArticleState, queryString, safeExternalUrl, shortcutAction } from './logic';
+import { articleQuery, formatDate, ownedAssetUrl, ownedImageUrl, newestArticleState, progressAt, queryString, safeExternalUrl, shortcutAction } from './logic';
 import { adjustCounts, CacheInvalidatedError, OfflineStore, type Library, type VersionedArticle } from './offline';
 import { DiscoveryPanel, OrganizationPanel, SaveUrlPanel, TransferPanel, type OrganizationTarget } from './Panels';
 import { Reader } from './Reader';

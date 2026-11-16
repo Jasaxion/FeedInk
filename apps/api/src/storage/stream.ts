@@ -7,11 +7,12 @@ export function privateBlobStream(source: Readable): Readable {
   const observeError = () => {};
   source.on("error", observeError);
   source.once("close", () => source.off("error", observeError));
-  const output: Readable = Readable.from((async function* () {
+  let retiring = false;
+  const output = Readable.from((async function* () {
     try {
       for await (const chunk of source) yield chunk;
     } catch {
-      if (!output.destroyed) throw new Error("Private blob read failed");
+      if (!retiring) throw new Error("Private blob read failed");
     } finally {
       source.destroy();
     }
@@ -19,6 +20,7 @@ export function privateBlobStream(source: Readable): Readable {
   const destroyIterator = output._destroy;
   output._destroy = function (error, callback) {
     // Iterator cleanup queues behind a pending read. Cancel its source before awaiting it.
+    retiring = true;
     source.destroy();
     destroyIterator.call(this, error, callback);
   };
