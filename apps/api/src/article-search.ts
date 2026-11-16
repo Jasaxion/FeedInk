@@ -13,8 +13,17 @@ export function articleLiteralSearch(sql: SQL, query: string, fields: {
     ? sql`${text} LIKE ${pattern}` : sql`${text} ILIKE ${pattern}`;
   let match = literal(fields.title);
   if (fields.url) match = sql`${match} OR ${literal(fields.url)}`;
-  // 256 is a SQL constant, matching 011's expression index even in generic
-  // plans. The prefix is ONLY an extra positive witness; never truncate the
-  // fallback (which also finds matches crossing this boundary).
-  return sql`(${match} OR ${literal(sql`left(${fields.content},256)`)} OR ${literal(fields.content)})`;
+  // ICU can lowercase a truncated suffix differently (e.g. final sigma).
+  // This uncorrelated catalog guard is evaluated once per statement and follows
+  // the actual column/default collation, never a stale application-side cache.
+  const contextFreeCase = sql`(SELECT c.collisdeterministic AND
+    (CASE WHEN c.collprovider='d' THEN d.datlocprovider ELSE c.collprovider END)='c'
+    FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_collation c ON c.oid=a.attcollation
+    JOIN pg_catalog.pg_database d ON d.datname=current_database()
+    WHERE a.attrelid='articles'::regclass AND a.attname='content_text' AND NOT a.attisdropped)`;
+  const prefix = literal(sql`left(${fields.content},256)`);
+  // Caseless LIKE is a true substring witness. ILIKE needs context-free casing.
+  // Keep the indexed constant and complete fallback, including boundary matches.
+  const safePrefix = caseless ? prefix : sql`(${contextFreeCase} AND ${prefix})`;
+  return sql`(${match} OR ${safePrefix} OR ${literal(fields.content)})`;
 }

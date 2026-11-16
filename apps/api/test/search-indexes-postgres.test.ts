@@ -250,6 +250,31 @@ test('010_search_indexes + 011_search_prefix_index: exact API/MCP parity, extens
             }
           } finally { await db`DELETE FROM articles WHERE id IN ${db(witnessIds.flat())}`; }
         });
+        if (layout === 'install-public') await layoutTest.test('contextual ICU case folding cannot turn a truncated prefix into a false match', async () => {
+          const [original] = await db`SELECT n.nspname,c.collname FROM pg_attribute a JOIN pg_collation c ON c.oid=a.attcollation JOIN pg_namespace n ON n.oid=c.collnamespace WHERE a.attrelid='articles'::regclass AND a.attname='content_text'`;
+          await db`CREATE COLLATION contextual_case (provider=icu,locale='und',deterministic=true)`;
+          const witness = randomUUID();
+          try {
+            await db`ALTER TABLE articles ALTER COLUMN content_text TYPE text COLLATE contextual_case USING content_text`;
+            const text = 'x'.repeat(255) + 'ΣΑ';
+            await db`INSERT INTO articles(id,user_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash) VALUES(${witness},${owner},${witness},'Synthetic','neutral','https://example.invalid/contextual-case','2026-01-01',${'<p>' + text + '</p>'},${text},${hash(text)})`;
+            const [demonstration] = await db`SELECT left(content_text,256) ILIKE '%ς%' AS prefix,content_text ILIKE '%ς%' AS complete FROM articles WHERE id=${witness}`;
+            assert.equal(demonstration.prefix, true); assert.equal(demonstration.complete, false);
+            for (const query of ['ς', 'σ', '%_']) {
+              const pattern = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+              const expectedApi = await db`SELECT id FROM articles WHERE user_id=${owner} AND (title ILIKE ${pattern} OR content_text ILIKE ${pattern} OR to_tsvector('simple',title || ' ' || content_text) @@ plainto_tsquery('simple',${query})) ORDER BY published_at DESC,id DESC`;
+              const expectedMcp = await db`SELECT id FROM articles WHERE user_id=${owner} AND (title ILIKE ${pattern} OR url ILIKE ${pattern} OR content_text ILIKE ${pattern}) ORDER BY published_at DESC,id`;
+              const page = await articles.page(owner, { scope: 'archive', q: query, limit: 100 }), mcp = await mcpPage(owner, query, 0, 100);
+              assert.equal(page.total, expectedApi.length); assert.equal(mcp.total, expectedMcp.length);
+              assert.deepEqual(page.items.map(item => item.id), expectedApi.map(item => item.id));
+              assert.deepEqual(mcp.items.map(item => item.articleId), expectedMcp.map(item => item.id));
+            }
+          } finally {
+            await db`DELETE FROM articles WHERE id=${witness}`;
+            const [restore] = await db`SELECT format('ALTER TABLE articles ALTER COLUMN content_text TYPE text COLLATE %I.%I USING content_text',${original.nspname},${original.collname}) AS statement`;
+            await db.unsafe(restore.statement); await db`DROP COLLATION contextual_case`;
+          }
+        });
         if (layout === 'install-public') await layoutTest.test('articles.selection literal-first and mcp.search_articles split shapes retain legacy exact results after repeated callbacks', async () => {
           const statements: string[] = [];
           const callbackDb = postgres(url.toString(), { max: 1, connection: { search_path: schema, statement_timeout: '20000' }, onnotice: () => {}, debug: (_id, query) => { statements.push(query); } });

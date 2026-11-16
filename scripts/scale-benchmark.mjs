@@ -31,7 +31,7 @@ const started = performance.now(), deadline = started + 30 * 60_000;
 const budgets = { wallSeconds: 1800, statementMs: 10000, seedBatchMs: 120000, maintenanceMs: 900000, rssBytes: 768 * 1024 ** 2, databaseBytes: 16 * 1024 ** 3, writeSeconds: 120 };
 const report = {
   formatVersion: 2, status: 'running', tier, budgets, searchMode,
-  queryVariant: 'bounded-prefix-256-caseless-v2', diagnoseMcpPrepared,
+  queryVariant: 'bounded-prefix-256-locale-guard-v3', diagnoseMcpPrepared,
   hardware: { platform: platform(), release: release(), cpu: cpus()[0]?.model, logicalCpus: cpus().length, ramBytes: totalmem(), node: process.version },
   dataset: { seed: 'scale-v2-uuid8', primaryOwnerArticles: tier, isolationOwners: 10, isolationArticlesEach: Math.min(10000, tier / 10), feeds: 100, tags: 100, folders: 20, timestampGroupSize: 100, microsecondSubgroups: 3, unreadPercent: 5, savedPercent: 2, body: '95% ~2KiB, 5% ~32KiB deterministic HIGHLY COMPRESSIBLE text; not a realistic media or storage benchmark', images: Math.min(200000, tier), contexts: 0 },
   phases: {}, reads: [], plans: [], limitations: [], peakRssBytes: 0,
