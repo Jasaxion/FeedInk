@@ -59,6 +59,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
       CI: 'true'
+      VITE_BUILD_REVISION: ${{ github.sha }}
       BROWSER_MATRIX: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request' || inputs.full_acceptance) && 'chromium webkit' || 'chromium' }}
       DATABASE_URL: postgresql://feedink_ci:ephemeral_ci_only@127.0.0.1:5432/feedink_ci
       TEST_DATABASE_URL: postgresql://feedink_ci:ephemeral_ci_only@127.0.0.1:5432/feedink_ci
@@ -93,6 +94,17 @@ jobs:
       - name: Production build (ink → shared → web → API)
         id: build
         run: npm run build
+      - name: Package development preview after successful build
+        if: ${{ success() && env.FULL_ACCEPTANCE != 'true' }}
+        run: node scripts/package-runtime.mjs
+      - name: Publish development preview bundle
+        if: ${{ success() && env.FULL_ACCEPTANCE != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedink-preview-${{ github.sha }}
+          path: .artifacts/runtime/
+          retention-days: 7
+          if-no-files-found: error
       - name: Prepare the owned CI data root
         run: |
           node --input-type=module <<'JS'

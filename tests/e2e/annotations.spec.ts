@@ -292,9 +292,9 @@ test('trusted pen retains title/body/image/gaps/gutters through save acknowledge
   await toolbar.getByLabel('手写选项', { exact: true }).click();
   await expect(page.locator('.reader-scroll')).toHaveAttribute('data-ink-enabled', '');
   expect(await page.locator('.reader-scroll').evaluate(node => getComputedStyle(node).touchAction)).toBe('none');
-  type Region = 'title' | 'body' | 'image' | 'gap' | 'left' | 'right';
+  type Region = 'title' | 'metadata' | 'body' | 'image' | 'gap' | 'left' | 'right';
   async function pathFor(region: Region) {
-    const target = region === 'title' ? page.locator('[data-ink-title]') : page.getByTestId('reader-content').locator(region === 'image' ? 'img' : 'p').first();
+    const target = region === 'title' ? page.locator('[data-ink-title]') : region === 'metadata' ? page.locator('.article-meta') : page.getByTestId('reader-content').locator(region === 'image' ? 'img' : 'p').first();
     await target.scrollIntoViewIfNeeded();
     const box = await target.boundingBox(), viewport = await page.locator('.reader-scroll').boundingBox();
     if (!box || !viewport) throw new Error(`No ${region} geometry`);
@@ -328,7 +328,7 @@ test('trusted pen retains title/body/image/gaps/gutters through save acknowledge
     });
     await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(2);
     await expect.poll(() => paintedAt(body[1])).toBe(true);
-    for (const [index, region] of (['image', 'gap', 'left', 'right'] as const).entries()) {
+    for (const [index, region] of (['image', 'gap', 'left', 'right', 'metadata'] as const).entries()) {
       const points = await pathFor(region); await penPath(page, points);
       await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(index + 3);
       await expect.poll(() => paintedAt(points[1])).toBe(true);
@@ -339,11 +339,11 @@ test('trusted pen retains title/body/image/gaps/gutters through save acknowledge
       // claim to emulate hardware palm rejection). Previously blur discarded them.
       await page.evaluate(() => window.dispatchEvent(new Event('blur')));
     });
-    await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(7);
+    await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(8);
     await expect.poll(() => paintedAt(interrupted[1])).toBe(true);
     const saved = await getAnnotation(api, first.id);
     expect(saved.context).toEqual(original.context);
-    expect(saved.ink!.strokes.map(stroke => stroke.color)).toEqual(Array(7).fill('#000000'));
+    expect(saved.ink!.strokes.map(stroke => stroke.color)).toEqual(Array(8).fill('#000000'));
     expect(saved.ink!.strokes[1].anchor?.kind).toBe('content-v1');
     expect(saved.ink!.strokes[0].anchor?.kind).toBe('surface-v1');
     expect(saved.ink!.strokes.every(stroke => stroke.points.length >= 3)).toBe(true);
@@ -374,7 +374,7 @@ test('trusted pen retains title/body/image/gaps/gutters through save acknowledge
     await page.locator('.reader-scroll').evaluate(node => { node.scrollTop = node.scrollHeight; });
     expect(await page.locator('.reader-scroll').evaluate(node => node.scrollTop)).toBeGreaterThan(0);
     await page.reload(); await expect(page.getByTestId('ink-toggle')).toBeEnabled();
-    for (const region of ['title', 'body', 'image', 'gap', 'left', 'right'] as const) {
+    for (const region of ['title', 'metadata', 'body', 'image', 'gap', 'left', 'right'] as const) {
       const points = await pathFor(region); await expect.poll(() => paintedAt(points[1])).toBe(true);
     }
     expect((await getAnnotation(api, first.id)).ink!.strokes).toEqual(saved.ink!.strokes);
