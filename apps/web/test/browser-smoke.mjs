@@ -131,10 +131,10 @@ try {
   await setOffline(true); await page.reload({ waitUntil: 'domcontentloaded' }); await page.getByTestId('reader-content').waitFor();
   await page.waitForFunction(() => { const image = document.querySelector('.article-content img[alt="归档图片"]'); return image?.src.startsWith('data:image/') && image.complete && image.naturalWidth > 0; });
   await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
-  await page.getByRole('button', { name: '显示全文', exact: true }).click();
+  await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '显示全文', exact: true }).click();
   await expect(page.getByTestId('reader-content')).toContainText('第一篇提取全文');
   await page.getByRole('button', { name: '更多文章操作', exact: true }).click();
-  await page.getByRole('button', { name: '取消全文显示', exact: true }).click();
+  await page.getByRole('dialog', { name: '阅读工具', exact: true }).getByRole('button', { name: '取消全文显示', exact: true }).click();
   await expect(page.getByTestId('reader-content')).toContainText('持久存档');
   assert.equal(fulltextRequests, 1, 'offline toggles cannot send a new fulltext request');
   await page.locator('.reader-scroll').focus(); await page.keyboard.press('y'); await page.waitForFunction(() => document.querySelector('[data-testid="offline-status"]').textContent.includes('待同步'));
