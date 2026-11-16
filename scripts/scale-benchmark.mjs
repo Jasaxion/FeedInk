@@ -313,10 +313,16 @@ try {
       const paths = [{ label: 'first', cursor: undefined }];
       let operation = 'reference-count';
       try {
-        // Authoritative reference count is measured separately from hot-path time.
+        // Keep reference timing separate, with the same per-request planning policy
+        // as the service. A generic reference plan must not invent a service timeout.
         const { condition } = articles.selection(owner, query, false);
+        const countReference = () => db.begin('read only', async sql => {
+          if (query.q) await sql`SET LOCAL plan_cache_mode = force_custom_plan`;
+          const selected = articles.selection(owner, query, false, sql).condition;
+          return sql`SELECT count(*)::integer AS total FROM articles a WHERE ${selected}`;
+        });
         const begin = performance.now();
-        const [{ total }] = await db`SELECT count(*)::integer AS total FROM articles a WHERE ${condition}`;
+        const [{ total }] = await countReference();
         const referenceCountMs = performance.now() - begin;
         if (['archive', 'all', 'unread', 'saved', 'common-tag'].includes(label) && total > 100) {
           const [boundary] = await db`SELECT a.id,to_char(a.published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS date FROM articles a WHERE ${condition} ORDER BY a.published_at DESC,a.id DESC OFFSET ${Math.floor(total*.9)} LIMIT 1`;
@@ -341,12 +347,12 @@ try {
             if (queries) for (const [index, statement] of queries.entries())
               await explain(planLabel(`${label}/${path.label}/statement-${index}`), statement.query, statement.parameters);
           }
-          report.reads.push({ stage, label, path: path.label, limit, referenceCountMs, responseBytes: bytes, ...percentiles(durations) });
+          report.reads.push({ stage, label, path: path.label, limit, referenceCountMs, referencePlanCacheMode: query.q ? 'force_custom_plan' : 'auto', responseBytes: bytes, ...percentiles(durations) });
         }
         // Actual authoritative count plan including literal fallback; no estimate.
         captured = []; operation = 'authoritative-count';
-        await db`SELECT count(*)::integer AS total FROM articles a WHERE ${condition}`;
-        const statement = captured[0]; captured = null;
+        await countReference();
+        const statement = captured.find(item => item.query.startsWith('SELECT count(')); captured = null;
         if (statement) await explain(planLabel(`${label}/authoritative-count`), statement.query, statement.parameters);
       } catch (error) {
         captured = null;

@@ -42,6 +42,8 @@ async function changeBodyMode(page: Page, mode: 'feed' | 'fulltext') {
   await tools.getByRole('combobox', { name: '正文模式', exact: true }).selectOption(mode);
   await page.keyboard.press('Escape');
   await expect(tools).toBeHidden();
+  // The mode control can change before extraction and context validation finish.
+  await expect(page.getByTestId('reader-content')).toHaveAttribute('data-annotation-mode', mode);
 }
 
 async function selectQuote(page: Page, quote = fixtureQuote) {

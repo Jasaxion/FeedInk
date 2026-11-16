@@ -271,7 +271,7 @@ test('010_search_indexes + 011_search_prefix_index: exact API/MCP parity, extens
             }
           } finally {
             await db`DELETE FROM articles WHERE id=${witness}`;
-            const [restore] = await db`SELECT format('ALTER TABLE articles ALTER COLUMN content_text TYPE text COLLATE %I.%I USING content_text',${original.nspname},${original.collname}) AS statement`;
+            const [restore] = await db`SELECT format('ALTER TABLE articles ALTER COLUMN content_text TYPE text COLLATE %I.%I USING content_text',${original.nspname}::text,${original.collname}::text) AS statement`;
             await db.unsafe(restore.statement); await db`DROP COLLATION contextual_case`;
           }
         });
