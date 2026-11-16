@@ -145,14 +145,30 @@ const AI_LANGUAGE_FRAGMENT_LETTERS = 12;
 // franc normalizes distances so the winner scores 1; scores are NOT confidence probabilities.
 // This relative separation is a provisional ambiguity guard, requiring hosted synthetic calibration.
 const AI_LANGUAGE_RANK_SEPARATION = 0.01;
-function rankAiLanguage(text: string, letters: string[]): AiLanguage | undefined {
-  if (letters.length < AI_LANGUAGE_FRAGMENT_LETTERS) return;
+type AiLanguageRankReason = 'too-short' | 'invalid-rank' | 'ambiguous-rank' | 'unsupported-winner' | 'incompatible-script' | 'supported-winner';
+interface AiLanguageRank { language?: AiLanguage; ranked: [string, number][]; reason: AiLanguageRankReason }
+interface AiLanguageWindowPosition { segment: number; window: number }
+interface AiLanguageRankTrace {
+  position: AiLanguageWindowPosition; characters: number; letters: number; ranked: [string, number][];
+  decision: AiLanguage | 'unknown' | 'ignored'; reason: AiLanguageRankReason | 'no-letters';
+}
+export type AiLanguageTrace =
+  | (({ phase: 'window' } | { phase: 'context'; anchor: AiLanguageWindowPosition }) & AiLanguageRankTrace)
+  | { phase: 'fragment-consensus'; position: AiLanguageWindowPosition; anchor: AiLanguageWindowPosition;
+      decision: AiLanguage | 'unknown'; reason: 'fragment-agrees' | 'fragment-disagrees' }
+  | { phase: 'result'; decision: NonNullable<AiJob['detectedLanguage']>;
+      reason: 'mixed-windows' | 'uncertain-window' | 'missing-anchor' | 'fragment-disagreement' | 'context-disagreement' | 'consensus' };
+function rankAiLanguage(text: string, letters: string[]): AiLanguageRank {
+  if (letters.length < AI_LANGUAGE_FRAGMENT_LETTERS) return { ranked: [], reason: 'too-short' };
   // Never restrict ranking to supported targets: an unsupported winner must veto skipping.
-  const [first, second] = francAll(text, { minLength: AI_LANGUAGE_FRAGMENT_LETTERS });
-  if (!first || !Number.isFinite(first[1]) || second && (!Number.isFinite(second[1]) || first[1] - second[1] < AI_LANGUAGE_RANK_SEPARATION)) return;
+  const ranked = francAll(text, { minLength: AI_LANGUAGE_FRAGMENT_LETTERS }), [first, second] = ranked;
+  if (!first || !Number.isFinite(first[1]) || second && !Number.isFinite(second[1])) return { ranked, reason: 'invalid-rank' };
+  if (second && first[1] - second[1] < AI_LANGUAGE_RANK_SEPARATION) return { ranked, reason: 'ambiguous-rank' };
   const language = languageCodes[first[0]];
+  if (!language) return { ranked, reason: 'unsupported-winner' };
   // Check EVERY letter, including scripts franc's dominant-script selection may overlook.
-  return language && languageScripts[language].test(letters.join('')) ? language : undefined;
+  if (!languageScripts[language].test(letters.join(''))) return { ranked, reason: 'incompatible-script' };
+  return { language, ranked, reason: 'supported-winner' };
 }
 function* aiLanguageWindows(text: string): Generator<string> {
   for (const sentence of text.split(/(?<=[.!?。！？;；\n])\s*/u)) {
@@ -169,28 +185,53 @@ function* aiLanguageWindows(text: string): Generator<string> {
     if (window) yield window; // Never discard a remainder, even when it is too short to identify.
   }
 }
-/** All-window consensus; context validates short independent evidence but cannot override it. */
-export function detectAiLanguage(segments: AiSegment[]): NonNullable<AiJob['detectedLanguage']> {
-  const detected = new Set<AiLanguage>(), fragments: { text: string; language: AiLanguage }[] = [];
-  let unknown = false, anchor = '';
-  for (const segment of segments) for (const text of aiLanguageWindows(segment.text)) {
-    const characters = text.match(/\p{L}/gu) ?? [];
-    if (!characters.length) continue;
-    const language = rankAiLanguage(text, characters);
-    if (!language) { unknown = true; continue; }
-    if (characters.length < AI_LANGUAGE_ANCHOR_LETTERS) fragments.push({ text, language });
-    else { detected.add(language); if (!anchor) anchor = text; }
+function inspectAiLanguage(segments: AiSegment[], trace?: (entry: AiLanguageTrace) => void): NonNullable<AiJob['detectedLanguage']> {
+  const detected = new Set<AiLanguage>(), fragments: { text: string; language: AiLanguage; position: AiLanguageWindowPosition }[] = [];
+  let unknown = false, anchor: { text: string; position: AiLanguageWindowPosition } | undefined;
+  const finish = (decision: NonNullable<AiJob['detectedLanguage']>, reason: Extract<AiLanguageTrace, { phase: 'result' }>['reason']) => {
+    trace?.({ phase: 'result', decision, reason }); return decision;
+  };
+  for (const [segment, input] of segments.entries()) {
+    let window = 0;
+    for (const text of aiLanguageWindows(input.text)) {
+      const position = { segment, window: window++ }, characters = text.match(/\p{L}/gu) ?? [];
+      if (!characters.length) {
+        trace?.({ phase: 'window', position, characters: text.length, letters: 0, ranked: [], decision: 'ignored', reason: 'no-letters' });
+        continue;
+      }
+      const rank = rankAiLanguage(text, characters), language = rank.language;
+      trace?.({ phase: 'window', position, characters: text.length, letters: characters.length, ranked: rank.ranked.slice(0, 5), decision: language ?? 'unknown', reason: rank.reason });
+      if (!language) { unknown = true; continue; }
+      if (characters.length < AI_LANGUAGE_ANCHOR_LETTERS) fragments.push({ text, language, position });
+      else { detected.add(language); if (!anchor) anchor = { text, position }; }
+    }
   }
-  if (detected.size > 1) return 'mixed';
-  if (unknown || !anchor) return 'unknown';
+  if (detected.size > 1) return finish('mixed', 'mixed-windows');
+  if (unknown) return finish('unknown', 'uncertain-window');
+  if (!anchor) return finish('unknown', 'missing-anchor');
   const language = [...detected][0];
   for (const fragment of fragments) {
-    if (fragment.language !== language) return 'unknown';
+    trace?.({ phase: 'fragment-consensus', position: fragment.position, anchor: anchor.position,
+      decision: fragment.language === language ? language : 'unknown', reason: fragment.language === language ? 'fragment-agrees' : 'fragment-disagrees' });
+    if (fragment.language !== language) return finish('unknown', 'fragment-disagreement');
     // At most two bounded windows, well below franc's input cap. No title/tail is inherited by fiat.
-    const context = `${fragment.text}\n${anchor}`;
-    if (rankAiLanguage(context, context.match(/\p{L}/gu) ?? []) !== language) return 'unknown';
+    const context = `${fragment.text}\n${anchor.text}`, characters = context.match(/\p{L}/gu) ?? [], rank = rankAiLanguage(context, characters);
+    trace?.({ phase: 'context', position: fragment.position, anchor: anchor.position, characters: context.length,
+      letters: characters.length, ranked: rank.ranked.slice(0, 5), decision: rank.language ?? 'unknown', reason: rank.reason });
+    if (rank.language !== language) return finish('unknown', 'context-disagreement');
   }
-  return language;
+  return finish(language, 'consensus');
+}
+/** All-window consensus; context validates short independent evidence but cannot override it. */
+export function detectAiLanguage(segments: AiSegment[]): NonNullable<AiJob['detectedLanguage']> {
+  return inspectAiLanguage(segments);
+}
+/** Hosted synthetic fixtures only. Never wire this trace seam into article handling or telemetry. */
+export function traceSyntheticAiLanguage(segments: AiSegment[]): { detectedLanguage: NonNullable<AiJob['detectedLanguage']>; trace: AiLanguageTrace[] } {
+  if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('Synthetic language traces require approved GitHub-hosted CI');
+  const trace: AiLanguageTrace[] = [];
+  const detectedLanguage = inspectAiLanguage(segments, entry => trace.push(entry));
+  return { detectedLanguage, trace };
 }
 export function translationMessages(batch: AiSegment[], target: AiLanguage): AiMessage[] {
   return [

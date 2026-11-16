@@ -73,9 +73,9 @@ const percentiles = (values) => {
 const explain = async (label, query, parameters = []) => {
   await guard();
   try {
-    const rows = await db.begin('read only', async (sql) => sql.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query}`, parameters));
-    report.plans.push({ label, sql: query, plan: rows[0]['QUERY PLAN'] });
-  } catch (error) { report.plans.push({ label, errorCode: error.code || 'ERROR' }); report.limitations.push(`${label}: plan exceeded budget or failed (${error.code || 'ERROR'})`); }
+    const rows = await db.begin('read only', async (sql) => sql.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query}`, parameters, { prepare: false }));
+    report.plans.push({ label, provenance: 'unprepared-replay', sql: query, plan: rows[0]['QUERY PLAN'] });
+  } catch (error) { report.plans.push({ label, provenance: 'unprepared-replay', errorCode: error.code || 'ERROR' }); report.limitations.push(`${label}: plan exceeded budget or failed (${error.code || 'ERROR'})`); }
 };
 // Compare the entire ordered response, including exact total and cursor. Only
 // digests/counts are exported; no new corpus/secret capture is needed.

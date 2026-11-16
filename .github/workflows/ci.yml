@@ -4,6 +4,14 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      full_acceptance:
+        description: Final full browser, container and storage acceptance
+        type: boolean
+        default: false
+      storage_acceptance:
+        description: Targeted container and S3 recovery acceptance
+        type: boolean
+        default: false
       scale_tier:
         description: Optional synthetic single-owner scale rehearsal
         type: choice
@@ -19,6 +27,8 @@ on:
         default: false
 permissions:
   contents: read
+env:
+  FULL_ACCEPTANCE: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request' || inputs.full_acceptance) && 'true' || 'false' }}
 concurrency:
   group: feedink-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
@@ -40,6 +50,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
       CI: 'true'
+      BROWSER_MATRIX: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request' || inputs.full_acceptance) && 'chromium webkit' || 'chromium' }}
       DATABASE_URL: postgresql://feedink_ci:ephemeral_ci_only@127.0.0.1:5432/feedink_ci
       TEST_DATABASE_URL: postgresql://feedink_ci:ephemeral_ci_only@127.0.0.1:5432/feedink_ci
       SEARCH_INDEXES_TEST: '1'
@@ -63,6 +74,13 @@ jobs:
           node scripts/check-public-content.mjs
           node --test scripts/check-public-content.test.mjs
       - run: npm ci --no-audit --no-fund
+      - name: Record validation profile
+        run: |
+          if [ "$FULL_ACCEPTANCE" = true ]; then
+            echo 'Full acceptance profile; runtime publication requires every gate.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Development profile: core unit/API and Chromium gates; no runtime bundle or deployment approval.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Production build (ink → shared → web → API)
         id: build
         run: npm run build
@@ -91,7 +109,7 @@ jobs:
       - name: Install browser for existing end-to-end tests
         id: browsers
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.contracts.outcome == 'success' && hashFiles('tests/e2e/*.spec.ts') != '' }}
-        run: npx playwright install --with-deps chromium webkit
+        run: npx playwright install --with-deps $BROWSER_MATRIX
       - name: Install PDF verification tools
         id: pdf
         if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
@@ -104,7 +122,7 @@ jobs:
         continue-on-error: true
         run: |
           failed=0
-          for browser in chromium webkit; do
+          for browser in $BROWSER_MATRIX; do
             for suite in browser audit shell images offline-origin annotations ai; do
               if ! FEEDINK_BROWSER="$browser" npm run "test:$suite" -w @feedink/web; then failed=1; fi
             done
@@ -118,14 +136,20 @@ jobs:
         if: ${{ !cancelled() && steps.browsers.outcome == 'success' && steps.pdf.outcome == 'success' && hashFiles('tests/e2e/*.spec.ts') != '' }}
         run: |
           failed=0
-          for project in api desktop mobile tablet webkit workflows mcp; do
+          projects='api desktop mobile mcp'
+          annotation_projects='annotations annotations-mobile'
+          if [ "$FULL_ACCEPTANCE" = true ]; then
+            projects='api desktop mobile tablet webkit workflows mcp'
+            annotation_projects='annotations annotations-mobile annotations-webkit'
+          fi
+          for project in $projects; do
             if ! PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project" node tests/run-project.mjs "$project"; then
               failed=1
             fi
           done
           # Each batch owns a fresh API/rate budget; one worker keeps shared fixture controls isolated.
           # Keep every shard result, even after an earlier failure; raw reports stay ephemeral.
-          for project in annotations annotations-mobile annotations-webkit; do
+          for project in $annotation_projects; do
             for shard in 1 2 3; do
               batch="$project-shard-$shard-of-3"
               echo "::group::$batch"
@@ -145,10 +169,12 @@ jobs:
           test '${{ steps.client.outcome }}' = success
           test '${{ steps.e2e.outcome }}' = success
       - name: Package reviewed runtime code
+        if: ${{ success() && env.FULL_ACCEPTANCE == 'true' }}
         run: |
           node --test scripts/package-runtime.test.mjs
           node scripts/package-runtime.mjs
       - name: Publish code-only runtime bundle
+        if: ${{ success() && env.FULL_ACCEPTANCE == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: feedink-runtime-${{ github.sha }}
@@ -158,6 +184,7 @@ jobs:
       # Only checked runtime code is uploaded, never traces, sessions, environment files or data.
 
   container:
+    if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request' || inputs.full_acceptance || inputs.storage_acceptance }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -231,6 +258,7 @@ jobs:
       # Keep raw diagnostic files ephemeral; publish only reviewed summaries.
 
   storage:
+    if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request' || inputs.full_acceptance || inputs.storage_acceptance }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     services:

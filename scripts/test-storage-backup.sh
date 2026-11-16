@@ -65,6 +65,10 @@ if(!text.includes(process.argv[3]) || privateValues.some(value=>text.includes(va
 }
 JS
 }
+if [ "$INTERRUPTION" = true ]; then
+  # Hosted-only event/socket regressions; the existing parent interruption hook runs these too.
+  node --test --test-concurrency=1 "$SCRIPT_DIR/storage-s3-interruption-proxy.test.mjs"
+fi
 compose up -d postgres; wait_database
 if [ "$INTERRUPTION" = true ]; then
   compose --profile interruption up -d s3-interruption-proxy
@@ -127,15 +131,45 @@ if [ "$INTERRUPTION" = true ]; then
   result=0
   timeout --signal=TERM --kill-after=10s 90s sh "$SCRIPT_DIR/storage-backup.sh" "$WORK/interrupted" > "$WORK/interrupted.txt" 2>&1 || result=$?
   [ "$result" -ne 0 ] && [ "$result" -ne 124 ] && [ "$result" -ne 137 ] || exit 1
-  proxy assert-interrupted
   assert_safe_failure "$WORK/interrupted.txt" 'Storage operation failed'
   [ -s "$WORK/interrupted/postgres.dump" ] && [ -s "$WORK/interrupted/blobs.archive" ] && [ ! -e "$WORK/interrupted/manifest.json" ] || exit 1
   partial_hashes=$(sha256sum "$WORK/interrupted/postgres.dump" "$WORK/interrupted/blobs.archive")
+  node --input-type=module - "$SCRIPT_DIR/storage-s3-interruption-proxy.mjs" "$WORK/interrupted/blobs.archive" <<'JS'
+import { readFile, stat } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+try {
+  const { isExactFixturePartialArchive }=await import(pathToFileURL(process.argv[2]).href);
+  if((await stat(process.argv[3])).size>512 || !isExactFixturePartialArchive(await readFile(process.argv[3]))) throw new Error();
+  console.log('Witness: partial archive has exact source framing and one actual payload byte only');
+} catch { console.error('Exact partial archive witness failed'); process.exitCode=1; }
+JS
+  proxy assert-interrupted
   # Explicitly test refusal, NOT a retry into or cleanup of a nonempty failed output.
   if sh "$SCRIPT_DIR/storage-backup.sh" "$WORK/interrupted" > "$WORK/interrupted-reuse.txt" 2>&1; then exit 1; fi
   assert_safe_failure "$WORK/interrupted-reuse.txt" 'Backup destination already exists'
   if operator check "$before" < "$WORK/interrupted/blobs.archive" > "$WORK/partial-check.txt" 2>&1; then exit 1; fi
   assert_safe_failure "$WORK/partial-check.txt" 'Storage operation failed'
+  # Streaming SDK errors need not retry: make both real signed refusal requests explicitly.
+  compose run --rm --no-deps -T --entrypoint node app --input-type=module <<'JS'
+import { S3Client, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { storageConfigFromEnv } from './apps/api/dist/storage/config.js';
+import { fanoutKey } from './apps/api/dist/storage/backend.js';
+import { hash } from './apps/api/dist/core.js';
+const config=storageConfigFromEnv();
+const client=new S3Client({region:config.region,endpoint:config.endpoint,forcePathStyle:config.forcePathStyle,maxAttempts:1,
+  requestHandler:{connectionTimeout:2000,requestTimeout:5000},logger:{debug(){},info(){},warn(){},error(){}}});
+try {
+  const address={Bucket:config.bucket,Key:config.prefix+fanoutKey(hash(Buffer.from([0,10,255,42])))};
+  for(const Command of [HeadObjectCommand,GetObjectCommand]) {
+    let refused=false;
+    try { const result=await client.send(new Command(address)); result.Body?.destroy(); }
+    catch(error) { refused=error?.$metadata?.httpStatusCode===503; }
+    if(!refused) throw new Error();
+  }
+} catch { console.error('Blocked source HEAD/GET witness failed'); process.exitCode=1; }
+finally { client.destroy(); }
+JS
+  proxy assert-blocked
   proxy recover
   [ "$(operator fingerprint)" = "$before" ] && [ "$(operator verify)" = "$before_objects" ] || exit 1
   compose run --rm --no-deps -T --entrypoint node app --input-type=module <<'JS'

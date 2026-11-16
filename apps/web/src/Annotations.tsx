@@ -275,7 +275,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost, onConte
     }
   }
   function editMark(id: string, patch: Partial<Pick<TextAnnotation, 'text' | 'kind' | 'color'>>) {
-    const document = current.current?.document; if (document) update({ ...document, marks: document.marks.map(mark => mark.id === id ? { ...mark, ...patch, updatedAt: Date.now() } : mark) });
+    const document = current.current?.document; if (document) update({ ...document, marks: document.marks.map(mark => mark.id === id ? { ...mark, ...patch, updatedAt: Math.max(Date.now(), mark.createdAt, mark.updatedAt) } : mark) });
   }
   function canChangeSingleMark() {
     if (!alive.current || frozen.current || pauses.current || loading || !current.current || current.current.conflict) return false;

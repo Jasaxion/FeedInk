@@ -203,7 +203,7 @@ test('single deletion is local before a delayed PUT and undo cannot overwrite a 
     await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeEnabled();
     await expect.poll(async () => (await saveFault.status()).held).toBe(1);
     expect((await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin)).marks).toEqual(saved.marks);
-    const winner = await putAnnotation(api, session, saved, { schemaVersion: 1, contentHash: saved.contentHash, ink: saved.ink, marks: [{ ...saved.marks[0], text: '另一设备修改', updatedAt: Date.now() }] }, saveFault.witnessOrigin);
+    const winner = await putAnnotation(api, session, saved, { schemaVersion: 1, contentHash: saved.contentHash, ink: saved.ink, marks: [{ ...saved.marks[0], text: '另一设备修改', updatedAt: Math.max(Date.now(), saved.marks[0].createdAt, saved.marks[0].updatedAt) }] }, saveFault.witnessOrigin);
     await saveFault.release();
     await expect.poll(async () => (await saveFault.status()).lastStatus).toBe(412);
     await expect(page.getByTestId('annotation-status')).toContainText('冲突');

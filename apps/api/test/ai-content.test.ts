@@ -2,13 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as cheerio from 'cheerio';
 import { JSDOM } from 'jsdom';
-import { francAll } from 'franc';
 import { assertAiCredentialAbsent } from '../src/ai-security.js';
-import { prepareAiDocument, splitAiText, segmentBatches, validateTranslations, validateSummary, detectAiLanguage, assertAiDecodedCredentialAbsent, assertAiResultCredentialAbsent } from '../src/ai-content.js';
+import { prepareAiDocument, splitAiText, segmentBatches, validateTranslations, validateSummary, detectAiLanguage, traceSyntheticAiLanguage, assertAiDecodedCredentialAbsent, assertAiResultCredentialAbsent } from '../src/ai-content.js';
 import { englishAiParagraph, hostedAiTests } from './ai-fixture.js';
-import { supportedAiLanguageSamples, unsupportedAiLanguageSamples, englishAiBoundedSentence, englishAiLongSentence, shortEnglishAiRemainder, shortForeignAiFragments } from './ai-language-fixture.js';
+import { supportedAiLanguageSamples, unsupportedAiLanguageSamples, ambiguousFrenchAiTitle, englishAiBoundedSentence, englishAiLongSentence, englishAiLongPositiveSentence, shortEnglishAiRemainder, shortForeignAiFragments } from './ai-language-fixture.js';
 
 const hasCode = (code: string) => (error: any) => error.code === code;
+const languageMetadataFixtures = (text: string) => [
+  { name: 'image-alt', html: `<img src="/api/assets/11111111-1111-4111-8111-111111111111" alt="${text}">` },
+  { name: 'image-title', html: `<img src="/api/assets/11111111-1111-4111-8111-111111111111" title="${text}">` },
+  { name: 'link-title', html: `<a href="https://example.invalid/source" title="${text}">${englishAiParagraph}</a>` },
+];
 test('ai-content: long individual nodes beyond 14k, title, captions and image metadata have full segment coverage', () => {
   const long = `${englishAiParagraph.repeat(100)} TAIL-MARKER`, image = '11111111-1111-4111-8111-111111111111';
   const html = `<p class="feedink-ai-target">${long}</p><figure><img src="/api/assets/${image}" alt="Image description"><figcaption>Caption prose</figcaption></figure><pre><code>do_not_translate()</code></pre>`;
@@ -75,8 +79,8 @@ test('ai-content detectAiLanguage: bounded sentences and complete long-window re
   assert.ok(englishAiBoundedSentence.length > 240 && englishAiBoundedSentence.length < 480);
   assert.ok((englishAiBoundedSentence.slice(240).match(/\p{L}/gu)?.length ?? 0) < 40);
   assert.equal(detectAiLanguage([{ id: 'bounded', text: englishAiBoundedSentence }]), 'en');
-  assert.ok(englishAiLongSentence.length > 480);
-  assert.equal(detectAiLanguage([{ id: 'long', text: englishAiLongSentence }]), 'en');
+  assert.ok(englishAiLongPositiveSentence.length > 480);
+  assert.equal(detectAiLanguage([{ id: 'long-positive', text: englishAiLongPositiveSentence }]), 'en');
   // Boundary padding exercises a short final window without depending on a particular word's length.
   const prefix = englishAiParagraph.slice(0, -1).padEnd(480, ' ');
   assert.equal(detectAiLanguage([{ id: 'tail', text: prefix + shortEnglishAiRemainder }]), 'en');
@@ -87,6 +91,18 @@ test('ai-content detectAiLanguage: bounded sentences and complete long-window re
   for (const text of ['oui', 'ja', '日本語', 'Ж', 'xqz']) {
     assert.equal(detectAiLanguage([{ id: 'tail', text: prefix + text }]), 'unknown', 'tiny remainders cannot inherit English');
   }
+});
+test('ai-content detectAiLanguage: measured French-title and long English-window uncertainty cannot be overruled', () => {
+  const french = supportedAiLanguageSamples.find(sample => sample.language === 'fr')!.paragraph;
+  // Hosted evidence: cat wins the independent title even though fra wins its body and combined raw sample.
+  assert.equal(detectAiLanguage([{ id: 'title', text: ambiguousFrenchAiTitle }]), 'unknown');
+  assert.equal(detectAiLanguage(prepareAiDocument(`<p>${french}</p>`, ambiguousFrenchAiTitle, 'translate').segments), 'unknown');
+  assert.equal(detectAiLanguage([{ id: 'body', text: french }, { id: 'caption', text: ambiguousFrenchAiTitle }]), 'unknown');
+  // CI found this intact sample uncertain under production windows; its old raw-480 tail ranked unsupported sco.
+  // Keep the complete original sample, not a manufactured raw slice, as a conservative false-negative witness.
+  assert.ok(englishAiLongSentence.length > 480);
+  assert.equal(detectAiLanguage([{ id: 'long-uncertain', text: englishAiLongSentence }]), 'unknown');
+  assert.equal(detectAiLanguage([{ id: 'anchor', text: englishAiParagraph }, { id: 'long-uncertain', text: englishAiLongSentence }]), 'unknown');
 });
 test('ai-content detectAiLanguage: open-set unsupported prose, multilingual consensus and explicit ambiguity', () => {
   const english = [{ id: 'en', text: englishAiParagraph }];
@@ -117,36 +133,70 @@ test('ai-content detectAiLanguage: open-set unsupported prose, multilingual cons
 test('ai-content detectAiLanguage: late segments and metadata beyond 14k are never dropped', () => {
   const body = `<p>${englishAiParagraph}</p>`.repeat(100);
   assert.equal(detectAiLanguage(prepareAiDocument(body, englishAiParagraph, 'translate').segments), 'en', 'baseline must skip before adding foreign/ambiguous late text');
-  for (const tail of ['Les résultats de la recherche', 'これは日本語です', 'Menu']) {
+  const linkBaseline = prepareAiDocument(`${body}<a href="https://example.invalid/source">${englishAiParagraph}</a>`, englishAiParagraph, 'translate');
+  assert.equal(detectAiLanguage(linkBaseline.segments), 'en', 'link text without foreign metadata must skip');
+  for (const tail of [ambiguousFrenchAiTitle, 'これは日本語です', 'Menu']) {
     const doc = prepareAiDocument(`${body}<p>${tail}</p>`, englishAiParagraph, 'translate');
     assert.ok(doc.segments.map(segment => segment.text).join('').length > 14000);
+    assert.ok(doc.segments.some(segment => segment.text === tail), 'late body text entered segments');
     assert.notEqual(detectAiLanguage(doc.segments), 'en', 'late body segment');
-    for (const attribute of ['alt', 'title']) {
-      const image = prepareAiDocument(`${body}<img ${attribute}="${tail}">`, englishAiParagraph, 'translate');
-      assert.notEqual(detectAiLanguage(image.segments), 'en', `late ${attribute} attribute`);
+    for (const { name, html } of languageMetadataFixtures(tail)) {
+      const metadata = prepareAiDocument(`${body}${html}`, englishAiParagraph, 'translate');
+      assert.ok(metadata.segments.some(segment => segment.text === tail), `${name} survived sanitization and entered segments`);
+      assert.notEqual(detectAiLanguage(metadata.segments), 'en', `late ${name} attribute`);
     }
   }
 });
-test('ai-content detectAiLanguage: synthetic ranked-score diagnostics (hosted only, no article logging)', { skip: !hostedAiTests }, t => {
+test('ai-content detectAiLanguage: synthetic production-window/context traces (hosted only, no article logging)', { skip: !hostedAiTests }, t => {
+  const sample = (name: string, text: string) => ({ name, segments: [{ id: 'synthetic-fixture', text }] });
+  const french = supportedAiLanguageSamples.find(item => item.language === 'fr')!.paragraph;
+  const prefix = englishAiParagraph.slice(0, -1).padEnd(480, ' ');
   const samples = [
     ...supportedAiLanguageSamples.flatMap(({ language, paragraph, title }) => [
-      { name: `${language}-paragraph`, text: paragraph }, { name: `${language}-title`, text: title },
-      { name: `${language}-title-context`, text: `${title}\n${paragraph}` },
+      sample(`${language}-paragraph`, paragraph), sample(`${language}-title`, title),
+      { name: `${language}-title-context`, segments: prepareAiDocument(`<p>${paragraph}</p>`, title, 'translate').segments },
     ]),
-    ...unsupportedAiLanguageSamples.map(({ name, paragraph }) => ({ name: `${name}-unsupported`, text: paragraph })),
-    ...shortForeignAiFragments.map(({ name, text }) => ({ name: `${name}-short-foreign`, text })),
-    { name: 'en-bounded-sentence', text: englishAiBoundedSentence },
-    { name: 'en-old-240-tail', text: englishAiBoundedSentence.slice(240) },
-    { name: 'en-long-sentence', text: englishAiLongSentence },
-    { name: 'en-raw-480-tail', text: englishAiLongSentence.slice(480) },
-    { name: 'en-short-remainder', text: shortEnglishAiRemainder },
-    { name: 'en-fr-same-script-switch', text: `${englishAiParagraph} ${supportedAiLanguageSamples.find(sample => sample.language === 'fr')!.paragraph}` },
-    { name: 'ambiguous-short-heading', text: 'Menu' },
-    { name: 'invented-letter-sequences', text: 'qxzv jqxv zqxx vjxz qzvx xzqj vqxz xjqv zqxv qjzx vxqz jxvq' },
+    ...unsupportedAiLanguageSamples.map(({ name, paragraph }) => sample(`${name}-unsupported`, paragraph)),
+    ...shortForeignAiFragments.flatMap(({ name, text }) => [sample(`${name}-short-foreign`, text), sample(`${name}-trailing-window`, prefix + text)]),
+    { name: 'fr-ambiguous-title-context', segments: prepareAiDocument(`<p>${french}</p>`, ambiguousFrenchAiTitle, 'translate').segments },
+    sample('en-bounded-sentence', englishAiBoundedSentence), sample('en-long-uncertain', englishAiLongSentence),
+    sample('en-long-positive', englishAiLongPositiveSentence), sample('en-short-remainder', prefix + shortEnglishAiRemainder),
+    sample('en-tiny-remainder', prefix + 'oui'), sample('en-fr-same-script-switch', `${englishAiParagraph} ${french}`),
+    sample('ambiguous-short-heading', 'Menu'), sample('non-language-symbols', '1234!? 🙂'),
+    sample('minority-script', `${englishAiParagraph.slice(0, -1)} Ж.`),
+    sample('invented-letter-sequences', 'qxzv jqxv zqxx vjxz qzvx xzqj vqxz xjqv zqxv qjzx vxqz jxvq'),
+    ...languageMetadataFixtures(ambiguousFrenchAiTitle).map(({ name, html }) => {
+      const segments = prepareAiDocument(`<p>${englishAiParagraph}</p>${html}`, englishAiParagraph, 'translate').segments;
+      assert.ok(segments.some(segment => segment.text === ambiguousFrenchAiTitle), `${name} diagnostic includes actual metadata`);
+      return { name: `metadata-${name}`, segments };
+    }),
   ];
-  for (const { name, text } of samples) {
-    t.diagnostic(JSON.stringify({ fixture: name, characters: text.length, letters: text.match(/\p{L}/gu)?.length ?? 0,
-      ranked: francAll(text, { minLength: 12 }).slice(0, 5) }));
+  for (const { name, segments } of samples) {
+    const result = traceSyntheticAiLanguage(segments);
+    assert.equal(result.detectedLanguage, detectAiLanguage(segments), `${name} traced/untraced equivalence`);
+    if (name === 'en-title-context') assert.ok(result.trace.some(entry => entry.phase === 'context'), 'agreeing short title has a real fragment+anchor ranking');
+    if (name === 'fr-ambiguous-title-context') {
+      assert.equal(result.detectedLanguage, 'unknown');
+      assert.ok(result.trace.some(entry => entry.phase === 'window' && entry.position.segment === 0 && entry.reason === 'unsupported-winner'));
+      assert.ok(!result.trace.some(entry => entry.phase === 'context'), 'unsupported independent title never reaches a context override');
+    }
+    if (name === 'en-long-positive' || name === 'en-long-uncertain') {
+      assert.ok(result.trace.filter(entry => entry.phase === 'window').length > 1, 'long sample traces actual production windows');
+    }
+    assert.equal(result.trace.reduce((count, entry) => count + (entry.phase === 'window' ? entry.letters : 0), 0),
+      segments.reduce((count, segment) => count + (segment.text.match(/\p{L}/gu)?.length ?? 0), 0), `${name} every input letter inspected`);
+    for (const entry of result.trace) {
+      const keys = entry.phase === 'result' ? ['phase', 'decision', 'reason']
+        : entry.phase === 'fragment-consensus' ? ['phase', 'position', 'anchor', 'decision', 'reason']
+        : ['phase', 'position', 'characters', 'letters', 'ranked', 'decision', 'reason', ...(entry.phase === 'context' ? ['anchor'] : [])];
+      assert.deepEqual(Object.keys(entry).sort(), keys.sort(), 'trace schema contains no text or segment IDs');
+      if (entry.phase === 'context') {
+        assert.ok(entry.characters <= 961, 'context consists of at most two bounded windows and one separator');
+        assert.ok(result.trace.some(window => window.phase === 'window' && window.position.segment === entry.anchor.segment
+          && window.position.window === entry.anchor.window && window.letters >= 40), 'context identifies its actual substantial anchor');
+      }
+      t.diagnostic(JSON.stringify({ fixture: name, ...entry }));
+    }
   }
 });
 test('ai-content: Unicode splitting is lossless and summary includes code as well as late content', () => {
