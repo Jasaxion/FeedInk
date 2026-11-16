@@ -72,6 +72,42 @@ export async function annotationRegressions(browser, expect) {
     await expect.poll(() => state.document.marks.some(mark => mark.text === text)).toBe(true);
     await expect(page.getByTestId('annotation-status')).toContainText('已同步');
   }
+  await scenario('boundary crossing retains the in-reader coalesced prefix and stops before excluded samples', async ({ page, state }) => {
+    await page.getByTestId('ink-toggle').click();
+    const expected = await page.getByTestId('reader-content').evaluate(root => {
+      const target = root.querySelector('p'), box = target.getBoundingClientRect(), clip = root.closest('.reader-scroll').getBoundingClientRect();
+      const make = (type, x, y) => new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 91, pointerType: 'pen', isPrimary: true, button: 0, buttons: 1, pressure: .5, clientX: x, clientY: y });
+      target.dispatchEvent(make('pointerdown', box.left + 12, box.top + 10));
+      const samples = [make('pointermove', box.left + 25, box.top + 10), make('pointermove', box.left + 40, box.top + 10), make('pointermove', clip.right + 20, box.top + 10), make('pointermove', box.left + 60, box.top + 10)];
+      const event = make('pointermove', clip.right + 30, box.top + 10);
+      Object.defineProperty(event, 'getCoalescedEvents', { value: () => samples });
+      target.dispatchEvent(event);
+      return { lastX: box.left + 40, lastY: box.top + 10 };
+    });
+    await expect.poll(() => state.document.ink?.strokes.length).toBe(1);
+    const points = state.document.ink.strokes[0].points;
+    assert.equal(points.length, 3);
+    assert.ok(Math.abs(points.at(-1).x - expected.lastX) < .01 && Math.abs(points.at(-1).y - expected.lastY) < .01);
+  });
+  for (const change of ['identity', 'geometry']) await scenario(`interrupted eraser revalidates same-turn ${change} before deleting`, async ({ page, state }) => {
+    await draw(page); await expect.poll(() => state.document.ink?.strokes.length).toBe(1);
+    const saved = structuredClone(state.document.ink.strokes);
+    await page.getByRole('button', { name: '橡皮', exact: true }).click();
+    await page.getByTestId('reader-content').evaluate((root, change) => {
+      const target = root.querySelector('p'), box = target.getBoundingClientRect(), text = target.firstChild, original = text.textContent, style = target.getAttribute('style');
+      target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 92, pointerType: 'pen', isPrimary: true, button: 0, buttons: 1, pressure: .5, clientX: box.left + 25, clientY: box.top + 10 }));
+      if (change === 'identity') text.textContent = original + ' changed identity'; else target.style.transform = 'translateY(35px)';
+      window.dispatchEvent(new Event('blur'));
+      text.textContent = original;
+      if (style === null) target.removeAttribute('style'); else target.setAttribute('style', style);
+    }, change);
+    await page.getByRole('button', { name: '退出手写', exact: true }).click();
+    await page.getByTestId('annotation-toggle').click();
+    const download = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
+    const exported = JSON.parse(await readFile(await (await download).path(), 'utf8'));
+    assert.deepEqual(exported.ink.strokes, saved);
+    assert.deepEqual(state.document.ink.strokes, saved);
+  });
   for (const width of [1280, 390]) await scenario(`accessible swatches retain selection, caret and mobile bounds at ${width}px`, async ({ page, state }) => {
     await page.setViewportSize({ width, height: 844 });
     await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();

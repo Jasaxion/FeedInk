@@ -688,16 +688,15 @@ export class WebInkOverlay implements WebInkAPI {
           } catch { /* Synthetic events and some DOM targets cannot capture; window listeners remain. */ }
         }
       }
-      if (type === 'move' && event.buttons === 0 && event.pressure === 0) { this.onBrowserInterrupt(); return; }
       const viewport = readViewport(this.win);
       const inside = (sample: PointerEvent) => !this.readerSurface || this.readerSurface.targetAt(sample.clientX, sample.clientY) !== null;
-      if (!inside(event)) { this.onBrowserInterrupt(); return; }
       this.beginResolution();
       const samples = type === 'move' && typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
       for (const sample of samples) {
-        if (!inside(sample)) { this.onBrowserInterrupt(); return; }
+        if (!inside(sample) || sample.buttons === 0 && sample.pressure === 0) { this.onBrowserInterrupt(); return; }
         this.handlePointer('move', event.pointerId, clientPoint(sample.clientX, sample.clientY, sample.pressure, viewport), false, false);
       }
+      if (!inside(event) || type === 'move' && event.buttons === 0 && event.pressure === 0) { this.onBrowserInterrupt(); return; }
       this.handlePointer(type, event.pointerId, clientPoint(event.clientX, event.clientY, event.pressure, viewport),
         event.button === 5 || Boolean(event.buttons & 32), false);
       if (type === 'up') this.releaseCapture();
@@ -710,7 +709,7 @@ export class WebInkOverlay implements WebInkAPI {
   }
   private finishBrowserContact(): void {
     if (this.nativeInput || !this.options || this.gestures.pointerId === null) return;
-    this.guard(() => { if (this.gestures.finish()) this.changed(); }, true);
+    this.guard(() => { this.beginResolution(); if (this.gestures.finish()) this.changed(); }, true);
     this.releaseCapture();
   }
   private onBrowserInterrupt = (): void => {
