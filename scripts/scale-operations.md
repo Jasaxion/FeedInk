@@ -1,6 +1,6 @@
 # Exact counter cutover and hosted scale rehearsal
 
-Unreleased source-level design. No benchmark or PostgreSQL validation was executed during implementation. This is not a million-article performance guarantee. Parent integration and hosted review gates must pass before deployment.
+Operational guidance for exact counters and synthetic scale measurements. No fixture establishes a universal million-article latency guarantee. Consult the release evidence and validate capacity for the intended corpus before deployment.
 
 ## Exactness and query contract
 
@@ -32,7 +32,7 @@ Connected writer audit:
 - Content/fulltext-only and image-cache paths do not change article membership/read/saved counters and gain no unnecessary owner lock. Annotation editor/source locks are unchanged. Standalone feed-status/icon updates never retain a metadata row lock while acquiring owner coordination later.
 - Auth admin disable updates no article counters and takes no article locks; unpublished demo cleanup is the only application user deletion in the inspected source. Operator/raw-SQL deletes, bypass writes, and maintenance require their documented fence and are not substitutes for supported application race coverage.
 
-Counter rows still serialize owner/tag changes, and metadata coordination also serializes these application writers per owner. Throughput/write amplification need hosted measurements. Deadlock/serialization errors from privileged raw DML, maintenance overlap, or incompatible source deletion must roll back completely; supported compatible application operations are tested without accepting `40P01`. AI parent-lock compatibility is a separate integrated worker change, not supplied by this lane.
+Counter rows still serialize owner/tag changes, and metadata coordination also serializes these application writers per owner. Throughput/write amplification need hosted measurements. Deadlock/serialization errors from privileged raw DML, maintenance overlap, or incompatible source deletion must roll back completely; supported compatible application operations are tested without accepting `40P01`. AI account locking uses a mode compatible with child foreign-key key-share checks and has a separate concurrency regression.
 
 
 ## Maintenance-window deployment / backfill
@@ -87,7 +87,7 @@ No index is claimed universally beneficial from inspection. Hosted EXPLAIN/BUFFE
 
 ## Hosted-only bounded benchmark and integration
 
-Manual workflow `.github/workflows/scale.yml` targets `ubuntu-24.04` GitHub-hosted runners only. Parent must approve execution. Tiers are 10k/100k/1M articles **in one owner**, plus ten isolation owners (up to 10k each). Fixed synthetic seed, RFC-format custom UUIDv8 article/image IDs from the shared `scale-seed-ids.sql` mapping, skewed feeds/tags, feedless/unsubscribed rows, timestamp groups with microsecond subgroups, common/rare/short/multilingual/literal/no-hit searches, date filters, first/deep-90% keysets, state writes, bounded inserts, CAS correctness tests and counter audits are authored. Bodies are deliberately compressible; there are no real blobs/annotation contexts, so storage durability/backup performance is not measured here.
+Manual workflow `.github/workflows/scale.yml` targets `ubuntu-24.04` GitHub-hosted runners only. Run only in an approved disposable environment. Tiers are 10k/100k/1M articles **in one owner**, plus ten isolation owners (up to 10k each). Fixed synthetic seed, RFC-format custom UUIDv8 article/image IDs from the shared `scale-seed-ids.sql` mapping, skewed feeds/tags, feedless/unsubscribed rows, timestamp groups with microsecond subgroups, common/rare/short/multilingual/literal/no-hit searches, date filters, first/deep-90% keysets, state writes, bounded inserts, CAS correctness tests and counter audits are authored. Bodies are deliberately compressible; there are no real blobs/annotation contexts, so storage durability/backup performance is not measured here.
 
 Before expensive seeding, the benchmark validates sampled mapped article/image/metadata UUIDs and both cursor directions with the actual request validator. Article-tag and image references reuse exactly the same mapping; deep boundaries are validated again. `completed-with-limits` remains incomplete workload evidence, not acceptance.
 
@@ -97,11 +97,11 @@ Budgets: 30-minute script wall guard (35-minute workflow step hard cap), 10-seco
 
 Structured synthetic evidence is written only to the hosted runner temp directory. Publishing that allowlisted JSON artifact requires the explicit manual `publish_evidence` input (default false). No raw logs, credentials, deployment data, source captures or private paths are written to the repository.
 
-No new npm dependencies or manifest edits are required. Existing `postgres`, `tsx` and TypeScript suffice. Parent may add optional root scripts:
+No new npm dependencies or manifest edits are required. Existing `postgres`, `tsx` and TypeScript suffice. Optional local script aliases are:
 
 - `scale:benchmark`: `node --max-old-space-size=512 scripts/scale-benchmark.mjs`
 - `scale:counters`: `node scripts/scale-counters.mjs`
 
-The existing API test glob already discovers the `scale-*-postgres.test.ts` files; they additionally refuse execution outside approved hosted CI. Build the integrated workspace first. `app.ts` now calls `new Store(config.dataDir, config.storage)` as assigned; storage lane must supply `Config.storage` and the constructor before the build. AI app wiring remains parent-owned. Normal `ci.yml`, manifests, DTOs, storage, annotations and archive source are unchanged.
+The existing API test glob already discovers the `scale-*-postgres.test.ts` files; they additionally refuse execution outside approved hosted CI. Build the integrated workspace first. `app.ts` passes `config.storage` to Store, and the shipped core supplies that optional configuration. Build the complete workspace before using these scripts; the normal CI workflow includes the relevant migration and application checks.
 
 Review-followup coverage is authored in `scale-writer-order-postgres.test.ts`: actual atomic mixed [duplicate A,new B] imports with/without annotated A versus state/bulk, plus actual tag-delete routes versus state/tag patches. Two worker connections use explicit query barriers and PostgreSQL lock-state observation, not scheduling sleeps or a deadlock whitelist; import barriers retain the production duplicate lock and verify blob-before-owner order. Tag barriers hold the tag/member-article prefix of the deletion trigger before its counter delta. Both requests must complete, then counters, CAS versions, source bytes/identity and annotation revisions are checked. The same file covers early archive eligibility and seed UUID/cursor mapping. Uppercase/mixed-case tag scope/intersection/cursor parity and a real trigger-bypass audit/rebuild test extend `scale-queries-postgres.test.ts`. All new coverage still requires approved hosted execution and fresh independent review.

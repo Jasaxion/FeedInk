@@ -25,7 +25,7 @@ The SDK uses conditional `If-None-Match: *`, SHA256 checksums and a **full GET/h
 
 `Store.stream(key)` returns a Node readable that masks backend error metadata and destroys its owned source on error, completion or HTTP cancellation, including cancellation before the first read. Application asset/icon/EPUB routes return that stream **after the unchanged owner joins/session checks**. Do not accept a hash as authorization. Cross-account rows can legitimately share the same physical bytes; deleting/changing one owner's reference cannot authorize or delete another owner's object. Buffer-based `get()` remains for bounded archive/image processing callers.
 
-Parent integration supplies runtime dependency `@aws-sdk/client-s3` (parent candidate pins `3.1169.0`), passes storage configuration into Store, wires the three existing owned download handlers to `stream`, and forwards the above deployment variables through Compose. No other SDK package is required. The compiled operator is already included by `apps/api/src/**/*.ts` and the existing runtime `dist` copy. Shell tools run `node apps/api/dist/storage/operator.js`; optional API package aliases are `storage: "node dist/storage/operator.js"`. No manifest/lockfile edits are part of this storage patch.
+The runtime dependency lock pins `@aws-sdk/client-s3` to `3.1169.0`. The application passes storage configuration into Store, streams the three owner-checked download routes, and forwards deployment variables through Compose. No other SDK package is required. The compiled operator is included in the runtime image; shell tools run `node apps/api/dist/storage/operator.js`.
 
 ## Publish, failures and bounded startup recovery
 
@@ -78,7 +78,7 @@ Rollback before new writes can switch back to the retained source using a fanout
 No local service/build/typecheck/performance runs establish this feature. Run on approved GitHub-hosted infrastructure with synthetic data only:
 
 - API build/typecheck and full existing tests (including adapted legacy recovery, post-commit cleanup-lock and annotation race coverage).
-- New `storage.test.ts`, `storage-s3.test.ts`, `storage-bundle.test.ts` unit/protocol regressions; still unrun in the implementation lane.
+- `storage.test.ts`, `storage-s3.test.ts`, and `storage-bundle.test.ts` cover unit/protocol behavior; the release CI records actual execution.
 - `storage-postgres.test.ts` with a **dedicated empty** `TEST_STORAGE_DATABASE_URL`; S3 additionally needs `TEST_STORAGE_BACKEND=s3` and `TEST_STORAGE_S3_*` deployment fields plus synthetic SDK credentials. Do not point it at the shared integration database: migration validates **every** DB reference against its fixture's backend. Synthetic S3 prefixes are retained for diagnosis until the hosted environment is disposed.
 - `TEST_IMAGE=... sh scripts/test-storage-backup.sh` for paired restore, retained-only fingerprint preservation, corruption/nonempty refusal and intentional surplus exclusion; run unchanged `scripts/test-backup.sh` and data-archive tests for version1 compatibility.
 - Real filesystem disk-full/kill-at-fsync, process/connection death around publish/COMMIT, multi-host journal recovery, S3 conditional/outage behavior, corrupt/missing objects, interrupted migrations and fresh-target restores. Unit-injected failures are not substitutes for these service/volume-driver tests.
@@ -98,7 +98,7 @@ Additional authored acceptance fixtures (not locally executed):
 - `storage-process.test.ts` plus its owned writer fixture: bounded actual SIGKILL before COMMIT and after server COMMIT but before Store cleanup, an independent committed-reference/lock observer, and a **new recovery process** verifying bytes and journal cleanup. These process kills are not power-loss or volume-driver certification and do not cover every possible lost COMMIT packet timing.
 - Paired restore drill: production-equivalent read-only runtime root, 64MiB `/tmp`, dropped capabilities/no-new-privileges; a separate 1MiB test-only tmpfs exercises real ENOSPC rollback. A malformed part sequence with **recomputed valid outer checksums** must fail before DB mutation or target population.
 
-Parent hosted command for all new and existing storage tests (dedicated synthetic DB; retain serial execution):
+Hosted command for the storage tests (dedicated synthetic DB; retain serial execution):
 
 ```sh
 NODE_ENV=test npm exec -w @feedink/api -- tsx --test --test-concurrency=1 test/storage.test.ts test/storage-durability.test.ts test/storage-stream.test.ts test/storage-s3.test.ts test/storage-bundle.test.ts test/storage-postgres.test.ts test/storage-http.test.ts test/storage-process.test.ts
@@ -106,7 +106,7 @@ NODE_ENV=test npm exec -w @feedink/api -- tsx --test --test-concurrency=1 test/s
 
 ### Paired source/target and real-service interruption hooks
 
-The parent reports that hosted CI **43830557345** passed the existing storage/container jobs, including 271-key migration, HTTP/process-close checks, ENOSPC and **filesystem-source → S3 restore**, and that CI **43835630740** passed the S3-source/interruption jobs. The latter establishes the earlier fixture's backup failure, incomplete-output refusal, preserved referenced source state and fresh-target recovery—not the precise one-byte/scheduled-close claim, whose earlier counters recorded intent. The strengthened event/receipt assertions and focused regressions below are newly authored and **not yet hosted-validated** in this implementation lane. Source/syntax inspection is not runtime acceptance.
+Development CI **43830557345** passed the existing storage/container jobs, including 271-key migration, HTTP/process-close checks, ENOSPC and **filesystem-source → S3 restore**, and that CI **43835630740** passed the S3-source/interruption jobs. The latter establishes the earlier fixture's backup failure, incomplete-output refusal, preserved referenced source state and fresh-target recovery—not the precise one-byte/scheduled-close claim, whose earlier counters recorded intent. The strengthened event/receipt assertions below are required by the release pipeline. Inspect the final release evidence rather than inferring acceptance from their source or from an earlier development run.
 
 On an approved GitHub-hosted Ubuntu runner, the existing filesystem-source invocations remain unchanged (`STORAGE_SOURCE_BACKEND` defaults to `filesystem`):
 
@@ -118,7 +118,7 @@ STORAGE_RESTORE_BACKEND=s3 TEST_STORAGE_S3_ENDPOINT=http://host.docker.internal:
   TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
 ```
 
-The parent storage CI job now runs both explicit S3-source hooks after its runtime image build and synthetic bucket setup, sequentially before fixture teardown:
+The storage CI job runs both explicit S3-source hooks after its runtime image build and synthetic bucket setup, sequentially before fixture teardown:
 
 ```sh
 # Official SDK-backed S3 seed, source verification and referenced-blob pack; fresh filesystem target.
@@ -135,7 +135,7 @@ STORAGE_SOURCE_BACKEND=s3 STORAGE_RESTORE_BACKEND=s3 STORAGE_S3_INTERRUPTION=tru
   TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
 ```
 
-The bucket must already be private and synthetic. The parent builds the isolated S3 protocol fixture from public commit `0d7408fc9969caf07de6a8c3a84f9fbb10a6739e` via `scripts/build-s3-fixture.sh`; retired public MinIO image/binary downloads are not used. Keep the current host-loopback **and Docker bridge** port 19000 publication. The utility container maps `host.docker.internal` to the Docker gateway, not its own loopback. Production deployment manifests are unchanged; the parent-owned storage CI job has been extended to invoke both cases.
+The bucket must already be private and synthetic. CI builds the isolated S3 protocol fixture from public commit `0d7408fc9969caf07de6a8c3a84f9fbb10a6739e` via `scripts/build-s3-fixture.sh`; retired public MinIO image/binary downloads are not used. Keep the current host-loopback **and Docker bridge** port 19000 publication. The utility container maps `host.docker.internal` to the Docker gateway, not its own loopback. Production deployment manifests are unchanged; the storage CI job has been extended to invoke both cases.
 
 `STORAGE_SOURCE_BACKEND` and `STORAGE_RESTORE_BACKEND` independently accept `filesystem`/`s3`. Every invocation generates random project names and fresh source/restored/corrupt prefixes beneath optional `TEST_STORAGE_S3_PREFIX`; it refuses a nonempty source. Seeding passes validated environment config into **Store**, records that source config privately on `/data`, and checks S3-backed bytes without a local blob fallback. The seed and production operator receive the same selected endpoint/prefix through Compose. `/data` remains an image-owned, pre-provisioned volume; S3 does not bypass the local journal-root requirement. The separate 1MiB ENOSPC tmpfs stays filesystem-backed regardless of source selection. Source config and surplus files are not part of the referenced-blob restore.
 
@@ -143,14 +143,14 @@ The bucket must already be private and synthetic. The parent builds the isolated
 
 The witness requires all of the following, or fails:
 
-- A real upstream 200 object response and partial-byte interruption, followed by backup failure within a **90-second command deadline** (plus at most 10 seconds to kill an unresponsive command). A timeout is failure, never a passing interruption result. The parent should also set a finite job/step timeout; that command deadline is not a bound for the whole PG/drill workflow.
+- A real upstream 200 object response and partial-byte interruption, followed by backup failure within a **90-second command deadline** (plus at most 10 seconds to kill an unresponsive command). A timeout is failure, never a passing interruption result. Use a finite job/step timeout; that command deadline is not a bound for the whole PG/drill workflow.
 - A nonempty PG dump and partial archive with no completion manifest. The archive must privately equal the exact fixture magic, blob header with the expected source SHA256/declared four-byte length, and exactly the first actual payload byte—with no remaining body, part/footer, or other bytes. Headers alone fail. Same-directory backup reuse, complete-frame validation and incomplete-bundle restore must all refuse before populating the empty target.
 - Explicit signed official-SDK HEAD and GET requests both return 503 while gated, with single attempts and bounded request timeouts. Proxy-side counters independently require both refusals before recovery, rather than assuming that a failed streaming GET will retry.
 - Generic operator errors with no synthetic credentials, endpoint/bucket/prefix, object keys or fixture rows in the captured failure messages. Failure logs remain private; publish only the fixed `Witness:`/`PASS:` summaries after assertions succeed.
 - Unchanged database/reference fingerprints and verified source bytes after proxy recovery, including exact seeded bytes read through the saved S3 config. Partial-output checksums remain unchanged through refusal and recovery.
 - A **new** backup output directory and fresh target project/prefix for recovery, followed by the existing full PG/context/byte verification, nonempty refusal and malformed/checksum preflight checks. Failed output is neither deleted nor overwritten.
 
-The interruption drill now runs `scripts/storage-s3-interruption-proxy.test.mjs` before provisioning services, so the existing parent interruption CI hook includes its focused regressions without another workflow edit. Standalone parent-hosted hook (also no local execution):
+The interruption drill now runs `scripts/storage-s3-interruption-proxy.test.mjs` before provisioning services, so the interruption CI hook includes its focused regressions without another workflow edit. Standalone hosted hook (also no local execution):
 
 ```sh
 node --test --test-concurrency=1 scripts/storage-s3-interruption-proxy.test.mjs
@@ -160,4 +160,4 @@ These hosted-only tests cover pending/missing/failed write acknowledgement, sche
 
 The exit trap stops only the drill's own projects, including the proxy. Volumes, source objects/prefixes, private config and failed output are retained until the hosted environment is disposed; do not upload raw bundles, configuration, credentials or failure logs. If its new hosted assertions pass, this four-byte fixture establishes a genuine SDK/S3 interrupted-read witness, **not** an S3 server crash, ambiguous PUT/COMMIT acknowledgement, long/stalled-body cancellation, power-loss/volume-driver test, multi-host recovery proof, benchmark, or production-provider certification. Preservation checks cover fingerprinted public-table data/column descriptions and referenced object bytes, not every PostgreSQL catalog object, unreferenced S3 object, or the entire source volume. Hosted results and independent review remain required before expanding acceptance claims.
 
-Outside this seam, `tests/run-project.mjs` must provision and persist its owned `join(directory, 'data')` child before spawning the API; creating only its outer `mkdtemp` directory is insufficient. Any direct server launch using the normal CI `.data/ci` setting likewise needs a provisioning step. Other helpers that construct missing `Config.dataDir` values must do the same before `createApp`/`Store.init`. Existing inspected API fixtures use `mkdtemp` roots; normal Docker `/data` is a pre-provisioned volume. These helper/normal-CI edits are parent-owned. Do not weaken the root boundary to accommodate an unprepared helper.
+Outside this seam, `tests/run-project.mjs` must provision and persist its owned `join(directory, 'data')` child before spawning the API; creating only its outer `mkdtemp` directory is insufficient. Any direct server launch using the normal CI `.data/ci` setting likewise needs a provisioning step. Other helpers that construct missing `Config.dataDir` values must do the same before `createApp`/`Store.init`. Existing inspected API fixtures use `mkdtemp` roots; normal Docker `/data` is a pre-provisioned volume. The shipped runner and workflow provision these owned roots. Custom helpers must do the same; do not weaken the root boundary to accommodate an unprepared helper.

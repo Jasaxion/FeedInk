@@ -1,6 +1,6 @@
 # Exact search: migration 010, query shapes and hosted measurement
 
-**Unreleased implementation; runtime validation remains required.** Source authoring does not establish PostgreSQL or benchmark acceptance. Do not deploy or claim higher-tier capacity without reviewed results. Run the synthetic validation only on approved GitHub-hosted infrastructure, never against a real library.
+**Runtime and deployment-specific validation remain required.** Source authoring does not establish PostgreSQL or benchmark acceptance. Do not deploy or claim higher-tier capacity without reviewed results. Run the synthetic validation only on approved GitHub-hosted infrastructure, never against a real library.
 
 ## Index coverage and query-only follow-up
 
@@ -17,7 +17,7 @@ Every text-matching OR branch has an available index; the planner can choose bit
 The subsequent [10k comparison, run 43839381661](https://github.com/Jasaxion/FeedInk/actions/runs/43839381661) matched all 66 bounded-page parity keys. Rare/absent API calls fell to roughly 1–7ms, but broad/short/literal calls reached 3–4.4s. Actual rare/absent MCP callbacks still took roughly 0.53–0.55s despite sub-millisecond unprepared replays. Its unrelated API/browser acceptance gates failed. That evidence justifies two small query-only changes, not a release or capacity claim:
 
 - Put title/content literal predicates before per-row `to_tsvector` evaluation, keeping the same FTS union and indexable OR. A literal hit can avoid vector construction in a filter, but SQL does not guarantee evaluation order and the chosen plan still needs measurement. No CASE wrapper or FTS-only semantics loss.
-- Separate MCP empty/browse and nonempty statement shapes; remove the bound `query=''` OR that cannot be eliminated by a generic nonempty plan. This does **not** force a custom plan or prove the callback/replay gap was caused by generic planning. No production `plan_cache_mode` setting or global `prepare:false` is added without actual evidence.
+- Separate MCP empty/browse and nonempty statement shapes; remove the bound `query=''` OR that cannot be eliminated by a generic nonempty plan. MCP does not force a custom plan. Article search requests use transaction-local `plan_cache_mode=force_custom_plan` after a measured warm-query sequence regressed rare searches despite indexed replay plans; the setting resets at transaction end and does not affect non-search or MCP requests. No global `prepare:false` is used. Measure actual callbacks rather than inferring their plans from a separate replay.
 
 There is no stored vector, table rewrite, normalization, minimum query length, approximate total, external engine or data migration in this follow-up. Exact totals, API snapshots, owner/source filters, escaped `%`/`_`/backslash, multilingual/short/FTS-only semantics, microsecond keysets, MCP's existing offset/tie order and state/CAS code remain unchanged. Prepared diagnostics below distinguish actual callback executions from separately replayed plans.
 
@@ -78,7 +78,7 @@ Coverage authored:
 - Forced **individual-branch indexability** plans on the tiny fixture. These are explicitly not default-planner or performance evidence. Missing server extension files are handled in migration SQL/preflight, not simulated by altering a hosted server installation.
 - One additional `articles.selection`/`mcp.search_articles` subtest (public-extension fixture only): five focused API witnesses compare the new shape to the original FTS-first predicate; eleven actual SDK callbacks compare exact ordered DTOs, totals and offsets to the original MCP predicate. Six repeated common calls cross the initial custom-plan sampling window; empty and whitespace remain distinct. Emitted count/page shapes and same-backend prepared execution counts are asserted, not latency or planner choice. No new traversal matrix.
 
-After the parent-approved dependency install/build, use the hosted job only:
+After the approved dependency install/build, use the hosted job only:
 
 ```bash
 # The hosted verify/scale jobs set this opt-in for the disposable database tests.
@@ -87,7 +87,7 @@ SEARCH_INDEXES_TEST=1 node --import tsx --test --test-timeout=180000 \
 # Also retain all existing integrated API/typecheck/browser/etc. gates separately.
 ```
 
-## Benchmark modes and parent workflow hooks (not run here)
+## Benchmark modes and workflow inputs
 
 Keep the existing `scripts/scale-benchmark.mjs` fixture, hardware/container limits and budgets. Default `SCALE_SEARCH_INDEXES=before` retains the through-007 benchmark baseline; an application/public-schema migration does not install 010 into its fresh isolated benchmark schema. The intentionally historical benchmark schema still omits unrelated 009 AI tables; the regression test above covers integration through 009. All modes run the checked-out application query code: **before means pre-010 indexes, not a historical query implementation**. Reports add `queryVariant=literal-first-mcp-split-v1`; compare fixed-SHA artifacts to evaluate the query change rather than calling the within-run index comparison a query A/B test.
 
@@ -99,7 +99,7 @@ Keep the existing `scripts/scale-benchmark.mjs` fixture, hardware/container limi
 | `SCALE_SEARCH_INDEXES=indexed` | Install 010 and ANALYZE **before reads** at any allowed tier, including 100k/1M. API and two-owner MCP reads, independent counts/isolation and existing concurrency/bulk/audits retained. `stage=indexed`; parity array is empty, not an invented before/after comparison. |
 | `SCALE_MCP_PREPARED=1` (default off) | Small opt-in reserved-backend callback/plan diagnosis in the selected stage(s). Only `0`/`1` accepted when set. |
 
-Parent-owned workflow wiring still required for new modes/diagnostics (no workflow edited here): add `search_mode` to both `scale.yml` entry points (workflow_call string, dispatch choice `before/compare/indexed`, default `before`) and `mcp_prepared` boolean, default false. Map `SCALE_SEARCH_INDEXES` to `${{ inputs.search_indexes && 'compare' || inputs.search_mode || 'before' }}` to preserve the old comparison flag; map `SCALE_MCP_PREPARED` to `${{ inputs.mcp_prepared && '1' || '0' }}`. Legacy `search_indexes=true` intentionally takes precedence; do not combine it with `search_mode=indexed`. If exposed by `ci.yml`, forward new `scale_search_mode` and `scale_mcp_prepared` inputs to those reusable-workflow inputs, retaining `compare_search_indexes` forwarding. Existing test/evidence gates and opt-in artifact publication must remain. `compare` plus 100k/1M/`all` still fails; use `indexed` for larger runs.
+Both `scale.yml` entry points accept `search_mode` (`indexed`, `compare`, or `before`, default `indexed`) and `mcp_prepared` (default false). `ci.yml` forwards `scale_search_mode` and `scale_mcp_prepared`; the legacy `compare_search_indexes` flag still selects comparison and takes precedence. Keep the separate evidence-publication opt-in. `compare` is 10k only; use `indexed` for larger tiers or `all`. These workflow inputs are already wired; no operator source edits are needed.
 
 The manual `.github/workflows/scale.yml` **10k-only comparison** executes:
 
@@ -111,7 +111,7 @@ SCALE_ARTICLES=10000 SCALE_SEARCH_INDEXES=compare \
 
 `compare` rejects other tiers. Existing dispatches remain `ci.yml` with `scale_tier=10000,compare_search_indexes=true`, or `scale.yml` with `tier=10000,search_indexes=true`. The workflows set `SEARCH_INDEXES_TEST=1`, retain the required API acceptance gate and 35-minute benchmark deadline, and publish only the allowlisted synthetic `report.json` when evidence publication is explicitly selected. A published diagnostic report is not release approval.
 
-After parent wiring, the larger-tier hook is `tier=100000` (then `1000000`), `search_mode=indexed`, `search_indexes=false`; opt into `mcp_prepared=true` if needed. Equivalent hosted step:
+The larger-tier invocation is `tier=100000` (then `1000000`), `search_mode=indexed`, `search_indexes=false`; opt into `mcp_prepared=true` if needed. Equivalent hosted step:
 
 ```bash
 SCALE_ARTICLES=100000 SCALE_SEARCH_INDEXES=indexed SCALE_MCP_PREPARED=1 \

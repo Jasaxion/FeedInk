@@ -2,7 +2,17 @@
 
 Version records describe FeedInk changes and verified behavior. Development checkpoints are not production releases.
 
-## Unreleased — reading-first contextual controls
+## 1.0.0 — reading, AI and durable archives
+
+- Complete the reading-first contextual toolbar, focus mode and optional note drawer; keep subscription counts unread-only and normal handwriting placement quiet.
+- Support current-article reading-area handwriting, black pen color, received-stroke retention, and confirmed current-version clear-all/ink-only actions without deleting original articles or other body versions.
+- Add encrypted per-account OpenAI-compatible settings, explicit full-input summaries, segmented bilingual translation, configuration/source fences, permanent AI results and selected cleanup.
+- Add exact transactional article counters and literal-search indexes, preserving existing query semantics and recording scale evidence with dataset/resource limits.
+- Add hash-fanout filesystem storage, optional private S3, durable publication/recovery, verified restartable copies, and paired referenced-blob backup/restore under production container restrictions.
+- Distinguish disposable build-only development previews from formal release artifacts; Settings displays the running build identifier.
+- Provide Docker Compose deployment and migration/key-backup guidance. The final release page supplies the final tag and verification evidence; development checkpoints alone are not release acceptance.
+
+### Reading-first contextual controls
 
 - Replace the in-flow annotation panel with selection-adjacent text actions, an explicit floating handwriting palette and an on-demand note drawer.
 - Move reading mode, typography, speech and archive details into contextual reader tools; add opt-in focus reading without changing saved note data.

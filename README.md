@@ -4,7 +4,19 @@ An independently implemented RSS reader for **multi-user self-hosted Web and ins
 
 FeedInk is independently developed and ships original demonstration content. The [product requirements](docs/requirements.md) describe its own behavior. Install the PWA through a compatible browser; no native platform packages are included.
 
-## Version 0.2.0 — annotations and read-only AI access
+## Version 1.0.0
+
+The 1.0 release brings the reading, annotation, AI and durable-storage features together:
+
+- Focused desktop/mobile/e-ink reading, subscriptions and folders, unread badges, search, saved items, progress, and a Web/PWA offline experience.
+- Archived RSS and full-text views that switch without deleting either source; independently saved images and read-only MCP article/note tools.
+- Text highlights, underlines and remarks; pressure-aware handwriting over the article reading area, black pen color, single-mark undo, and current-version clear-all/ink-only actions.
+- Explicit AI summaries and complete segmented bilingual translation using an account's OpenAI-compatible configuration. Credentials are encrypted; generated results stay until the owner selects them for deletion. Unknown language or incomplete model output is never silently marked as a complete translation.
+- PostgreSQL exact counters and search indexes, filesystem hash fanout, optional private S3 storage, resumable verified copies, and paired database/blob backup and restore.
+
+See [1.0.0 release notes](docs/releases/1.0.0.md), [AI setup](docs/ai-security.md), and [storage/migration](docs/storage.md). Development preview builds are labelled by commit in Settings and are **not formal release acceptance**. The release page records the final validated tag and evidence; capacity and hardware limits must be read with the measurements, not inferred from a feature list.
+
+## Version 0.2.0 — annotations and read-only MCP access
 
 Add text highlights, straight/wavy underlines, remarks and pressure-aware browser handwriting; export restorable JSON, portable Markdown/PNG archives and printable PDF reports. Notes retain owned content snapshots, conditional revisions and protected offline drafts. Authenticated MCP exposes seven scoped read-only article/note/image tools.
 
@@ -19,10 +31,12 @@ This version includes reading, subscriptions, durable archives, PWA/offline beha
 ## Run with Docker Compose
 
 ```sh
+# New installation only. Preserve an existing .env and AI encryption key during upgrades.
 cp -f .env.example .env
 chmod 600 .env
 openssl rand -hex 32  # use as POSTGRES_PASSWORD
 openssl rand -hex 32  # use a separate value as SESSION_SECRET
+# Optional AI: generate once with openssl rand -base64 32, keep it privately as AI_ENCRYPTION_KEY.
 # Edit .env: secrets, APP_URL, ADMIN_EMAIL and ADMIN_NAME; leave registration closed.
 docker compose build
 docker compose up -d --wait postgres
@@ -43,6 +57,9 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 - [Annotations, offline drafts and recovery](docs/annotations.md)
 - [JSON, Markdown and PDF note exports](docs/notes-export.md)
 - [Scoped read-only MCP access](docs/mcp.md)
+- [AI configuration, privacy, retained results and limits](docs/ai-security.md)
+- [Filesystem/S3 storage and verified migration](docs/storage.md)
+- [Search-index deployment and scale measurements](scripts/search-indexes-operations.md)
 - [Product requirements and acceptance](docs/requirements.md)
 - [Deployment, HTTPS and PWA](docs/deployment.md)
 - [Consistent backup and empty-target restore](docs/backup.md)
@@ -51,5 +68,6 @@ Use HTTPS through a reverse proxy for remote access/PWA installation. The app bi
 - [Version history](CHANGELOG.md)
 - [0.1.0 release notes](docs/releases/0.1.0.md)
 - [0.2.0 release notes and upgrade precautions](docs/releases/0.2.0.md)
+- [1.0.0 release notes](docs/releases/1.0.0.md)
 
 The current development workspace builds `packages/ink` → `packages/shared` → `apps/web` → `apps/api`. Annotation components are adapted from the authorized Apache-2.0 WebInk source; see [NOTICE](NOTICE). Development requires Node24.22.3/npm11 and a dedicated PostgreSQL database. The production host requires Docker+Compose, not a host Node installation. See [LICENSE](LICENSE) for the repository license.

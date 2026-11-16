@@ -18,7 +18,7 @@ export async function aiResultsFixture() {
     const { id, articleId, sourceTitle, mode, contentHash, operation, targetLanguage, status, model, createdAt, updatedAt } = row;
     return { id, articleId, sourceTitle, mode, contentHash, operation, targetLanguage, status, model, createdAt, updatedAt };
   };
-  fixture.route('/api/ai/results', async ({ request, url, body, json }) => {
+  fixture.route('/api/ai/results', async ({ request, response, url, body, json }) => {
     const owner = fixture.control.user.id;
     if (request.method === 'GET') {
       const cursor = url.searchParams.get('cursor');
@@ -45,7 +45,12 @@ export async function aiResultsFixture() {
     for (const id of ids) { results.rows.delete(id); fixture.ai.jobs.delete(id); }
     results.deleted.push([...ids]);
     const hold = results.holdDeleteReply; results.holdDeleteReply = null; if (hold) await hold.promise;
-    if (results.loseDeleteReply) { results.loseDeleteReply = false; request.socket.destroy(); return; }
+    if (results.loseDeleteReply) {
+      results.loseDeleteReply = false;
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '256', 'Cache-Control': 'no-store' });
+      response.write('{"deleted":'); response.flushHeaders();
+      setImmediate(() => response.destroy()); return;
+    }
     return json({ deleted: ids.length });
   });
   return { ...fixture, results };

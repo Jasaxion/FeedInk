@@ -10,10 +10,11 @@ import { createOfflineProxy } from './fixtures/offline-proxy.mjs';
 const [project, shard, ...extra] = process.argv.slice(2);
 if (!['api', 'desktop', 'mobile', 'tablet', 'webkit', 'workflows', 'annotations', 'annotations-mobile', 'annotations-webkit', 'mcp'].includes(project)) throw new Error('Choose a configured test project');
 const annotations = project.startsWith('annotations');
-// Three four-test batches get separate API processes and unchanged production rate budgets.
-const shardIndex = shard?.match(/^--shard=([1-3])\/3$/)?.[1];
-if (extra.length || (shard !== undefined && (!annotations || !shardIndex))) throw new Error('Optional annotation batch must be --shard=1/3, --shard=2/3 or --shard=3/3');
-const batch = shardIndex ? `${project}-shard-${shardIndex}-of-3` : project;
+// Separate batches keep the production rate budget unchanged as acceptance cases grow.
+const parts = shard?.match(/^--shard=([1-4])\/([34])$/);
+const shardIndex = parts?.[1], shardCount = parts?.[2];
+if (extra.length || (shard !== undefined && (!annotations || !parts || Number(shardIndex) > Number(shardCount)))) throw new Error('Optional annotation batch must be a valid --shard=i/3 or --shard=i/4');
+const batch = shardIndex ? `${project}-shard-${shardIndex}-of-${shardCount}` : project;
 if (!process.env.TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL must identify a disposable test database; production DATABASE_URL is never reused implicitly');
 await access('apps/api/dist/server.js');
 const directory = await mkdtemp(join(tmpdir(), 'feedink-test-'));

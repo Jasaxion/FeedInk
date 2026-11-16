@@ -171,10 +171,10 @@ jobs:
           # Each batch owns a fresh API/rate budget; one worker keeps shared fixture controls isolated.
           # Keep every shard result, even after an earlier failure; raw reports stay ephemeral.
           for project in $annotation_projects; do
-            for shard in 1 2 3; do
-              batch="$project-shard-$shard-of-3"
+            for shard in 1 2 3 4; do
+              batch="$project-shard-$shard-of-4"
               echo "::group::$batch"
-              if PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$batch" node tests/run-project.mjs "$project" "--shard=$shard/3"; then
+              if PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$batch" node tests/run-project.mjs "$project" "--shard=$shard/4"; then
                 echo "$batch: passed" >> "$GITHUB_STEP_SUMMARY"
               else
                 echo "$batch: failed" >> "$GITHUB_STEP_SUMMARY"
