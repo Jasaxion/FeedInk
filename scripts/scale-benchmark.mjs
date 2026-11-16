@@ -31,7 +31,7 @@ const started = performance.now(), deadline = started + 30 * 60_000;
 const budgets = { wallSeconds: 1800, statementMs: 10000, seedBatchMs: 120000, maintenanceMs: 900000, rssBytes: 768 * 1024 ** 2, databaseBytes: 16 * 1024 ** 3, writeSeconds: 120 };
 const report = {
   formatVersion: 2, status: 'running', tier, budgets, searchMode,
-  queryVariant: 'literal-first-mcp-split-v1', diagnoseMcpPrepared,
+  queryVariant: 'bounded-prefix-256-caseless-v2', diagnoseMcpPrepared,
   hardware: { platform: platform(), release: release(), cpu: cpus()[0]?.model, logicalCpus: cpus().length, ramBytes: totalmem(), node: process.version },
   dataset: { seed: 'scale-v2-uuid8', primaryOwnerArticles: tier, isolationOwners: 10, isolationArticlesEach: Math.min(10000, tier / 10), feeds: 100, tags: 100, folders: 20, timestampGroupSize: 100, microsecondSubgroups: 3, unreadPercent: 5, savedPercent: 2, body: '95% ~2KiB, 5% ~32KiB deterministic HIGHLY COMPRESSIBLE text; not a realistic media or storage benchmark', images: Math.min(200000, tier), contexts: 0 },
   phases: {}, reads: [], plans: [], limitations: [], peakRssBytes: 0,
@@ -204,13 +204,17 @@ const installSearchIndexes = async () => {
   await phase('migration010IndexesMs', () => db.begin(async sql => {
     await sql.unsafe(await readFile(new URL('../apps/api/migrations/010_search_indexes.sql', import.meta.url), 'utf8'));
   }));
-  await phase('analyzeAfter010Ms', () => db.begin(async sql => { await sql`SET LOCAL statement_timeout='120s'`; await sql.unsafe('ANALYZE'); }));
+  report.searchIndexes.after010Build = await relationSnapshot();
+  await phase('migration011PrefixIndexMs', () => db.begin(async sql => {
+    await sql.unsafe(await readFile(new URL('../apps/api/migrations/011_search_prefix_index.sql', import.meta.url), 'utf8'));
+  }));
+  await phase('analyzeAfter011Ms', () => db.begin(async sql => { await sql`SET LOCAL statement_timeout='120s'`; await sql.unsafe('ANALYZE'); }));
   report.searchIndexes.afterBuild = await relationSnapshot();
   report.searchIndexes.extension = (await db`SELECT e.extversion,n.nspname AS schema FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'`)[0];
 };
 try {
   await admin.unsafe(`CREATE SCHEMA ${schema}`);
-  report.postgres = (await db`SELECT version() AS version,current_setting('shared_buffers') AS shared_buffers,current_setting('work_mem') AS work_mem,current_setting('max_parallel_workers_per_gather') AS max_parallel_workers_per_gather`)[0];
+  report.postgres = (await db`SELECT version() AS version,current_setting('server_encoding') AS server_encoding,datcollate,datctype,datlocprovider,current_setting('shared_buffers') AS shared_buffers,current_setting('work_mem') AS work_mem,current_setting('max_parallel_workers_per_gather') AS max_parallel_workers_per_gather FROM pg_database WHERE datname=current_database()`)[0];
   await phase('seedIdCursorPreflightMs', async () => {
     await db.unsafe(await readFile(new URL('./scale-seed-ids.sql', import.meta.url), 'utf8'));
     const samples = [...new Set([1, 2, 99, 100, 997, Math.floor(tier * .9), tier])];
@@ -279,7 +283,7 @@ try {
   await phase('analyzeMs', () => db.begin(async (sql) => { await sql`SET LOCAL statement_timeout='120s'`; await sql.unsafe('ANALYZE'); }));
   await phase('initialAuditMs', audit);
   if (indexedSearch) {
-    report.searchIndexes = { method: 'Current query variant with 010 installed before reads; not a paired before/after comparison.', parity: [], before: await relationSnapshot() };
+    report.searchIndexes = { method: 'Current query variant with 010 + 011 installed before reads; not a paired before/after comparison.', parity: [], before: await relationSnapshot() };
     await installSearchIndexes();
   }
   const sizes = await db`SELECT c.relname AS relation,pg_relation_size(c.oid)::text AS heap_bytes,pg_indexes_size(c.oid)::text AS index_bytes,CASE WHEN c.reltoastrelid=0 THEN '0' ELSE pg_total_relation_size(c.reltoastrelid)::text END AS toast_bytes,pg_total_relation_size(c.oid)::text AS total_bytes FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=${schema} AND c.relkind='r' ORDER BY c.relname`;
@@ -297,7 +301,7 @@ try {
   ];
   if (compareSearch) {
     report.searchIndexes = {
-      method: 'Same committed 10k corpus before/after 010; warm bounded-page parity, not a full traversal. Rolled-back write probes leave physical work/dead tuples. No WAL, cold-cache, sustained GIN maintenance or realistic TOAST measurement.',
+      method: 'Same committed 10k corpus before/after 010 + 011; warm bounded-page parity, not a full traversal. Rolled-back write probes leave physical work/dead tuples. No WAL, cold-cache, sustained GIN maintenance or realistic TOAST measurement.',
       parity: [], before: await relationSnapshot(),
     };
   }
@@ -307,6 +311,7 @@ try {
     const planLabel = label => stage === 'before' ? label : `${stage}/${label}`;
     for (const [label, query] of shapes) {
       const paths = [{ label: 'first', cursor: undefined }];
+      let operation = 'reference-count';
       try {
         // Authoritative reference count is measured separately from hot-path time.
         const { condition } = articles.selection(owner, query, false);
@@ -326,6 +331,7 @@ try {
           for (let sample = 0; sample < 4; sample++) {
             captured = sample === 1 && limit === 20 ? [] : null;
             const begin = performance.now();
+            operation = 'callback';
             const page = await articles.page(owner, { ...query, cursor: path.cursor, limit });
             if (sample) durations.push(performance.now() - begin); // One warmup; no cold-cache claim.
             assert.equal(page.total, total); assert.ok(page.items.length <= limit);
@@ -338,15 +344,15 @@ try {
           report.reads.push({ stage, label, path: path.label, limit, referenceCountMs, responseBytes: bytes, ...percentiles(durations) });
         }
         // Actual authoritative count plan including literal fallback; no estimate.
-        captured = [];
+        captured = []; operation = 'authoritative-count';
         await db`SELECT count(*)::integer AS total FROM articles a WHERE ${condition}`;
         const statement = captured[0]; captured = null;
         if (statement) await explain(planLabel(`${label}/authoritative-count`), statement.query, statement.parameters);
       } catch (error) {
         captured = null;
-        report.reads.push({ stage, label, errorCode: error.code || 'ASSERTION' });
+        report.reads.push({ stage, label, operation, errorCode: error.code || 'ASSERTION' });
         if (!['57014', '55P03'].includes(error.code)) throw error;
-        report.limitations.push(`${stage}/${label}: exceeded a statement/lock budget; incomplete samples`);
+        report.limitations.push(`${stage}/${label}/${operation}: exceeded a statement/lock budget; incomplete samples`);
       }
     }
   };
@@ -377,12 +383,32 @@ try {
             if (statements) for (const [index, statement] of statements.entries())
               await explain(`${stage}/mcp/owner-${account}/${label}/statement-${index}`, statement.query, statement.parameters);
           }
-          report.reads.push({ stage, label: `mcp/owner-${account}/${label}`, limit: 20, total: page.total, responseBytes: Buffer.byteLength(JSON.stringify(page)), ...percentiles(durations) });
-          // Independent literal reference (not LIKE, so wildcard escaping cannot
-          // make both the callback and its oracle wrong in the same way).
-          const [{ total }] = await db`SELECT count(*)::integer AS total FROM articles WHERE user_id=${uid(account)} AND (strpos(lower(title),lower(${query.q}))>0 OR strpos(lower(url),lower(${query.q}))>0 OR strpos(lower(content_text),lower(${query.q}))>0)`;
-          assert.equal(page.total, total);
-          for (const item of page.items) await articles.owned(uid(account), item.articleId);
+          // Independent full-content oracle: no LIKE escaping or bounded prefix.
+          // Printable ASCII nonletters need no folding at all. For short cased
+          // queries a raw full-string hit is sufficient; a miss still checks ~*.
+          // Longer queries keep pure regex branches so pg_trgm can index them.
+          const caseless = /^[\x20-\x40\x5b-\x60\x7b-\x7e]+$/.test(query.q);
+          const regex = query.q.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+          const bytes = db`(strpos(title,${query.q})>0 OR strpos(url,${query.q})>0 OR strpos(content_text,${query.q})>0)`;
+          const folded = db`(title ~* ${regex} OR url ~* ${regex} OR content_text ~* ${regex})`;
+          const reference = caseless ? bytes : query.q.length < 3 ? db`(${bytes} OR ${folded})` : folded;
+          const referenceMethod = caseless ? 'literal-strpos-full-content' : query.q.length < 3 ? 'literal-strpos-regex-full-content' : 'literal-regex-full-content';
+          const measurement = { stage, label: `mcp/owner-${account}/${label}`, limit: 20, total: page.total, responseBytes: Buffer.byteLength(JSON.stringify(page)), ...percentiles(durations), referenceMethod, referenceVerified: false };
+          report.reads.push(measurement);
+          const referenceStarted = performance.now();
+          try {
+            const [{ total }] = await db`SELECT count(*)::integer AS total FROM articles WHERE user_id=${uid(account)} AND ${reference}`;
+            measurement.referenceCountMs = performance.now() - referenceStarted;
+            measurement.referenceTotal = total;
+            assert.equal(page.total, total);
+            for (const item of page.items) await articles.owned(uid(account), item.articleId);
+            measurement.referenceVerified = true;
+          } catch (error) {
+            measurement.referenceCountMs ??= performance.now() - referenceStarted;
+            measurement.referenceErrorCode = error.code || 'ASSERTION';
+            report.limitations.push(`${stage}/mcp/owner-${account}/${label}: independent reference failed (${measurement.referenceErrorCode}); callback samples are not verified`);
+            throw error;
+          }
         }
       } finally { captured = null; await client.close(); await server.close(); }
     }
@@ -395,7 +421,7 @@ try {
     if (diagnoseMcpPrepared) await phase('mcpPreparedMs', () => mcpPreparedEvidence('before'));
     report.searchIndexes.beforeWriteCost = await phase('searchWritesBeforeMs', searchWriteCost);
     await installSearchIndexes();
-    await phase('readMatrixAfter010Ms', () => readMatrix('after'));
+    await phase('readMatrixAfter011Ms', () => readMatrix('after'));
     await phase('mcpAfterMs', () => mcpReadMatrix('after'));
     if (diagnoseMcpPrepared) await phase('mcpPreparedAfterMs', () => mcpPreparedEvidence('after'));
     assert.equal(report.searchIndexes.parity.length, searchPages.size, 'every before page has an after comparison');

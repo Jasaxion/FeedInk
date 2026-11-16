@@ -8,6 +8,7 @@ import type {
 } from "@feedink/shared";
 import { type DB, type SQL, type Row, iso, ApiFailure } from "./core.js";
 import { articleQuery, uuid } from "./validation.js";
+import { articleLiteralSearch } from "./article-search.js";
 import { commonArticleTotal, countSnapshot, coordinateArticleWrites, requireArticleCounts } from "./scale-counts.js";
 
 // Used by lists and state acknowledgements, never transfer discarded body/TOAST columns.
@@ -105,9 +106,10 @@ export class Articles {
     if (q.after)
       condition = db`${condition} AND a.published_at>${q.after}::text::timestamptz`;
     if (q.q) {
-      const pattern = `%${q.q.replace(/[\\%_]/g, "\\$&")}%`;
-      // Cheap literal matches first; retain the FTS-only union and indexable OR.
-      condition = db`${condition} AND (a.title ILIKE ${pattern} OR a.content_text ILIKE ${pattern} OR to_tsvector('simple',a.title || ' ' || a.content_text) @@ plainto_tsquery('simple',${q.q}))`;
+      const literal = articleLiteralSearch(db, q.q, { title: db`a.title`, content: db`a.content_text` });
+      // The constant query guard removes empty FTS work (e.g. punctuation),
+      // while leaving the existing vector expression and indexable union intact.
+      condition = db`${condition} AND (${literal} OR (numnode(plainto_tsquery('simple',${q.q}))>0 AND to_tsvector('simple',a.title || ' ' || a.content_text) @@ plainto_tsquery('simple',${q.q})))`;
     }
     if (withCursor && q.cursor) {
       let value: { date: string; id: string };

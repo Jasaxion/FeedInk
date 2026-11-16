@@ -14,11 +14,12 @@ import type { Annotations } from '../src/annotations.js';
 const hosted = process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted';
 const enabled = hosted && process.env.TEST_DATABASE_URL && process.env.SEARCH_INDEXES_TEST === '1';
 const migration = new URL('../migrations/010_search_indexes.sql', import.meta.url);
-const indexNames = ['articles_content_text_trgm', 'articles_title_trgm', 'articles_url_trgm'];
+const prefixMigration = new URL('../migrations/011_search_prefix_index.sql', import.meta.url);
+const indexNames = ['articles_content_text_trgm', 'articles_title_trgm', 'articles_url_trgm', 'articles_content_prefix_trgm'];
 
 // Opt-in: needs CREATE DATABASE/CREATEROLE on a disposable hosted PostgreSQL.
 // Separate databases test extension placement without moving/dropping a shared extension.
-test('010_search_indexes: exact API/MCP parity, extension schemas, transactional failure and source/CAS preservation', {
+test('010_search_indexes + 011_search_prefix_index: exact API/MCP parity, extension schemas, transactional failure and source/CAS preservation', {
   skip: !enabled, timeout: 180000,
 }, async t => {
   const admin = postgres(process.env.TEST_DATABASE_URL!, { max: 1, connection: { statement_timeout: '20000', lock_timeout: '3000' }, onnotice: () => {} });
@@ -169,28 +170,86 @@ test('010_search_indexes: exact API/MCP parity, extension schemas, transactional
           assert.deepEqual(remaining.map(i => i.indexname), ['articles_url_trgm']);
           await db`DROP INDEX articles_url_trgm`;
         }
+        // Apply 010, then fail 011 on a conflicting index name. The checksum
+        // runner commits each migration separately; 010 must survive 011 failure.
+        await db`CREATE INDEX articles_content_prefix_trgm ON articles(id)`;
+        await assert.rejects(migrate(db), (error: any) => error.code === '42P07');
+        assert.equal((await db`SELECT 1 FROM schema_migrations WHERE name='010_search_indexes.sql'`).length, 1);
+        assert.equal((await db`SELECT 1 FROM schema_migrations WHERE name='011_search_prefix_index.sql'`).length, 0);
+        assert.equal((await db`SELECT indexname FROM pg_indexes WHERE schemaname=${schema} AND indexname IN ${db(indexNames)}`).length, 4);
+        await db`DROP INDEX articles_content_prefix_trgm`;
         await migrate(db);
+        const prefixSource = await readFile(prefixMigration, 'utf8');
+        const prefixApplied = await db`SELECT * FROM schema_migrations WHERE name='011_search_prefix_index.sql'`;
+        assert.equal(prefixApplied[0].checksum, hash(prefixSource));
         const applied = await db`SELECT * FROM schema_migrations WHERE name='010_search_indexes.sql'`;
         assert.equal(applied[0].checksum, hash(source));
         await migrate(db); // checksum runner idempotence, not IF NOT EXISTS masking a bad index.
         assert.deepEqual(await db`SELECT * FROM schema_migrations WHERE name='010_search_indexes.sql'`, applied);
+        assert.deepEqual(await db`SELECT * FROM schema_migrations WHERE name='011_search_prefix_index.sql'`, prefixApplied);
         assert.equal((await db`SHOW search_path`)[0].search_path, schema);
         const [extension] = await db`SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'`;
         assert.equal(extension.nspname, layout === 'install-public' ? 'public' : extensionSchema);
         const indexes = await db`SELECT c.relname,i.indisvalid,i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid='articles'::regclass AND c.relname IN ${db([...indexNames, 'articles_search'])} ORDER BY c.relname`;
-        assert.equal(indexes.length, 4); assert.ok(indexes.every(i => i.indisvalid && i.indisready));
+        assert.equal(indexes.length, 5); assert.ok(indexes.every(i => i.indisvalid && i.indisready));
         assert.equal((await db`SELECT relfilenode FROM pg_class WHERE oid='articles'::regclass`)[0].relfilenode, relfilenode);
         assert.deepEqual(await db`SELECT row_to_json(a)::text AS source,ctid::text,xmin::text FROM articles a ORDER BY id`, sources, 'no source tuple rewrite');
         await db`ANALYZE articles`;
         assert.deepEqual(await snapshot(), before, 'exact ordered API/MCP pages and totals before/after');
         // Indexability only, NOT a default-planner or latency assertion on a tiny fixture.
-        for (const [column, index] of [['title', 'articles_title_trgm'], ['content_text', 'articles_content_text_trgm'], ['url', 'articles_url_trgm']]) {
+        for (const [column, index] of [['title', 'articles_title_trgm'], ['content_text', 'articles_content_text_trgm'], ['url', 'articles_url_trgm'], ['left(content_text,256)', 'articles_content_prefix_trgm']]) {
           const plan = await db.begin(async sql => {
             await sql`SET LOCAL enable_seqscan=off`;
             return sql.unsafe(`EXPLAIN (FORMAT JSON) SELECT id FROM articles WHERE ${column} ILIKE '%needle%'`);
           });
           assert.ok(JSON.stringify(plan).includes(index));
         }
+        if (layout === 'install-public') await layoutTest.test('article-search: bounded prefix, full late/cross-boundary fallback and caseless parity', async () => {
+          const witnessIds: string[][] = [[], []];
+          const bodies = [
+            'prefixwitness ÉCOLE İΣß %_\\[] ' + 'z'.repeat(32768),
+            'z'.repeat(32768) + ' latewitness ÉCOLE İΣß %_\\[]',
+            'z'.repeat(250) + 'boundarywitness',
+          ];
+          try {
+            for (const [account, userId] of [owner, other].entries()) for (const body of bodies) {
+              const id = randomUUID(); witnessIds[account].push(id);
+              await db`INSERT INTO articles(id,user_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash)
+                VALUES(${id},${userId},${id},'Synthetic','neutral','https://example.invalid/witness','2026-01-01',${'<p>' + body + '</p>'},${body},${hash(body)})`;
+            }
+            const cases: [string, number[]][] = [
+              ['prefixwitness', [0]], ['latewitness', [1]], ['boundarywitness', [2]],
+              ['absentwitness', []], ['%_\\[]', [0, 1]], ['é', [0, 1]],
+            ];
+            for (const [account, userId] of [owner, other].entries()) for (const [query, expected] of cases) {
+              const pattern = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+              const apiExpected = await db`SELECT id FROM articles WHERE user_id=${userId} AND (to_tsvector('simple',title || ' ' || content_text) @@ plainto_tsquery('simple',${query}) OR title ILIKE ${pattern} OR content_text ILIKE ${pattern}) ORDER BY published_at DESC,id DESC`;
+              const mcpExpected = await db`SELECT id FROM articles WHERE user_id=${userId} AND (title ILIKE ${pattern} OR url ILIKE ${pattern} OR content_text ILIKE ${pattern}) ORDER BY published_at DESC,id`;
+              // scale-benchmark's independent full-content literal oracle.
+              const regex = query.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+              const bytes = db`(strpos(title,${query})>0 OR strpos(url,${query})>0 OR strpos(content_text,${query})>0)`;
+              const folded = db`(title ~* ${regex} OR url ~* ${regex} OR content_text ~* ${regex})`;
+              const referenceMatch = /^[\x20-\x40\x5b-\x60\x7b-\x7e]+$/.test(query) ? bytes : query.length < 3 ? db`(${bytes} OR ${folded})` : folded;
+              const reference = await db`SELECT id FROM articles WHERE user_id=${userId} AND ${referenceMatch} ORDER BY published_at DESC,id`;
+              assert.deepEqual(reference, mcpExpected);
+              const api = await articles.page(userId, { scope: 'archive', q: query, limit: 100 });
+              const mcp = await mcpPage(userId, query, 0, 100);
+              assert.equal(api.total, apiExpected.length); assert.equal(mcp.total, mcpExpected.length);
+              assert.deepEqual(api.items.map(a => a.id), apiExpected.map(a => a.id));
+              assert.deepEqual(mcp.items.map(a => a.articleId), mcpExpected.map(a => a.id));
+              for (const actual of [api.items.map(a => a.id), mcp.items.map(a => a.articleId)]) {
+                assert.deepEqual(actual.filter(id => witnessIds[account].includes(id)).sort(), expected.map(i => witnessIds[account][i]).sort());
+                assert.ok(actual.every(id => !witnessIds[1 - account].includes(id)), 'foreign prefix/late witnesses stay excluded');
+              }
+            }
+            for (const query of ['%_', '\\']) {
+              assert.equal((await db`SELECT numnode(plainto_tsquery('simple',${query})) AS nodes`)[0].nodes, 0);
+              const { condition } = articles.selection(owner, { scope: 'archive', q: query }, false);
+              const plan = await db`EXPLAIN (FORMAT JSON) SELECT a.id FROM articles a WHERE ${condition}`;
+              assert.ok(!JSON.stringify(plan).includes('to_tsvector'), 'zero-node constant guard removes vector construction');
+            }
+          } finally { await db`DELETE FROM articles WHERE id IN ${db(witnessIds.flat())}`; }
+        });
         if (layout === 'install-public') await layoutTest.test('articles.selection literal-first and mcp.search_articles split shapes retain legacy exact results after repeated callbacks', async () => {
           const statements: string[] = [];
           const callbackDb = postgres(url.toString(), { max: 1, connection: { search_path: schema, statement_timeout: '20000' }, onnotice: () => {}, debug: (_id, query) => { statements.push(query); } });
@@ -214,11 +273,11 @@ test('010_search_indexes: exact API/MCP parity, extension schemas, transactional
               assert.equal(page.total, legacy.length);
               assert.deepEqual(page.items.map(a => a.id), legacy.map(a => a.id));
               const count = statements.find(q => q.startsWith('SELECT count(*)') && q.includes('to_tsvector'))!;
-              assert.ok(count && count.indexOf('a.content_text ILIKE') < count.indexOf('to_tsvector'), 'literal checks precede FTS in emitted SQL');
+              assert.ok(count && count.indexOf('left(a.content_text,256)') < count.indexOf('to_tsvector'), 'bounded literal checks precede FTS in emitted SQL');
             }
             const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
             await server.connect(serverTransport); await client.connect(clientTransport);
-            const shapes = new Map<boolean, Set<string>>();
+            const shapes = new Map<boolean, Set<string>>(), executions = new Map<string, number>();
             for (const query of ['', ...Array<string>(6).fill('TitleNeedle'), '%', 'urlneedle', ' ', '']) {
               const pattern = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
               const where = db`user_id=${owner} AND (${query}='' OR title ILIKE ${pattern} OR url ILIKE ${pattern} OR content_text ILIKE ${pattern})`;
@@ -230,15 +289,17 @@ test('010_search_indexes: exact API/MCP parity, extension schemas, transactional
               assert.deepEqual(result.structuredContent, { items: rows.map(r => ({ articleId: r.id, title: r.title, sourceUrl: r.url, summary: r.summary, publishedAt: iso(r.published_at) })), total, nextOffset: 1 + rows.length < total ? 1 + rows.length : null });
               assert.equal(statements.length, 2, 'actual callback emits count and page');
               assert.ok(statements.every(q => !q.includes("=''")));
-              assert.ok(statements.every(q => q.includes(' ILIKE ') === (query !== '')));
+              assert.ok(statements.every(q => / I?LIKE /.test(q) === (query !== '')));
+              statements.forEach(q => executions.set(q, (executions.get(q) || 0) + 1));
               const set = shapes.get(query !== '') || new Set<string>();
               statements.forEach(q => set.add(q)); shapes.set(query !== '', set);
             }
-            assert.equal(shapes.get(false)!.size, 2); assert.equal(shapes.get(true)!.size, 2);
+            assert.equal(shapes.get(false)!.size, 2); assert.equal(shapes.get(true)!.size, 4);
             // max:1 keeps these actual callbacks on the backend queried here.
             const prepared = await callbackDb`SELECT statement,generic_plans::integer + custom_plans::integer AS executions FROM pg_prepared_statements`;
             for (const statement of shapes.get(true)!)
-              assert.ok(prepared.some(p => p.statement === statement && p.executions >= 9), 'nonempty callback statement reused past the custom-plan sampling window');
+              assert.ok(prepared.some(p => p.statement === statement && p.executions >= executions.get(statement)!), 'actual nonempty callback statement execution count');
+            assert.ok([...executions].some(([statement, count]) => statement.includes(' ILIKE ') && count >= 6), 'cased shape crosses custom-plan sampling window');
           } finally { await client.close(); await server.close(); await callbackDb.end({ timeout: 5 }); }
         });
         const changed = await articles.patch(owner, ids[0][0], { read: false, saved: true }, 0);
