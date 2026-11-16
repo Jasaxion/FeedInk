@@ -47,7 +47,8 @@ test('ai-results PostgreSQL: permanent history, exact keysets, selected cleanup 
     await db`INSERT INTO images(id,article_id,original_url) VALUES(${imageId},${id},'https://example.invalid/image.png')`;
     return id;
   };
-  const queued = async (owner: Account, source: string, operation: 'summary' | 'translate' = 'summary') => (await ai.enqueue(owner.id, source, { operation, mode: 'feed' })).job;
+  // History tests need actual translation, not same-language skip; skip behavior has its own suite.
+  const queued = async (owner: Account, source: string, operation: 'summary' | 'translate' = 'summary') => (await ai.enqueue(owner.id, source, { operation, mode: 'feed', ...(operation === 'translate' ? { targetLanguage: 'zh-CN' } : {}) })).job;
   const complete = async (owner: Account, source: string, operation: 'summary' | 'translate' = 'summary') => {
     const job = await queued(owner, source, operation), claimed = await ai.claim();
     assert.equal(claimed?.id, job.id); await ai.runClaimed(claimed!);

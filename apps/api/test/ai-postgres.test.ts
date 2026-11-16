@@ -14,6 +14,7 @@ import { installAiRoutes } from '../src/ai-routes.js';
 import { decryptAiKey } from '../src/ai-security.js';
 import { prepareAiDocument, segmentBatches, summaryMessages, validateSummary } from '../src/ai-content.js';
 import { aiFixture, hostedAiTests, syntheticAiKey, englishAiParagraph } from './ai-fixture.js';
+import { englishAiBoundedSentence, shortForeignAiFragments, supportedAiLanguageSamples } from './ai-language-fixture.js';
 
 async function eventually(predicate: () => boolean | Promise<boolean>): Promise<void> {
   const end = Date.now() + 10000;
@@ -172,6 +173,20 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
       await db`UPDATE articles SET content_html=${`<p>${englishAiParagraph}</p><p>这是中文段落，不得静默跳过。</p>`} WHERE id=${source}`;
       const mixed = await ai.enqueue(a.id, source, { operation: 'translate', mode: 'feed', targetLanguage: 'en' });
       assert.equal((await run(mixed.job.id)).status, 'succeeded'); assert.ok(fixture.requests.length > start);
+      const title = supportedAiLanguageSamples.find(sample => sample.language === 'en')!.title;
+      const titled = await article(a, `<p>${englishAiBoundedSentence}</p>`, title), beforeTitle = fixture.requests.length;
+      const titleJob = await ai.enqueue(a.id, titled, { operation: 'translate', mode: 'feed', targetLanguage: 'en' });
+      const titleResult = await run(titleJob.job.id);
+      assert.equal(titleResult.status, 'skipped'); assert.equal(titleResult.detected_language, 'en');
+      assert.equal(fixture.requests.length, beforeTitle, 'agreeing short title and old 240-character remainder need no provider');
+      for (const { name, text } of shortForeignAiFragments) {
+        const foreign = await article(a, `<p>${englishAiParagraph}</p><p>${text}</p>`, title), beforeForeign = fixture.requests.length;
+        const job = await ai.enqueue(a.id, foreign, { operation: 'translate', mode: 'feed', targetLanguage: 'en' });
+        const result = await run(job.job.id);
+        assert.equal(result.status, 'succeeded', `${name} short segment requires processing`);
+        assert.notEqual(result.detected_language, 'en');
+        assert.ok(fixture.requests.length > beforeForeign);
+      }
     });
     await t.test('missing segment IDs and truncated output fail and are not successful cache entries', async () => {
       for (const behavior of ['missing', 'truncated'] as const) {

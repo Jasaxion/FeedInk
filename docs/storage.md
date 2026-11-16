@@ -104,17 +104,51 @@ Parent hosted command for all new and existing storage tests (dedicated syntheti
 NODE_ENV=test npm exec -w @feedink/api -- tsx --test --test-concurrency=1 test/storage.test.ts test/storage-durability.test.ts test/storage-stream.test.ts test/storage-s3.test.ts test/storage-bundle.test.ts test/storage-postgres.test.ts test/storage-http.test.ts test/storage-process.test.ts
 ```
 
-Run the paired drill twice on the approved GitHub-hosted runner, after building the image and provisioning a synthetic S3 bucket:
+### Paired source/target and real-service interruption hooks
+
+The parent reports that hosted CI **43830557345** passed the existing storage/container jobs, including 271-key migration, HTTP/process-close checks, ENOSPC and **filesystem-source → S3 restore**. That evidence does not cover the newly authored S3-source or proxy-interruption cases below. These new cases have not been executed in this implementation lane; source/syntax inspection is not runtime acceptance.
+
+On an approved GitHub-hosted Ubuntu runner, the existing filesystem-source invocations remain unchanged (`STORAGE_SOURCE_BACKEND` defaults to `filesystem`):
 
 ```sh
 STORAGE_RESTORE_BACKEND=filesystem TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
-# Existing synthetic SDK credentials and TEST_STORAGE_S3_BUCKET are supplied by the job, not source.
-# Use an endpoint reachable from inside the utility container; a runner's 127.0.0.1 is not that container.
-STORAGE_RESTORE_BACKEND=s3 TEST_STORAGE_S3_ENDPOINT=http://host.docker.internal:9000 \
+# Existing synthetic SDK credentials, TEST_STORAGE_S3_BUCKET and region are supplied by the job, not source.
+STORAGE_RESTORE_BACKEND=s3 TEST_STORAGE_S3_ENDPOINT=http://host.docker.internal:19000 \
   TEST_STORAGE_S3_ALLOW_HTTP=true TEST_STORAGE_S3_FORCE_PATH_STYLE=true \
   TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
 ```
 
-The fixture maps `host.docker.internal` to the Docker host gateway; the parent's MinIO port must be published on that gateway, or use another reviewed container-reachable synthetic endpoint. Source backup stays filesystem-backed; each restore gets a fresh per-project S3 prefix. The S3 bucket must exist beforehand. Both target types receive the full PostgreSQL + referenced-blob restore, reference fingerprints, nonempty refusal and malformed/checksum preflight checks. These are additional CI hooks, not evidence that the commands have run or passed.
+After the parent's existing runtime image build and synthetic bucket setup, add either/both explicit S3-source hooks (do not run concurrently with fixture teardown):
+
+```sh
+# Official SDK-backed S3 seed, source verification and referenced-blob pack; fresh filesystem target.
+STORAGE_SOURCE_BACKEND=s3 STORAGE_RESTORE_BACKEND=filesystem \
+  TEST_STORAGE_S3_ENDPOINT=http://host.docker.internal:19000 \
+  TEST_STORAGE_S3_ALLOW_HTTP=true TEST_STORAGE_S3_FORCE_PATH_STYLE=true \
+  TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
+
+# Same source path, plus an opt-in bounded interrupted GET and recovery into a fresh S3 target.
+# STORAGE_RESTORE_BACKEND=filesystem is also supported with this witness.
+STORAGE_SOURCE_BACKEND=s3 STORAGE_RESTORE_BACKEND=s3 STORAGE_S3_INTERRUPTION=true \
+  TEST_STORAGE_S3_ENDPOINT=http://host.docker.internal:19000 \
+  TEST_STORAGE_S3_ALLOW_HTTP=true TEST_STORAGE_S3_FORCE_PATH_STYLE=true \
+  TEST_IMAGE=HOSTED_BUILT_IMAGE sh scripts/test-storage-backup.sh
+```
+
+The bucket must already be private and synthetic. The parent builds the isolated S3 protocol fixture from public commit `0d7408fc9969caf07de6a8c3a84f9fbb10a6739e` via `scripts/build-s3-fixture.sh`; retired public MinIO image/binary downloads are not used. Keep the current host-loopback **and Docker bridge** port 19000 publication. The utility container maps `host.docker.internal` to the Docker gateway, not its own loopback. No normal CI/manifests are changed by these hooks.
+
+`STORAGE_SOURCE_BACKEND` and `STORAGE_RESTORE_BACKEND` independently accept `filesystem`/`s3`. Every invocation generates random project names and fresh source/restored/corrupt prefixes beneath optional `TEST_STORAGE_S3_PREFIX`; it refuses a nonempty source. Seeding passes validated environment config into **Store**, records that source config privately on `/data`, and checks S3-backed bytes without a local blob fallback. The seed and production operator receive the same selected endpoint/prefix through Compose. `/data` remains an image-owned, pre-provisioned volume; S3 does not bypass the local journal-root requirement. The separate 1MiB ENOSPC tmpfs stays filesystem-backed regardless of source selection. Source config and surplus files are not part of the referenced-blob restore.
+
+`STORAGE_S3_INTERRUPTION=true` requires an S3 source and exactly the synthetic upstream `http://host.docker.internal:19000`. It starts only the owned project's opt-in `s3-interruption-proxy` service, with no host-published ports, credentials, Docker socket or privileges. Its control listener is container-loopback-only. The source SDK uses the proxy endpoint throughout seeding/packing/recovery; the proxy preserves signed Host/path/query and forwards to the real service. After successful source reads, it is explicitly armed to receive a successful object GET, forward one actual byte, then close **only its owned response/socket**. Subsequent requests receive 503 until explicit recovery, so SDK retries cannot silently complete that backup. The script does not stop MinIO or alter host networking/arbitrary services.
+
+The witness requires all of the following, or fails:
+
+- A real upstream 200 object response and partial-byte interruption, followed by backup failure within a **90-second command deadline** (plus at most 10 seconds to kill an unresponsive command). A timeout is failure, never a passing interruption result. The parent should also set a finite job/step timeout; that command deadline is not a bound for the whole PG/drill workflow.
+- A nonempty PG dump and partial archive with no completion manifest; explicit same-directory backup refusal, complete-frame validation refusal, and incomplete-bundle restore refusal before populating the empty target.
+- Generic operator errors with no synthetic credentials, endpoint/bucket/prefix, object keys or fixture rows in the captured failure messages. Failure logs remain private; publish only the fixed `Witness:`/`PASS:` summaries after assertions succeed.
+- Unchanged database/reference fingerprints and verified source bytes after proxy recovery, including exact seeded bytes read through the saved S3 config. Partial-output checksums remain unchanged through refusal and recovery.
+- A **new** backup output directory and fresh target project/prefix for recovery, followed by the existing full PG/context/byte verification, nonempty refusal and malformed/checksum preflight checks. Failed output is neither deleted nor overwritten.
+
+The exit trap stops only the drill's own projects, including the proxy. Volumes, source objects/prefixes, private config and failed output are retained until the hosted environment is disposed; do not upload raw bundles, configuration, credentials or failure logs. If its new hosted assertions pass, this four-byte fixture establishes a genuine SDK/S3 interrupted-read witness, **not** an S3 server crash, ambiguous PUT/COMMIT acknowledgement, long/stalled-body cancellation, power-loss/volume-driver test, multi-host recovery proof, benchmark, or production-provider certification. Hosted results and independent review remain required before expanding acceptance claims.
 
 Outside this seam, `tests/run-project.mjs` must provision and persist its owned `join(directory, 'data')` child before spawning the API; creating only its outer `mkdtemp` directory is insufficient. Any direct server launch using the normal CI `.data/ci` setting likewise needs a provisioning step. Other helpers that construct missing `Config.dataDir` values must do the same before `createApp`/`Store.init`. Existing inspected API fixtures use `mkdtemp` roots; normal Docker `/data` is a pre-provisioned volume. These helper/normal-CI edits are parent-owned. Do not weaken the root boundary to accommodate an unprepared helper.

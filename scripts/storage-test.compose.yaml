@@ -17,7 +17,7 @@ services:
       STORAGE_BACKEND: ${DRILL_STORAGE_BACKEND:-filesystem}
       STORAGE_S3_BUCKET: ${TEST_STORAGE_S3_BUCKET:-}
       STORAGE_S3_REGION: ${TEST_STORAGE_S3_REGION:-us-east-1}
-      STORAGE_S3_ENDPOINT: ${TEST_STORAGE_S3_ENDPOINT:-}
+      STORAGE_S3_ENDPOINT: ${DRILL_STORAGE_ENDPOINT:-${TEST_STORAGE_S3_ENDPOINT:-}}
       STORAGE_S3_PREFIX: ${DRILL_STORAGE_PREFIX:-}
       STORAGE_S3_FORCE_PATH_STYLE: ${TEST_STORAGE_S3_FORCE_PATH_STYLE:-true}
       STORAGE_S3_ALLOW_HTTP: ${TEST_STORAGE_S3_ALLOW_HTTP:-false}
@@ -37,6 +37,25 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 60s
+  # Opt-in, project-private fault proxy. No published ports, credentials, Docker socket or service kills.
+  s3-interruption-proxy:
+    profiles: [interruption]
+    image: ${TEST_IMAGE:?Set the hosted-built FeedInk image}
+    entrypoint: [node, /fixture/proxy.mjs]
+    command: [serve]
+    environment:
+      GITHUB_ACTIONS: ${GITHUB_ACTIONS:-}
+      RUNNER_ENVIRONMENT: ${RUNNER_ENVIRONMENT:-}
+      STORAGE_DRILL_PROXY_UPSTREAM: ${TEST_STORAGE_S3_ENDPOINT:-}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./storage-s3-interruption-proxy.mjs:/fixture/proxy.mjs:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 5s
 volumes:
   database:
   data:

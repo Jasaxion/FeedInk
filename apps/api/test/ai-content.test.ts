@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as cheerio from 'cheerio';
 import { JSDOM } from 'jsdom';
+import { francAll } from 'franc';
 import { assertAiCredentialAbsent } from '../src/ai-security.js';
 import { prepareAiDocument, splitAiText, segmentBatches, validateTranslations, validateSummary, detectAiLanguage, assertAiDecodedCredentialAbsent, assertAiResultCredentialAbsent } from '../src/ai-content.js';
-import { englishAiParagraph } from './ai-fixture.js';
+import { englishAiParagraph, hostedAiTests } from './ai-fixture.js';
+import { supportedAiLanguageSamples, unsupportedAiLanguageSamples, englishAiBoundedSentence, englishAiLongSentence, shortEnglishAiRemainder, shortForeignAiFragments } from './ai-language-fixture.js';
 
 const hasCode = (code: string) => (error: any) => error.code === code;
 test('ai-content: long individual nodes beyond 14k, title, captions and image metadata have full segment coverage', () => {
@@ -59,6 +61,93 @@ test('ai-content: conservative same-language consensus; short, mixed and unknown
   assert.notEqual(detectAiLanguage([{ id: 'a', text: englishAiParagraph }, { id: 'b', text: '这是另一种语言的文本，不能忽略这一部分。' }]), 'en');
   assert.notEqual(detectAiLanguage([{ id: 'a', text: `${englishAiParagraph} 日本語` }]), 'en');
   assert.notEqual(detectAiLanguage([{ id: 'a', text: englishAiParagraph }, { id: 'b', text: 'Les chercheurs ont soigneusement examiné les preuves historiques et expliqué les conclusions de cette expérience scientifique avec toutes les limites importantes.' }]), 'en');
+});
+test('ai-content detectAiLanguage: ordinary supported prose and independently agreeing short titles', () => {
+  for (const { language, paragraph, title } of supportedAiLanguageSamples) {
+    assert.equal(detectAiLanguage([{ id: 'paragraph', text: paragraph }]), language, `${language} paragraph`);
+    assert.ok((title.match(/\p{L}/gu)?.length ?? 0) < 40);
+    assert.equal(detectAiLanguage([{ id: 'title', text: title }]), 'unknown', `${language} title needs an anchor`);
+    assert.equal(detectAiLanguage(prepareAiDocument(`<p>${paragraph}</p>`, title, 'translate').segments), language, `${language} title with body`);
+    assert.equal(detectAiLanguage([{ id: 'body', text: paragraph }, { id: 'caption', text: title }]), language, `${language} short caption after body`);
+  }
+});
+test('ai-content detectAiLanguage: bounded sentences and complete long-window remainders', () => {
+  assert.ok(englishAiBoundedSentence.length > 240 && englishAiBoundedSentence.length < 480);
+  assert.ok((englishAiBoundedSentence.slice(240).match(/\p{L}/gu)?.length ?? 0) < 40);
+  assert.equal(detectAiLanguage([{ id: 'bounded', text: englishAiBoundedSentence }]), 'en');
+  assert.ok(englishAiLongSentence.length > 480);
+  assert.equal(detectAiLanguage([{ id: 'long', text: englishAiLongSentence }]), 'en');
+  // Boundary padding exercises a short final window without depending on a particular word's length.
+  const prefix = englishAiParagraph.slice(0, -1).padEnd(480, ' ');
+  assert.equal(detectAiLanguage([{ id: 'tail', text: prefix + shortEnglishAiRemainder }]), 'en');
+  for (const { name, text } of shortForeignAiFragments) {
+    assert.notEqual(detectAiLanguage([{ id: 'tail', text: prefix + text }]), 'en', `${name} trailing window`);
+    assert.notEqual(detectAiLanguage([{ id: 'tail', text: `${englishAiParagraph} ${text}` }]), 'en', `${name} trailing sentence`);
+  }
+  for (const text of ['oui', 'ja', '日本語', 'Ж', 'xqz']) {
+    assert.equal(detectAiLanguage([{ id: 'tail', text: prefix + text }]), 'unknown', 'tiny remainders cannot inherit English');
+  }
+});
+test('ai-content detectAiLanguage: open-set unsupported prose, multilingual consensus and explicit ambiguity', () => {
+  const english = [{ id: 'en', text: englishAiParagraph }];
+  for (const { name, paragraph } of unsupportedAiLanguageSamples) {
+    assert.equal(detectAiLanguage([{ id: 'unsupported', text: paragraph }]), 'unknown', name);
+    assert.equal(detectAiLanguage([...english, { id: 'unsupported', text: paragraph }]), 'unknown', `${name} must veto English`);
+  }
+  for (const { language, paragraph } of supportedAiLanguageSamples.filter(sample => sample.language !== 'en')) {
+    assert.equal(detectAiLanguage([...english, { id: language, text: paragraph }]), 'mixed', `${language} and English`);
+    assert.equal(detectAiLanguage([{ id: 'multilingual', text: `${englishAiParagraph} ${paragraph}` }]), 'mixed', `${language} and English sentences in one segment`);
+  }
+  for (const { name, text } of shortForeignAiFragments) {
+    for (const fragments of [[{ id: 'foreign-title', text }, ...english], [...english, { id: 'foreign-caption', text }]]) {
+      assert.notEqual(detectAiLanguage(fragments), 'en', `${name} short segment must not be overruled by context`);
+    }
+  }
+  for (const text of ['', '1234!? 🙂', 'Menu', 'Radio', 'Gift', 'Hello', 'qxzv jqxv zqxx vjxz qzvx xzqj vqxz xjqv zqxv qjzx vxqz jxvq']) {
+    assert.equal(detectAiLanguage([{ id: 'ambiguous', text }]), 'unknown');
+  }
+  for (const text of ['Menu', 'Radio', 'Gift', 'xqz']) {
+    assert.equal(detectAiLanguage([{ id: 'title', text }, ...english]), 'unknown', 'ambiguous title remains explicit');
+  }
+  // A minority script outside the old Latin/Han/kana/Hangul checklist must also veto skipping.
+  for (const script of ['Ж', 'ع', 'א', 'अ', '𐐀', '日本語']) {
+    assert.equal(detectAiLanguage([{ id: 'mixed-script', text: `${englishAiParagraph.slice(0, -1)} ${script}.` }]), 'unknown');
+  }
+});
+test('ai-content detectAiLanguage: late segments and metadata beyond 14k are never dropped', () => {
+  const body = `<p>${englishAiParagraph}</p>`.repeat(100);
+  assert.equal(detectAiLanguage(prepareAiDocument(body, englishAiParagraph, 'translate').segments), 'en', 'baseline must skip before adding foreign/ambiguous late text');
+  for (const tail of ['Les résultats de la recherche', 'これは日本語です', 'Menu']) {
+    const doc = prepareAiDocument(`${body}<p>${tail}</p>`, englishAiParagraph, 'translate');
+    assert.ok(doc.segments.map(segment => segment.text).join('').length > 14000);
+    assert.notEqual(detectAiLanguage(doc.segments), 'en', 'late body segment');
+    for (const attribute of ['alt', 'title']) {
+      const image = prepareAiDocument(`${body}<img ${attribute}="${tail}">`, englishAiParagraph, 'translate');
+      assert.notEqual(detectAiLanguage(image.segments), 'en', `late ${attribute} attribute`);
+    }
+  }
+});
+test('ai-content detectAiLanguage: synthetic ranked-score diagnostics (hosted only, no article logging)', { skip: !hostedAiTests }, t => {
+  const samples = [
+    ...supportedAiLanguageSamples.flatMap(({ language, paragraph, title }) => [
+      { name: `${language}-paragraph`, text: paragraph }, { name: `${language}-title`, text: title },
+      { name: `${language}-title-context`, text: `${title}\n${paragraph}` },
+    ]),
+    ...unsupportedAiLanguageSamples.map(({ name, paragraph }) => ({ name: `${name}-unsupported`, text: paragraph })),
+    ...shortForeignAiFragments.map(({ name, text }) => ({ name: `${name}-short-foreign`, text })),
+    { name: 'en-bounded-sentence', text: englishAiBoundedSentence },
+    { name: 'en-old-240-tail', text: englishAiBoundedSentence.slice(240) },
+    { name: 'en-long-sentence', text: englishAiLongSentence },
+    { name: 'en-raw-480-tail', text: englishAiLongSentence.slice(480) },
+    { name: 'en-short-remainder', text: shortEnglishAiRemainder },
+    { name: 'en-fr-same-script-switch', text: `${englishAiParagraph} ${supportedAiLanguageSamples.find(sample => sample.language === 'fr')!.paragraph}` },
+    { name: 'ambiguous-short-heading', text: 'Menu' },
+    { name: 'invented-letter-sequences', text: 'qxzv jqxv zqxx vjxz qzvx xzqj vqxz xjqv zqxv qjzx vxqz jxvq' },
+  ];
+  for (const { name, text } of samples) {
+    t.diagnostic(JSON.stringify({ fixture: name, characters: text.length, letters: text.match(/\p{L}/gu)?.length ?? 0,
+      ranked: francAll(text, { minLength: 12 }).slice(0, 5) }));
+  }
 });
 test('ai-content: Unicode splitting is lossless and summary includes code as well as late content', () => {
   const text = '𠮷🙂é'.repeat(5000);

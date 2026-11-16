@@ -131,28 +131,66 @@ export function prepareAiDocument(html: string, title: string, operation: AiOper
   };
 }
 const languageCodes: Record<string, AiLanguage> = { cmn: 'zh-CN', eng: 'en', jpn: 'ja', kor: 'ko', fra: 'fr', deu: 'de', spa: 'es' };
-/** Conservative all-window consensus. Short/ambiguous windows veto skipping, not translation. */
-export function detectAiLanguage(segments: AiSegment[]): NonNullable<AiJob['detectedLanguage']> {
-  const detected = new Set<AiLanguage>(); let unknown = false, letters = 0;
-  for (const segment of segments) {
-    const sentences = segment.text.split(/(?<=[.!?。！？\n])\s*/u).filter(text => /\p{L}/u.test(text));
-    for (const sentence of sentences) for (const text of splitAiText(sentence, 240)) {
-      const count = text.match(/\p{L}/gu)?.length ?? 0; letters += count;
-      if (!count) continue;
-      if (count < 40) { unknown = true; continue; }
-      const ranked = francAll(text, { minLength: 40 });
-      const language = languageCodes[ranked[0]?.[0]];
-      // Scripts from another language veto consensus even if the statistical detector overlooks a short phrase.
-      const scripts = [/\p{Script=Latin}/u, /\p{Script=Han}/u, /[\p{Script=Hiragana}\p{Script=Katakana}]/u, /\p{Script=Hangul}/u].map(re => re.test(text));
-      const incompatible = language === 'zh-CN' ? scripts[0] || scripts[2] || scripts[3]
-        : language === 'ja' ? scripts[0] || scripts[3] : language === 'ko' ? scripts[0] || scripts[2]
-        : scripts[1] || scripts[2] || scripts[3];
-      if (!language || ranked[0][1] < 0.99 || (ranked[1]?.[1] ?? 0) > 0.8 || incompatible) unknown = true;
-      else detected.add(language);
+const languageScripts: Record<AiLanguage, RegExp> = {
+  'zh-CN': /^\p{Script=Han}+$/u,
+  en: /^\p{Script=Latin}+$/u, fr: /^\p{Script=Latin}+$/u,
+  de: /^\p{Script=Latin}+$/u, es: /^\p{Script=Latin}+$/u,
+  // Script_Extensions admits Japanese shared letters such as the prolonged-sound mark in チーム.
+  ja: /^[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}]+$/u,
+  ko: /^[\p{Script=Hangul}\p{Script=Han}]+$/u,
+};
+const AI_LANGUAGE_WINDOW_CHARS = 480;
+const AI_LANGUAGE_ANCHOR_LETTERS = 40;
+const AI_LANGUAGE_FRAGMENT_LETTERS = 12;
+// franc normalizes distances so the winner scores 1; scores are NOT confidence probabilities.
+// This relative separation is a provisional ambiguity guard, requiring hosted synthetic calibration.
+const AI_LANGUAGE_RANK_SEPARATION = 0.01;
+function rankAiLanguage(text: string, letters: string[]): AiLanguage | undefined {
+  if (letters.length < AI_LANGUAGE_FRAGMENT_LETTERS) return;
+  // Never restrict ranking to supported targets: an unsupported winner must veto skipping.
+  const [first, second] = francAll(text, { minLength: AI_LANGUAGE_FRAGMENT_LETTERS });
+  if (!first || !Number.isFinite(first[1]) || second && (!Number.isFinite(second[1]) || first[1] - second[1] < AI_LANGUAGE_RANK_SEPARATION)) return;
+  const language = languageCodes[first[0]];
+  // Check EVERY letter, including scripts franc's dominant-script selection may overlook.
+  return language && languageScripts[language].test(letters.join('')) ? language : undefined;
+}
+function* aiLanguageWindows(text: string): Generator<string> {
+  for (const sentence of text.split(/(?<=[.!?。！？;；\n])\s*/u)) {
+    // Keep bounded sentences intact rather than manufacture mid-word/short 240-character tails.
+    if (sentence.length <= AI_LANGUAGE_WINDOW_CHARS) { yield sentence; continue; }
+    let window = '';
+    for (const token of sentence.match(/\S+\s*/gu) ?? []) {
+      if (window && window.length + token.length > AI_LANGUAGE_WINDOW_CHARS) { yield window; window = ''; }
+      // Oversized tokens (including unspaced prose) still receive complete code-point-safe inspection.
+      const parts = splitAiText(token, AI_LANGUAGE_WINDOW_CHARS);
+      for (let i = 0; i < parts.length - 1; i++) yield parts[i];
+      window += parts[parts.length - 1];
     }
+    if (window) yield window; // Never discard a remainder, even when it is too short to identify.
+  }
+}
+/** All-window consensus; context validates short independent evidence but cannot override it. */
+export function detectAiLanguage(segments: AiSegment[]): NonNullable<AiJob['detectedLanguage']> {
+  const detected = new Set<AiLanguage>(), fragments: { text: string; language: AiLanguage }[] = [];
+  let unknown = false, anchor = '';
+  for (const segment of segments) for (const text of aiLanguageWindows(segment.text)) {
+    const characters = text.match(/\p{L}/gu) ?? [];
+    if (!characters.length) continue;
+    const language = rankAiLanguage(text, characters);
+    if (!language) { unknown = true; continue; }
+    if (characters.length < AI_LANGUAGE_ANCHOR_LETTERS) fragments.push({ text, language });
+    else { detected.add(language); if (!anchor) anchor = text; }
   }
   if (detected.size > 1) return 'mixed';
-  return unknown || !letters || !detected.size ? 'unknown' : [...detected][0];
+  if (unknown || !anchor) return 'unknown';
+  const language = [...detected][0];
+  for (const fragment of fragments) {
+    if (fragment.language !== language) return 'unknown';
+    // At most two bounded windows, well below franc's input cap. No title/tail is inherited by fiat.
+    const context = `${fragment.text}\n${anchor}`;
+    if (rankAiLanguage(context, context.match(/\p{L}/gu) ?? []) !== language) return 'unknown';
+  }
+  return language;
 }
 export function translationMessages(batch: AiSegment[], target: AiLanguage): AiMessage[] {
   return [

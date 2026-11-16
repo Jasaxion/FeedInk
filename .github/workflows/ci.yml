@@ -304,6 +304,23 @@ jobs:
           STORAGE_RESTORE_BACKEND: s3
           TEST_STORAGE_S3_ENDPOINT: http://host.docker.internal:19000
         run: scripts/test-storage-backup.sh
+      - name: Paired backup from private S3 into fresh filesystem
+        timeout-minutes: 10
+        env:
+          TEST_IMAGE: feedink:storage-ci
+          STORAGE_SOURCE_BACKEND: s3
+          STORAGE_RESTORE_BACKEND: filesystem
+          TEST_STORAGE_S3_ENDPOINT: http://host.docker.internal:19000
+        run: scripts/test-storage-backup.sh
+      - name: Interrupted S3-source backup and fresh-target recovery
+        timeout-minutes: 10
+        env:
+          TEST_IMAGE: feedink:storage-ci
+          STORAGE_SOURCE_BACKEND: s3
+          STORAGE_RESTORE_BACKEND: s3
+          STORAGE_S3_INTERRUPTION: 'true'
+          TEST_STORAGE_S3_ENDPOINT: http://host.docker.internal:19000
+        run: scripts/test-storage-backup.sh
       - name: Stop owned synthetic S3 fixture
         if: always()
         run: docker rm --force feedink-s3-ci >/dev/null 2>&1 || true
