@@ -139,6 +139,8 @@ export class Articles {
   async page(userId: string, input: ArticleQuery): Promise<ArticlePage> {
     return countSnapshot(this.db, userId, async (sql) => {
       const { condition, q } = this.selection(userId, input, true, sql);
+      // Search selectivity varies sharply; do not reuse a common-term generic plan for rare terms.
+      if (q.q) await sql`SET LOCAL plan_cache_mode = force_custom_plan`;
       let total = await commonArticleTotal(sql, userId, q);
       if (total === undefined) {
         const countCondition = this.selection(userId, input, false, sql).condition;

@@ -35,7 +35,7 @@ export async function auditFixture() {
         // Overrides retain the fixture's authentication and mutation CSRF guards.
         const matched = routes.find(route => typeof route.pathname === 'string' ? route.pathname === url.pathname : route.pathname.test(url.pathname));
         if (matched) {
-          try { return await matched.handler({ request: req, url, body, json }); }
+          try { return await matched.handler({ request: req, response: res, url, body, json }); }
           catch (error) { routeErrors.push(String(error)); throw error; }
         }
         if (login) { const data = await body(); control.user = user(data.name || 'bob'); control.loggedIn = true; return json({ user: control.user, settings: control.settings, csrfToken: `csrf-${control.user.id}` }); }

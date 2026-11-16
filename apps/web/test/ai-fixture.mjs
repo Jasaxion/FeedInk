@@ -47,7 +47,7 @@ export async function aiFixture() {
     if (hold) await hold.promise;
     return json(captured);
   });
-  fixture.route(/^\/api\/articles\/[^/]+\/ai$/, async ({ request, url, body, json }) => {
+  fixture.route(/^\/api\/articles\/[^/]+\/ai$/, async ({ request, response, url, body, json }) => {
     assert.equal(request.method, 'POST');
     const data = await body(), articleId = url.pathname.split('/')[3], owner = fixture.control.user.id;
     state.calls.push({ kind: 'post', owner, articleId, data });
@@ -71,7 +71,13 @@ export async function aiFixture() {
     }
     const captured = { ...job, ...state.responsePatch }; const hold = state.holdPost; state.holdPost = null;
     if (hold) await hold.promise;
-    if (state.losePostReply) { state.losePostReply = false; request.socket.destroy(); return; }
+    if (state.losePostReply) {
+      state.losePostReply = false;
+      // A partial response cannot be transparently retried as a stale keep-alive socket.
+      response.writeHead(202, { 'Content-Type': 'application/json', 'Content-Length': '512', 'Cache-Control': 'no-store' });
+      response.write('{"job":'); response.flushHeaders();
+      setImmediate(() => response.destroy()); return;
+    }
     return json({ job: captured }, 202);
   });
   fixture.route(/^\/api\/ai\/jobs\/[^/]+$/, async ({ request, url, json }) => {

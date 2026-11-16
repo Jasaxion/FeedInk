@@ -277,10 +277,10 @@ test('trusted pen retains title/body/image/gaps/gutters through save acknowledge
   test.setTimeout(100_000);
   const api = page.context().request, session = await createAnnotationUser(api);
   const { first } = await seedAnnotationArticles(api, session);
-  // Enlarge the owned one-pixel image fixture through the supported layout setting;
-  // neither article HTML nor its canonical source identity is replaced by this test.
-  expect((await api.patch('/api/settings', { headers: csrf(session), data: { customCss: 'img { padding:40px } p { margin-bottom:80px }', theme: 'light' } })).status()).toBe(200);
+  // Controlled fixture geometry, not a custom-CSS API test. Original HTML/hash stays unchanged.
+  expect((await api.patch('/api/settings', { headers: csrf(session), data: { theme: 'light' } })).status()).toBe(200);
   await openAnnotations(page, first.id);
+  await page.addStyleTag({ content: '.article-content img { padding:40px } .article-content p { margin-bottom:80px }' });
   const original = await getAnnotation(api, first.id);
   await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
   await page.getByTestId('ink-toggle').click();
@@ -374,6 +374,7 @@ test('trusted pen retains title/body/image/gaps/gutters through save acknowledge
     await page.locator('.reader-scroll').evaluate(node => { node.scrollTop = node.scrollHeight; });
     expect(await page.locator('.reader-scroll').evaluate(node => node.scrollTop)).toBeGreaterThan(0);
     await page.reload(); await expect(page.getByTestId('ink-toggle')).toBeEnabled();
+    await page.addStyleTag({ content: '.article-content img { padding:40px } .article-content p { margin-bottom:80px }' });
     for (const region of ['title', 'metadata', 'body', 'image', 'gap', 'left', 'right'] as const) {
       const points = await pathFor(region); await expect.poll(() => paintedAt(points[1])).toBe(true);
     }

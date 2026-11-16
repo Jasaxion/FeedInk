@@ -64,5 +64,14 @@ export function assertContext(document: AnnotationDocument, context: Pick<Annota
   validateAnnotations(document);
   for (const key of ['articleId', 'mode', 'sourceUrl', 'contentHash'] as const) if (context[key] !== undefined && context[key] !== document.context[key]) throw new Error('笔记与当前文章上下文不匹配，未恢复');
 }
+/** Reader-facing notices: verified placement/reflow is normal, not a failure. */
+export function inkNotice(message: string): string | null {
+  const code = message.match(/^\[([a-z-]+)\]/)?.[1];
+  if (code === 'surface-following' || code === 'layout-changed') return null;
+  if (code === 'attachment-rejected') return '此位置暂时无法稳定书写，请换一处或调整排版。';
+  if (code === 'anchor-unresolved' || code === 'export-anchor-unresolved') return '部分笔迹暂未定位，原始数据仍保留，可在导出中查看。';
+  if (code === 'page-fallback' || code === 'legacy-layout') return '旧版笔迹可能与当前排版不同，原始数据仍保留。';
+  return '手写暂时遇到问题，请重试或先导出笔记。';
+}
 export const markLabels: Record<TextAnnotation['kind'], string> = { highlight: '高亮', underline: '下划线', wave: '波浪线', note: '备注' };
 export const markColors = { yellow: '#e9bb37', green: '#4ba879', blue: '#4a8ccf', lilac: '#a576cf' } as const;

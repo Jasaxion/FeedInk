@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory } from 'fake-indexeddb';
 import type { AnnotationDocument, TextQuoteAnchor } from '@feedink/shared';
-import { annotationKey, backupOf, sameAnnotationPayload, validateAnnotations, type StoredAnnotations } from '../src/annotationData';
+import { annotationKey, backupOf, inkNotice, sameAnnotationPayload, validateAnnotations, type StoredAnnotations } from '../src/annotationData';
 import { OfflineStore, LocalAnnotationConflict, PendingNotesOwnerError } from '../src/offline';
 import { matchQuote } from '../src/textAnchors';
 import { article, session } from './fixtures';
@@ -12,6 +12,13 @@ function document(): AnnotationDocument {
 }
 const draft = (localVersion = 'first'): StoredAnnotations => ({ document: document(), localVersion, pending: true });
 const store = () => new OfflineStore('annotations-unit', new IDBFactory());
+
+test('normal verified ink placement stays quiet while actionable failures remain visible', () => {
+  assert.equal(inkNotice('[surface-following] verified region'), null);
+  assert.equal(inkNotice('[layout-changed] resized'), null);
+  assert.match(inkNotice('[anchor-unresolved] missing target')!, /原始数据仍保留/);
+  assert.match(inkNotice('Unexpected engine failure')!, /重试/);
+});
 
 test('legacy v2 tabs cannot erase v3 note drafts and blocked upgrades preserve caches', async () => {
   const factory = new IDBFactory(), name = 'legacy-note-fence';

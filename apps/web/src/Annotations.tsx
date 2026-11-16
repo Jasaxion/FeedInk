@@ -12,7 +12,7 @@ import { useApp } from './context';
 import { api, HttpError } from './api';
 import { assertAuthEpoch, authEpoch, withAuthNetworkLock } from './authEpoch';
 import { withOwnerLock } from './stateSync';
-import { annotationKey, assertContext, markColors, markLabels, sameAnnotationPayload, validateAnnotations, type StoredAnnotations } from './annotationData';
+import { annotationKey, assertContext, inkNotice, markColors, markLabels, sameAnnotationPayload, validateAnnotations, type StoredAnnotations } from './annotationData';
 import { annotationPath, fetchAnnotations, registerNotes, synchronizeAnnotations } from './annotationSync';
 import { exportNotesJson, exportNotesMarkdown, printNotes } from './annotationExport';
 import { captureQuote, matchQuote, quoteRange, quoteStream } from './textAnchors';
@@ -183,7 +183,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost, onConte
         return actions.current.update({ ...active.document, ink: message.page });
       }
       if (message.type === 'state') setHistoryState({ undo: message.undo, redo: message.redo });
-      if (message.type === 'error') setEngineError(message.message);
+      if (message.type === 'error') { const notice = inkNotice(message.message); if (notice) setEngineError(notice); }
       return true;
     };
     try {
@@ -376,7 +376,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost, onConte
       <button aria-label="撤销笔迹" title="撤销笔迹" disabled={!historyState.undo || readOnly} onClick={() => engine.current?.undo()}><Undo2 size={17} /></button><button aria-label="重做笔迹" title="重做笔迹" disabled={!historyState.redo || readOnly} onClick={() => engine.current?.redo()}><Redo2 size={17} /></button>
       <details className="annotation-options"><summary aria-label="手写选项" title="手写选项"><SlidersHorizontal size={18} aria-hidden="true" /></summary>{tool !== 'eraser' && (tool === 'highlighter' ? <AnnotationColors label="荧光笔颜色" value={highlighterColor} onChange={setHighlighterColor} disabled={readOnly} /> : <AnnotationColors label="钢笔颜色" includeBlack value={penColor} onChange={setPenColor} disabled={readOnly} />)}<label>笔宽<input aria-label="笔宽" type="range" min="1" max="12" value={width} onChange={event => setWidth(Number(event.target.value))} /></label></details>
       <button aria-label="退出手写" onClick={closeInk}><X size={17} /></button>
-      {engineError && <small role="status">{engineError} · 未定位数据仍保留</small>}
+      {engineError && <small role="status">{engineError}</small>}
     </AnnotationFloat>}
     {open && <AnnotationFloat root={root} kind="drawer" label="批注与笔记" onClose={closeDrawer}>
     <aside className="annotations-panel" data-testid="annotations-panel" aria-label="批注与笔记" inert={paused || undefined}>
@@ -384,7 +384,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost, onConte
       <p role="status" data-testid="annotation-status">{status}</p>
       {!editing && undoNotice}
       <button disabled={!row || readOnly} onClick={() => addMark('note', true)}>整篇备注</button>
-      {error && <p role="alert">{error}</p>}{Boolean(writeError.current) && row && <button onClick={() => { if (confirm('请先导出 JSON。本操作放弃此标签页尚未写入的草稿，重新载入本机 / 服务器版本。')) { engine.current?.destroy(); engine.current = null; writeTail.current = Promise.resolve(); writeError.current = null; void load(row.document.contentHash); } }}>放弃此页草稿并重新载入</button>}{engineError && <p role="status">笔迹提示：{engineError} · 未定位数据仍在 JSON / 打印报告中保留。</p>}
+      {error && <p role="alert">{error}</p>}{Boolean(writeError.current) && row && <button onClick={() => { if (confirm('请先导出 JSON。本操作放弃此标签页尚未写入的草稿，重新载入本机 / 服务器版本。')) { engine.current?.destroy(); engine.current = null; writeTail.current = Promise.resolve(); writeError.current = null; void load(row.document.contentHash); } }}>放弃此页草稿并重新载入</button>}{engineError && <p role="status">{engineError}</p>}
       {row && <><div className="button-row"><button className="secondary" disabled={syncing || readOnly} onClick={() => void sync()}>{syncing ? '正在同步…' : '重试同步'}</button><button onClick={() => void app.task(async () => { exportNotesJson(exportSnapshot()); })}>导出 JSON</button><button disabled={!app.online || row.pending} onClick={() => void app.task(() => exportNotesMarkdown(row.document))}>导出 Markdown</button><button onClick={() => void app.task(async () => { printNotes(exportSnapshot()); })}>打印 / PDF</button><label className="secondary">导入笔记 JSON<input aria-label="导入笔记 JSON" type="file" accept="application/json,.json" disabled={!app.online || loading || row.pending} onChange={event => { const file = event.target.files?.[0]; if (file) void app.task(() => importJson(file)); event.target.value = ''; }} /></label></div>
         <p className="muted small">JSON 保存全部原始笔记，可恢复到匹配的文章存档。Markdown 使用服务器当次快照（可能包含其他设备的新修改）；打印是含引用、备注和笔迹组的展示报告，不是备份。{row.pending && ' 当前有本地草稿，Markdown 暂不可用。'}</p>
         {row.conflict && <section className="annotation-conflict" role="alert"><h3>版本冲突 · 未覆盖任何一方</h3><p>本地基线 {row.document.revision}，服务器修订 {row.conflict.revision}。请比较并导出后明确选择。</p><button onClick={() => exportNotesJson(row.document)}>导出本地版本</button><button onClick={() => exportNotesJson(row.conflict!)}>导出服务器冲突版本</button><button onClick={() => void app.task(() => resolveConflict(false))}>使用服务器版本</button><button onClick={() => void app.task(() => resolveConflict(true))}>保留本地版本</button></section>}
