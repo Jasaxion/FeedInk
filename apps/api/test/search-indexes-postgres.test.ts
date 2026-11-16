@@ -8,7 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { ArticleQuery } from '@feedink/shared';
 import { Articles } from '../src/articles.js';
 import { createMcpServer } from '../src/mcp.js';
-import { hash, migrate, type Store } from '../src/core.js';
+import { hash, iso, migrate, type Store } from '../src/core.js';
 import type { Annotations } from '../src/annotations.js';
 
 const hosted = process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted';
@@ -25,7 +25,7 @@ test('010_search_indexes: exact API/MCP parity, extension schemas, transactional
   const role = `search_restricted_${randomUUID().replaceAll('-', '')}`;
   try {
     await admin.unsafe(`CREATE ROLE ${role} NOLOGIN`);
-    for (const layout of ['install-public', 'existing-private'] as const) await t.test(layout, async () => {
+    for (const layout of ['install-public', 'existing-private'] as const) await t.test(layout, async layoutTest => {
       const database = `search_test_${randomUUID().replaceAll('-', '')}`;
       const schema = 'search_app', extensionSchema = 'search extension';
       const url = new URL(process.env.TEST_DATABASE_URL!); url.pathname = `/${database}`;
@@ -191,6 +191,56 @@ test('010_search_indexes: exact API/MCP parity, extension schemas, transactional
           });
           assert.ok(JSON.stringify(plan).includes(index));
         }
+        if (layout === 'install-public') await layoutTest.test('articles.selection literal-first and mcp.search_articles split shapes retain legacy exact results after repeated callbacks', async () => {
+          const statements: string[] = [];
+          const callbackDb = postgres(url.toString(), { max: 1, connection: { search_path: schema, statement_timeout: '20000' }, onnotice: () => {}, debug: (_id, query) => { statements.push(query); } });
+          const current = new Articles(callbackDb);
+          const server = createMcpServer(callbackDb, {} as Store, {} as Annotations, { userId: owner, tokenId: randomUUID(), scopes: ['articles:read'] });
+          const client = new Client({ name: 'search-query-regression', version: '1.0.0' });
+          try {
+            // One small witness set, not another traversal/filter matrix. The
+            // original OR order is an independent query-shape parity reference.
+            const witnesses: ArticleQuery[] = [
+              { q: 'TitleNeedle', scope: 'all', folderId: folder, tagId: tag, after: '2025-01-01T00:00:00Z' },
+              { q: 'orbit launch', scope: 'archive' }, { q: '文', scope: 'archive' },
+              { q: '%', scope: 'saved' }, { q: '\\', scope: 'archive' },
+            ];
+            for (const query of witnesses) {
+              const { condition } = articles.selection(owner, { ...query, q: undefined }, false);
+              const pattern = `%${query.q!.replace(/[\\%_]/g, '\\$&')}%`;
+              const legacy = await db`SELECT a.id FROM articles a WHERE ${condition} AND (to_tsvector('simple',a.title || ' ' || a.content_text) @@ plainto_tsquery('simple',${query.q!}) OR a.title ILIKE ${pattern} OR a.content_text ILIKE ${pattern}) ORDER BY a.published_at DESC,a.id DESC`;
+              statements.length = 0;
+              const page = await current.page(owner, { ...query, limit: 100 });
+              assert.equal(page.total, legacy.length);
+              assert.deepEqual(page.items.map(a => a.id), legacy.map(a => a.id));
+              const count = statements.find(q => q.startsWith('SELECT count(*)') && q.includes('to_tsvector'))!;
+              assert.ok(count && count.indexOf('a.content_text ILIKE') < count.indexOf('to_tsvector'), 'literal checks precede FTS in emitted SQL');
+            }
+            const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+            await server.connect(serverTransport); await client.connect(clientTransport);
+            const shapes = new Map<boolean, Set<string>>();
+            for (const query of ['', ...Array<string>(6).fill('TitleNeedle'), '%', 'urlneedle', ' ', '']) {
+              const pattern = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+              const where = db`user_id=${owner} AND (${query}='' OR title ILIKE ${pattern} OR url ILIKE ${pattern} OR content_text ILIKE ${pattern})`;
+              const [{ total }] = await db`SELECT count(*)::integer AS total FROM articles WHERE ${where}`;
+              const rows = await db`SELECT id,title,url,left(summary,400) AS summary,published_at FROM articles WHERE ${where} ORDER BY published_at DESC,id OFFSET 1 LIMIT 2`;
+              statements.length = 0;
+              const result = await client.callTool({ name: 'search_articles', arguments: { query, offset: 1, limit: 2 } });
+              assert.ok(!result.isError);
+              assert.deepEqual(result.structuredContent, { items: rows.map(r => ({ articleId: r.id, title: r.title, sourceUrl: r.url, summary: r.summary, publishedAt: iso(r.published_at) })), total, nextOffset: 1 + rows.length < total ? 1 + rows.length : null });
+              assert.equal(statements.length, 2, 'actual callback emits count and page');
+              assert.ok(statements.every(q => !q.includes("=''")));
+              assert.ok(statements.every(q => q.includes(' ILIKE ') === (query !== '')));
+              const set = shapes.get(query !== '') || new Set<string>();
+              statements.forEach(q => set.add(q)); shapes.set(query !== '', set);
+            }
+            assert.equal(shapes.get(false)!.size, 2); assert.equal(shapes.get(true)!.size, 2);
+            // max:1 keeps these actual callbacks on the backend queried here.
+            const prepared = await callbackDb`SELECT statement,generic_plans::integer + custom_plans::integer AS executions FROM pg_prepared_statements`;
+            for (const statement of shapes.get(true)!)
+              assert.ok(prepared.some(p => p.statement === statement && p.executions >= 9), 'nonempty callback statement reused past the custom-plan sampling window');
+          } finally { await client.close(); await server.close(); await callbackDb.end({ timeout: 5 }); }
+        });
         const changed = await articles.patch(owner, ids[0][0], { read: false, saved: true }, 0);
         assert.equal(changed.stateVersion, 1);
         await assert.rejects(articles.patch(owner, ids[0][0], { read: true }, 0), (e: any) => e.code === 'STATE_CONFLICT');

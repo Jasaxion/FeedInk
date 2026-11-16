@@ -11,6 +11,12 @@ on:
       search_indexes:
         type: boolean
         default: false
+      search_mode:
+        type: string
+        default: indexed
+      mcp_prepared:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       tier:
@@ -24,6 +30,15 @@ on:
         default: false
       search_indexes:
         description: Compare additive search indexes on the same 10k fixture only
+        type: boolean
+        default: false
+      search_mode:
+        description: Indexed release workload or historical index comparison
+        type: choice
+        options: [indexed, compare, before]
+        default: indexed
+      mcp_prepared:
+        description: Inspect actual same-connection prepared execution
         type: boolean
         default: false
 permissions:
@@ -56,7 +71,8 @@ jobs:
       NODE_ENV: test
       TEST_DATABASE_URL: postgresql://scale_ci:ephemeral_scale_only@127.0.0.1:5432/scale_ci
       SCALE_ARTICLES: ${{ matrix.tier }}
-      SCALE_SEARCH_INDEXES: ${{ inputs.search_indexes && 'compare' || '' }}
+      SCALE_SEARCH_INDEXES: ${{ inputs.search_indexes && 'compare' || inputs.search_mode || 'indexed' }}
+      SCALE_MCP_PREPARED: ${{ inputs.mcp_prepared && '1' || '0' }}
       SEARCH_INDEXES_TEST: '1'
     steps:
       - uses: actions/checkout@v4

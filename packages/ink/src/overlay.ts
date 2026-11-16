@@ -1,5 +1,6 @@
 /** FeedInk modifications (Apache-2.0): explicit reader-scoped browser lifecycle,
- * owned document identity, injectable transport, clipped paint and pen-click suppression.
+ * owned document identity, clipped article surfaces, pen-click suppression and
+ * received-sample retention across browser interruption/configuration barriers.
  * Adapted from WebInk; see packages/ink/LICENSE and repository NOTICE. */
 import { AttachmentRejectedError, ContentAnchorResolver } from './anchors.ts';
 import { validFrame, visibleBounds, type RenderFrame } from './frames.ts';
@@ -9,6 +10,7 @@ import { nativeInteger, NATIVE_LIMITS, validateNativeBatch } from './native.ts';
 import { encodeNativeRenderFrame, nativeFramePage, nativeMotion, nativeScenePage } from './native-render.ts';
 import { engineWork } from './work.ts';
 import { StrokeRenderer } from './renderer.ts';
+import { ReaderInkSurface } from './reader-surface.ts';
 import type { Configuration, ExportSnapshot, ExportSnapshotOptions, HostMessage, Metrics, NativePointer, NativePointerBatch, NativeRenderFrame, NativeSessionOptions, Page, Point, WebInkAPI } from './types.ts';
 import { finite, LIMITS, pageUrl, record, validateConfiguration } from './validation.ts';
 import { canvasSize, clientPoint, normalizedPoint, readViewport, type Viewport } from './viewport.ts';
@@ -37,6 +39,8 @@ export interface ReaderOverlayOptions {
   /** Optional viewport-coordinate host below application controls, rather than the top layer. */
   paintHost?: HTMLElement;
   clipRoot?: HTMLElement;
+  /** Host-owned title; enables the verified title/body/gutter surface, not page ink. */
+  titleRoot?: HTMLElement;
   documentUrl: string;
   title: string;
   transport: (message: HostMessage) => boolean;
@@ -95,11 +99,13 @@ export class WebInkOverlay implements WebInkAPI {
   private warnings = new Set<string>();
   private lastDimensions: { width: number; height: number } | null = null;
   private browserCapture: { target: Element; id: number } | null = null;
+  private readerSurface?: ReaderInkSurface;
 
   constructor(private readonly win: Window, private readonly options?: ReaderOverlayOptions) {
     for (const host of [options?.paintHost, options?.clipRoot]) if (host && (host.ownerDocument !== win.document || !host.contains(options!.readerRoot))) throw new Error('Ink hosts must contain the owned reader');
     this.document = this.emptyDocument();
-    this.anchors = new ContentAnchorResolver(win, this.anchorNotice, this.onResizeObserved, options?.readerRoot);
+    if (options?.titleRoot && options.clipRoot) this.readerSurface = new ReaderInkSurface(options.readerRoot, options.titleRoot, options.clipRoot);
+    this.anchors = new ContentAnchorResolver(win, this.anchorNotice, this.onResizeObserved, options?.readerRoot, this.readerSurface);
     this.gestures = new GestureController(this.document, this.anchors);
     this.root = win.document.createElement('div');
     this.root.dataset.webinkOverlay = '1';
@@ -162,7 +168,7 @@ export class WebInkOverlay implements WebInkAPI {
       this.listen(this.win, 'resize', this.onViewport);
       this.listen(doc, 'load', this.onGeometry, { capture: true });
       if (doc.fonts) this.listen(doc.fonts, 'loadingdone', this.onGeometry);
-      this.listen(this.win, 'blur', this.cancel);
+      this.listen(this.win, 'blur', this.onBrowserInterrupt);
       this.listen(this.win, 'pagehide', this.onPageHide);
       this.listen(this.win, 'pageshow', this.scheduleDraw);
       this.listen(doc, 'visibilitychange', this.onVisibility);
@@ -182,6 +188,7 @@ export class WebInkOverlay implements WebInkAPI {
         if (pageChanged || detached) this.scheduleDraw();
       });
       this.mutation.observe(this.options?.readerRoot ?? doc, { childList: true, subtree: true, characterData: true, attributes: true });
+      if (this.options?.titleRoot) this.mutation.observe(this.options.titleRoot, { childList: true, subtree: true, characterData: true, attributes: true });
       if (typeof ResizeObserver !== 'undefined') this.resize = new ResizeObserver(this.onResizeObserved);
       this.attach();
       // Also covers sites that replace History methods after injection.
@@ -218,13 +225,21 @@ export class WebInkOverlay implements WebInkAPI {
     this.guard(() => {
       const next = validateConfiguration(options);
       this.checkRoute();
+      if (this.options && !this.nativeInput && next.attachmentMode === undefined &&
+        (['tool', 'color', 'width', 'enabled'] as const).every(key => next[key] === undefined || next[key] === this.configuration[key])) {
+        this.scheduleDraw(); return; // An unchanged browser host render is not a contact barrier.
+      }
       const nativeRefresh = this.nativeRenderer === 'native' && this.nativeEpoch !== null;
       if (nativeRefresh && this.nativeRevision === Number.MAX_SAFE_INTEGER) {
         throw new Error('Native frame revision exhausted; bind a new session');
       }
+      // Browser host refreshes must not erase already received pen samples.
+      // Native configuration remains an explicit cancellation/freshness barrier.
+      this.finishBrowserContact();
       this.cancel();
       this.discardPresentations();
       this.configuration = { ...this.configuration, ...next };
+      this.updateTouchScope();
       if (next.attachmentMode !== undefined) this.anchors.configure(next.attachmentMode);
       this.postNativeState();
       // Even {} is a refresh barrier. Delayed old ready tokens can cross the RPC
@@ -597,11 +612,13 @@ export class WebInkOverlay implements WebInkAPI {
   }
   destroy(): void {
     if (this.destroyed) return;
+    this.finishBrowserContact();
     this.flush();
     this.cancel();
     this.discardPresentations();
     this.clearSaveTimer();
     this.destroyed = true;
+    this.updateTouchScope();
     this.postNativeState();
     this.nativeEpoch = null;
     this.resetNativeFrames();
@@ -639,7 +656,9 @@ export class WebInkOverlay implements WebInkAPI {
   }
   private lastPen: { target: EventTarget | null; at: number } | null = null;
   private suppressPenClick = (event: Event): void => {
-    if (!this.options || !(event.target instanceof Node) || !this.options.readerRoot.contains(event.target)) return;
+    if (!this.options || !(event.target instanceof Element)) return;
+    const pointer = event as PointerEvent;
+    if (this.readerSurface ? !this.readerSurface.accepts(event.target, pointer.clientX, pointer.clientY) : !this.options.readerRoot.contains(event.target)) return;
     if ((event as PointerEvent).pointerType === 'pen' && this.canDraw() ||
       this.lastPen && Date.now() - this.lastPen.at < 800 && this.lastPen.target === event.target) {
       event.preventDefault(); event.stopImmediatePropagation();
@@ -649,16 +668,18 @@ export class WebInkOverlay implements WebInkAPI {
     if (this.destroyed || this.nativeInput || event.pointerType !== 'pen') return;
     this.checkRoute();
     if (!this.canDraw()) return;
-    if (event.type === 'pointerdown' && this.options && (!(event.target instanceof Element) || !this.options.readerRoot.contains(event.target) || event.target.closest('input,textarea,select,button,form,[contenteditable],dialog'))) return;
+    if (event.type === 'pointerdown' && this.options && (!(event.target instanceof Element) ||
+      (this.readerSurface ? !this.readerSurface.accepts(event.target, event.clientX, event.clientY) : !this.options.readerRoot.contains(event.target) || Boolean(event.target.closest('input,textarea,select,button,form,[contenteditable],dialog'))))) return;
     if (event.type === 'pointerdown' && event.button !== 0 && event.button !== 5) return;
     if (event.type !== 'pointerdown' && this.gestures.pointerId !== event.pointerId) return;
     this.lastPen = { target: event.target, at: Date.now() };
     if (event.cancelable) event.preventDefault();
     event.stopImmediatePropagation();
-    if (event.type === 'pointercancel' || event.type === 'lostpointercapture') { this.cancel(); return; }
+    if (event.type === 'pointercancel' || event.type === 'lostpointercapture') { this.onBrowserInterrupt(); return; }
     this.guard(() => {
       const type = event.type === 'pointerdown' ? 'down' : event.type === 'pointerup' ? 'up' : 'move';
       if (type === 'down') {
+        this.finishBrowserContact();
         this.cancel();
         if (event.target instanceof Element) {
           try {
@@ -667,17 +688,34 @@ export class WebInkOverlay implements WebInkAPI {
           } catch { /* Synthetic events and some DOM targets cannot capture; window listeners remain. */ }
         }
       }
-      if (type === 'move' && event.buttons === 0 && event.pressure === 0) { this.cancel(); return; }
+      if (type === 'move' && event.buttons === 0 && event.pressure === 0) { this.onBrowserInterrupt(); return; }
       const viewport = readViewport(this.win);
+      const inside = (sample: PointerEvent) => !this.readerSurface || this.readerSurface.targetAt(sample.clientX, sample.clientY) !== null;
+      if (!inside(event)) { this.onBrowserInterrupt(); return; }
       this.beginResolution();
       const samples = type === 'move' && typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
       for (const sample of samples) {
+        if (!inside(sample)) { this.onBrowserInterrupt(); return; }
         this.handlePointer('move', event.pointerId, clientPoint(sample.clientX, sample.clientY, sample.pressure, viewport), false, false);
       }
       this.handlePointer(type, event.pointerId, clientPoint(event.clientX, event.clientY, event.pressure, viewport),
         event.button === 5 || Boolean(event.buttons & 32), false);
       if (type === 'up') this.releaseCapture();
     }, true);
+  };
+  private updateTouchScope(): void {
+    const root = this.readerSurface?.viewport ?? this.options?.readerRoot;
+    if (this.canDraw() && !this.nativeInput) root?.setAttribute('data-ink-enabled', '');
+    else root?.removeAttribute('data-ink-enabled');
+  }
+  private finishBrowserContact(): void {
+    if (this.nativeInput || !this.options || this.gestures.pointerId === null) return;
+    this.guard(() => { if (this.gestures.finish()) this.changed(); }, true);
+    this.releaseCapture();
+  }
+  private onBrowserInterrupt = (): void => {
+    this.finishBrowserContact(); this.cancel();
+    if (this.options && !this.nativeInput) this.flush();
   };
   private releaseCapture(): void {
     const capture = this.browserCapture;
@@ -757,7 +795,7 @@ export class WebInkOverlay implements WebInkAPI {
       this.scheduleDraw();
     });
   };
-  private onPageHide = (): void => { this.cancel(); this.flush(); };
+  private onPageHide = (): void => { this.onBrowserInterrupt(); this.flush(); };
   private onVisibility = (): void => {
     if (this.win.document.visibilityState === 'hidden') this.onPageHide();
     else this.scheduleDraw();
@@ -1004,9 +1042,12 @@ export class WebInkOverlay implements WebInkAPI {
       context.clearRect(0, 0, size.width, size.height);
       context.setTransform(size.width / viewport.width, 0, 0, size.height / viewport.height, 0, 0);
       if (this.options) {
-        const box = this.options.readerRoot.getBoundingClientRect(), clip = this.options.clipRoot?.getBoundingClientRect() || box;
-        const left = Math.max(box.left, clip.left), top = Math.max(box.top, clip.top);
-        context.beginPath(); context.rect(left - viewport.offsetLeft, top - viewport.offsetTop, Math.max(0, Math.min(box.right, clip.right) - left), Math.max(0, Math.min(box.bottom, clip.bottom) - top)); context.clip();
+        if (this.readerSurface) this.readerSurface.clip(context, viewport.offsetLeft, viewport.offsetTop);
+        else {
+          const box = this.options.readerRoot.getBoundingClientRect(), clip = this.options.clipRoot?.getBoundingClientRect() || box;
+          const left = Math.max(box.left, clip.left), top = Math.max(box.top, clip.top);
+          context.beginPath(); context.rect(left - viewport.offsetLeft, top - viewport.offsetTop, Math.max(0, Math.min(box.right, clip.right) - left), Math.max(0, Math.min(box.bottom, clip.bottom) - top)); context.clip();
+        }
       }
     };
     if (this.committedDirty) {

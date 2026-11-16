@@ -106,7 +106,8 @@ export class Articles {
       condition = db`${condition} AND a.published_at>${q.after}::text::timestamptz`;
     if (q.q) {
       const pattern = `%${q.q.replace(/[\\%_]/g, "\\$&")}%`;
-      condition = db`${condition} AND (to_tsvector('simple',a.title || ' ' || a.content_text) @@ plainto_tsquery('simple',${q.q}) OR a.title ILIKE ${pattern} OR a.content_text ILIKE ${pattern})`;
+      // Cheap literal matches first; retain the FTS-only union and indexable OR.
+      condition = db`${condition} AND (a.title ILIKE ${pattern} OR a.content_text ILIKE ${pattern} OR to_tsvector('simple',a.title || ' ' || a.content_text) @@ plainto_tsquery('simple',${q.q}))`;
     }
     if (withCursor && q.cursor) {
       let value: { date: string; id: string };

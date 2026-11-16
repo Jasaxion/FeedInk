@@ -98,13 +98,14 @@ async function pngRaster(page: Page, bytes: Uint8Array): Promise<Raster> {
 }
 
 // Trusted Chromium pen events, not direct calls to the ink engine or fabricated saved documents.
-async function penPath(page: Page, points: { x: number; y: number; pressure: number }[]) {
+async function penPath(page: Page, points: { x: number; y: number; pressure: number }[], duringContact?: () => Promise<void>) {
   const cdp = await page.context().newCDPSession(page);
   try {
     const first = points[0];
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: first.x, y: first.y, pointerType: 'pen' });
     await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: first.x, y: first.y, button: 'left', buttons: 1, clickCount: 1, pointerType: 'pen', force: first.pressure });
     for (const point of points.slice(1)) await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'left', buttons: 1, pointerType: 'pen', force: point.pressure });
+    await duringContact?.();
     const last = points[points.length - 1];
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: last.x, y: last.y, button: 'left', buttons: 0, clickCount: 1, pointerType: 'pen', force: 0 });
   } finally { await cdp.detach(); }
@@ -269,6 +270,116 @@ test('browser pen preserves pressure, scopes input to the reader, and whole-stro
   expect((await getAnnotation(api, second.id)).ink?.strokes ?? []).toEqual([]);
   await openAnnotations(page, first.id);
   expect((await getAnnotation(api, first.id)).ink!.strokes).toEqual([both.ink!.strokes[1]]);
+});
+
+test('trusted pen retains title/body/image/gaps/gutters through save acknowledgement, scroll and reopen, excluding UI', async ({ page, browserName }, testInfo) => {
+  test.skip(browserName !== 'chromium' || testInfo.project.name !== 'annotations', 'One hosted Chromium trusted-input witness, not physical hardware certification');
+  test.setTimeout(100_000);
+  const api = page.context().request, session = await createAnnotationUser(api);
+  const { first } = await seedAnnotationArticles(api, session);
+  // Enlarge the owned one-pixel image fixture through the supported layout setting;
+  // neither article HTML nor its canonical source identity is replaced by this test.
+  expect((await api.patch('/api/settings', { headers: csrf(session), data: { customCss: 'img { padding:40px } p { margin-bottom:80px }', theme: 'light' } })).status()).toBe(200);
+  await openAnnotations(page, first.id);
+  const original = await getAnnotation(api, first.id);
+  await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+  await page.getByTestId('ink-toggle').click();
+  const toolbar = page.getByTestId('annotation-toolbar');
+  await toolbar.getByLabel('手写选项', { exact: true }).click();
+  await expect(toolbar.getByRole('radio', { name: '黑色', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await toolbar.getByRole('radio', { name: '蓝色', exact: true }).click();
+  await toolbar.getByRole('radio', { name: '黑色', exact: true }).click();
+  await toolbar.getByLabel('手写选项', { exact: true }).click();
+  await expect(page.locator('.reader-scroll')).toHaveAttribute('data-ink-enabled', '');
+  expect(await page.locator('.reader-scroll').evaluate(node => getComputedStyle(node).touchAction)).toBe('none');
+  type Region = 'title' | 'body' | 'image' | 'gap' | 'left' | 'right';
+  async function pathFor(region: Region) {
+    const target = region === 'title' ? page.locator('[data-ink-title]') : page.getByTestId('reader-content').locator(region === 'image' ? 'img' : 'p').first();
+    await target.scrollIntoViewIfNeeded();
+    const box = await target.boundingBox(), viewport = await page.locator('.reader-scroll').boundingBox();
+    if (!box || !viewport) throw new Error(`No ${region} geometry`);
+    const x = region === 'left' ? viewport.x + 7 : region === 'right' ? viewport.x + viewport.width - 16 : box.x + 12;
+    const y = region === 'gap' ? box.y + box.height + 15 : box.y + 12;
+    return [0, 1, 2].map(i => ({ x: x + (region === 'right' ? -1 : 1) * i * 5, y: y + i * 3, pressure: 0.25 + i * 0.25 }));
+  }
+  async function paintedAt(point: { x: number; y: number }, active = false) {
+    return page.locator('[data-webink-overlay]').evaluate((host, { point, active }) => {
+      const canvas = host.shadowRoot!.querySelectorAll('canvas')[active ? 1 : 0], box = canvas.getBoundingClientRect();
+      const x = Math.round((point.x - box.left) * canvas.width / box.width), y = Math.round((point.y - box.top) * canvas.height / box.height);
+      if (x < 4 || y < 4 || x + 4 >= canvas.width || y + 4 >= canvas.height) return false;
+      const bytes = canvas.getContext('2d')!.getImageData(x - 4, y - 4, 9, 9).data;
+      for (let i = 0; i < bytes.length; i += 4) if (bytes[i] < 20 && bytes[i + 1] < 20 && bytes[i + 2] < 20 && bytes[i + 3] > 0) return true;
+      return false;
+    }, { point, active });
+  }
+  const saveFault = await annotationSaveFault();
+  try {
+    await saveFault.hold(first.id);
+    const title = await pathFor('title'); await penPath(page, title);
+    await expect.poll(() => paintedAt(title[1])).toBe(true);
+    await expect.poll(async () => (await saveFault.status()).held).toBe(1);
+    const body = await pathFor('body');
+    await penPath(page, body, async () => {
+      await expect.poll(() => paintedAt(body[1], true)).toBe(true);
+      await saveFault.release();
+      await expect(page.getByTestId('annotation-status')).toContainText('服务器已确认');
+      expect((await getAnnotation(api, first.id)).ink!.strokes).toHaveLength(1);
+      await expect.poll(() => paintedAt(body[1], true)).toBe(true); // ACK must not retire the ongoing contact.
+    });
+    await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(2);
+    await expect.poll(() => paintedAt(body[1])).toBe(true);
+    for (const [index, region] of (['image', 'gap', 'left', 'right'] as const).entries()) {
+      const points = await pathFor(region); await penPath(page, points);
+      await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(index + 3);
+      await expect.poll(() => paintedAt(points[1])).toBe(true);
+    }
+    const interrupted = (await pathFor('body')).map(point => ({ ...point, y: point.y + 30 }));
+    await penPath(page, interrupted, async () => {
+      // Trusted received samples, with a deterministic host interruption (not a
+      // claim to emulate hardware palm rejection). Previously blur discarded them.
+      await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    });
+    await expect.poll(async () => (await getAnnotation(api, first.id)).ink?.strokes.length).toBe(7);
+    await expect.poll(() => paintedAt(interrupted[1])).toBe(true);
+    const saved = await getAnnotation(api, first.id);
+    expect(saved.context).toEqual(original.context);
+    expect(saved.ink!.strokes.map(stroke => stroke.color)).toEqual(Array(7).fill('#000000'));
+    expect(saved.ink!.strokes[1].anchor?.kind).toBe('content-v1');
+    expect(saved.ink!.strokes[0].anchor?.kind).toBe('surface-v1');
+    expect(saved.ink!.strokes.every(stroke => stroke.points.length >= 3)).toBe(true);
+    expect(page.context().pages()).toHaveLength(1); // Title and image pen-up cannot activate links/previews.
+    await expect(page.getByRole('dialog', { name: '图片预览', exact: true })).toHaveCount(0);
+
+    // A temporary UI card uses the same production exclusion marker; its text never
+    // becomes original article identity or a pen target. No provider/data is contacted.
+    await page.locator('.reader-metadata').evaluate(node => {
+      const card = document.createElement('section'); card.id = 'owned-transient-pen-witness'; card.dataset.readingTransient = ''; card.textContent = '临时 UI（自有夹具）'; card.style.padding = '30px'; node.append(card);
+    });
+    await page.locator('#owned-transient-pen-witness').scrollIntoViewIfNeeded();
+    const card = (await page.locator('#owned-transient-pen-witness').boundingBox())!;
+    await penPath(page, [{ x: card.x + 20, y: card.y + 20, pressure: .5 }, { x: card.x + 30, y: card.y + 24, pressure: .6 }]);
+    await page.locator('#owned-transient-pen-witness').evaluate(node => node.remove());
+    const sidebar = (await page.locator('.sidebar').boundingBox())!;
+    await penPath(page, [{ x: sidebar.x + 2, y: sidebar.y + sidebar.height / 2, pressure: .5 }, { x: sidebar.x + 3, y: sidebar.y + sidebar.height / 2 + 6, pressure: .5 }]);
+    const outside = (await page.getByTestId('annotation-toggle').boundingBox())!;
+    await penPath(page, [{ x: outside.x + 8, y: outside.y + 8, pressure: .5 }]);
+    await expect(page.getByTestId('annotations-panel')).toBeVisible();
+    await page.getByRole('button', { name: '整篇备注', exact: true }).click();
+    const editor = (await page.getByTestId('note-editor').boundingBox())!;
+    await penPath(page, [{ x: editor.x + 10, y: editor.y + 15, pressure: .5 }, { x: editor.x + 20, y: editor.y + 15, pressure: .5 }]);
+    await page.getByRole('button', { name: '保存备注', exact: true }).click();
+    await expect(page.getByTestId('annotation-status')).toContainText('服务器已确认');
+    expect((await getAnnotation(api, first.id)).ink!.strokes).toEqual(saved.ink!.strokes);
+    await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+    await page.locator('.reader-scroll').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    expect(await page.locator('.reader-scroll').evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+    await page.reload(); await expect(page.getByTestId('ink-toggle')).toBeEnabled();
+    for (const region of ['title', 'body', 'image', 'gap', 'left', 'right'] as const) {
+      const points = await pathFor(region); await expect.poll(() => paintedAt(points[1])).toBe(true);
+    }
+    expect((await getAnnotation(api, first.id)).ink!.strokes).toEqual(saved.ink!.strokes);
+    expect((await getAnnotation(api, first.id)).context).toEqual(original.context);
+  } finally { await saveFault.reset(); }
 });
 
 test('conditional writes conflict atomically and matching JSON restores preserve raw notes across owned ID remapping', async ({ request, playwright }) => {

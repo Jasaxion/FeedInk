@@ -179,6 +179,12 @@ test('ai PostgreSQL: config, isolation, durable jobs, completeness, fencing and 
       const titleResult = await run(titleJob.job.id);
       assert.equal(titleResult.status, 'skipped'); assert.equal(titleResult.detected_language, 'en');
       assert.equal(fixture.requests.length, beforeTitle, 'agreeing short title and old 240-character remainder need no provider');
+      const chinese = supportedAiLanguageSamples.find(sample => sample.language === 'zh-CN')!;
+      const chineseSource = await article(a, `<p>${chinese.paragraph}</p>`, chinese.title), beforeChinese = fixture.requests.length;
+      const chineseJob = await ai.enqueue(a.id, chineseSource, { operation: 'translate', mode: 'feed', targetLanguage: 'zh-CN' });
+      const chineseResult = await run(chineseJob.job.id);
+      assert.equal(chineseResult.status, 'skipped'); assert.equal(chineseResult.detected_language, 'zh-CN');
+      assert.equal(fixture.requests.length, beforeChinese, 'Chinese title and body at the default target need no provider');
       for (const { name, text } of shortForeignAiFragments) {
         const foreign = await article(a, `<p>${englishAiParagraph}</p><p>${text}</p>`, title), beforeForeign = fixture.requests.length;
         const job = await ai.enqueue(a.id, foreign, { operation: 'translate', mode: 'feed', targetLanguage: 'en' });

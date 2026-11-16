@@ -1,6 +1,7 @@
 // Hosted-only synthetic UI acceptance. Build the integrated web/shared/ink workspaces first.
 import assert from 'node:assert/strict';
 import { aiFixture } from './ai-fixture.mjs';
+import { closeAiSettings, openAiSettings, signInToAiReader } from './ai-browser-ui.mjs';
 import { aiResultsRegressions } from './ai-results-browser.mjs';
 import { aiReadingRegressions } from './ai-reading-regressions.mjs';
 import { deferred, emptyAnnotationDocument } from './audit-fixture.mjs';
@@ -36,7 +37,6 @@ async function fulltext(page, label) {
   if (await direct.count()) await direct.click();
   else { await page.getByRole('button', { name: '更多文章操作', exact: true }).click(); await page.getByRole('button', { name: label, exact: true }).click(); }
 }
-async function inAppPath(page, path) { await page.evaluate(path => { history.pushState({}, '', path); window.dispatchEvent(new PopStateEvent('popstate')); }, path); }
 async function ignoreAiAbort(context) {
   await context.addInitScript(() => { const original = window.fetch; window.fetch = (input, init) => String(input).includes('/ai') ? original(input, { ...init, signal: undefined }) : original(input, init); });
 }
@@ -73,7 +73,7 @@ try {
     assert.equal(ai.calls.length, 0);
   }, async ({ fixture }) => { fixture.control.settings.theme = 'eink'; fixture.control.settings.hideToolbar = true; });
   await scenario('masked config, omitted/replaced/cleared keys, failed draft preservation, explicit saved-config test', async ({ page, ai }) => {
-    await inAppPath(page, '/settings/ai');
+    await openAiSettings(page, expect);
     const settings = page.getByRole('form', { name: 'AI 模型设置' });
     await expect(page.getByTestId('ai-key-status')).toHaveText('已保存密钥（不可读取）');
     await expect(settings.getByLabel('替换 API 密钥')).toHaveValue('');
@@ -106,12 +106,12 @@ try {
   await scenario('saving a new configuration retires the previous selected request without losing saved drafts', async ({ page, ai, gate }) => {
     ai.autoComplete = true; ai.holdPost = gate(); const held = ai.holdPost;
     await startAi(page); await expect.poll(() => counts(ai, 'post')).toBe(1);
-    await inAppPath(page, '/settings/ai?article=one');
+    await openAiSettings(page, expect);
     const settings = page.getByRole('form', { name: 'AI 模型设置' });
     await settings.getByLabel('模型名称').fill('replacement-model');
     await settings.getByRole('button', { name: '保存 AI 配置', exact: true }).click();
     await expect(settings.getByRole('status')).toContainText('AI 配置已保存');
-    await inAppPath(page, '/?article=one'); held.resolve();
+    await closeAiSettings(page, expect); held.resolve();
     await page.waitForTimeout(200); await expect(page.getByTestId('ai-card')).toHaveCount(0);
     await startAi(page); await expect(page.getByTestId('ai-summary')).toBeVisible(); assert.equal(ai.providerCalls, 2);
   }, async ({ context }) => ignoreAiAbort(context));
@@ -248,39 +248,46 @@ try {
   await scenario('late config and paid responses cannot cross auth epochs or accounts', async ({ page, fixture, ai, gate }) => {
     ai.holdConfig = gate(); const config = ai.holdConfig;
     await page.getByRole('button', { name: 'AI 摘要', exact: true }).click(); await expect.poll(() => counts(ai, 'config')).toBe(1);
+    fixture.control.loggedIn = false;
     await page.evaluate(() => window.dispatchEvent(new Event('feedink:unauthorized')));
     await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible();
     config.resolve();
-    await page.getByLabel('邮箱', { exact: true }).fill('bob@example.test'); await page.getByLabel('密码', { exact: true }).fill('synthetic-password');
-    await page.getByRole('button', { name: '登录', exact: true }).click();
-    await inAppPath(page, '/?article=one'); await expect(page.getByTestId('reader-content')).toHaveAttribute('data-annotation-context', 'a'.repeat(64));
+    await signInToAiReader(page, expect, 'bob');
     await expect(page.getByTestId('ai-card')).toHaveCount(0);
     assert.equal(counts(ai, 'post'), 0);
     ai.autoComplete = true; ai.holdPost = gate(); const paid = ai.holdPost;
     await startAi(page); await expect.poll(() => counts(ai, 'post')).toBe(1);
+    fixture.control.loggedIn = false;
     await page.evaluate(() => window.dispatchEvent(new Event('feedink:unauthorized')));
     await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible();
     paid.resolve();
-    await page.getByLabel('邮箱', { exact: true }).fill('bob@example.test'); await page.getByLabel('密码', { exact: true }).fill('synthetic-password');
-    await page.getByRole('button', { name: '登录', exact: true }).click();
-    await inAppPath(page, '/?article=one'); await expect(page.getByTestId('reader-content')).toBeVisible();
+    await signInToAiReader(page, expect, 'bob');
     await expect(page.getByTestId('ai-summary')).toHaveCount(0); assert.equal(fixture.control.user.id, 'bob');
   }, async ({ context }) => ignoreAiAbort(context));
-  await scenario('offline and unconfigured actions are explicit, do not request paid jobs or background config', async ({ page, context, ai }) => {
-    ai.config.enabled = false; ai.config.hasKey = false;
+  await scenario('unconfigured action leads to UI configuration and explicit generation; offline action sends nothing', async ({ page, context, ai }) => {
     await page.getByRole('button', { name: 'AI 摘要', exact: true }).click();
     await expect(page.getByTestId('ai-card')).toContainText('启用模型并保存密钥'); assert.equal(counts(ai, 'post'), 0);
+    await page.getByTestId('ai-card').getByRole('button', { name: 'AI 模型设置', exact: true }).click();
+    const settings = page.getByRole('form', { name: 'AI 模型设置' });
+    await settings.getByLabel('启用 AI 阅读', { exact: true }).check();
+    await settings.getByLabel('替换 API 密钥', { exact: true }).fill('fixture-only-key-not-a-secret');
+    await settings.getByRole('button', { name: '保存 AI 配置', exact: true }).click();
+    await expect(settings.getByRole('status')).toContainText('AI 配置已保存');
+    assert.equal(ai.providerCalls, 0); assert.equal(counts(ai, 'test'), 0);
+    await closeAiSettings(page, expect);
+    ai.autoComplete = true; await startAi(page);
+    await expect(page.getByTestId('ai-summary')).toBeVisible(); assert.equal(ai.providerCalls, 1);
     await page.getByRole('button', { name: '收起 AI', exact: true }).click();
     await context.setOffline(true); await page.evaluate(() => window.dispatchEvent(new Event('offline')));
     const calls = ai.calls.length;
     await page.getByRole('button', { name: 'AI 双语翻译', exact: true }).click();
     await expect(page.getByTestId('ai-card')).toContainText('离线时无法请求'); assert.equal(ai.calls.length, calls);
     await context.setOffline(false);
-  });
+  }, async ({ fixture }) => { fixture.ai.config.enabled = false; fixture.ai.config.hasKey = false; });
   await scenario('demo never probes config or invokes AI', async ({ page, ai }) => {
     await page.getByRole('button', { name: 'AI 摘要', exact: true }).click();
     await expect(page.getByTestId('ai-card')).toContainText('演示账号不能调用'); assert.equal(ai.calls.length, 0);
-    await inAppPath(page, '/settings/ai'); await expect(page.getByRole('form', { name: 'AI 模型设置' })).toContainText('演示账号不能配置密钥'); assert.equal(ai.calls.length, 0);
+    await openAiSettings(page, expect); await expect(page.getByRole('form', { name: 'AI 模型设置' })).toContainText('演示账号不能配置密钥'); assert.equal(ai.calls.length, 0);
   }, async ({ fixture }) => { fixture.control.user.isDemo = true; });
   await scenario('webpage mode is rejected by the displayed-source gate without AI requests', async ({ page, ai }) => {
     await page.getByRole('button', { name: '更多文章操作', exact: true }).click();

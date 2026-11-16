@@ -1,3 +1,6 @@
+/** FeedInk modifications (Apache-2.0): retain received browser samples when the
+ * host interrupts a contact; native cancellation remains explicit.
+ * Adapted from WebInk; see packages/ink/LICENSE and repository NOTICE. */
 import { appendStrokePoint } from './geometry.ts';
 import { InkDocument } from './document.ts';
 import { legacyResolver, sweepHitsFrame, type FrameResolver } from './frames.ts';
@@ -66,11 +69,16 @@ export class GestureController {
     // A physical pen-up reports zero pressure, not an intentional zero-width tail.
     const final = point.p === 0 ? { ...point, p: this.active.last.p } : point;
     this.move(id, final);
+    return this.finish();
+  }
+  /** Retain received browser samples at an interruption, without inventing a pen-up. */
+  finish(): boolean {
     const gesture = this.active;
-    this.active = null;
     if (!gesture) return false;
-    if (gesture.stroke) { this.document.add(gesture.stroke); return true; }
-    return this.document.erase(gesture.erased);
+    this.revalidateErasure();
+    const changed = gesture.stroke ? (this.document.add(gesture.stroke), true) : this.document.erase(gesture.erased);
+    this.active = null;
+    return changed;
   }
   /** Pending erasures are transactions against the frames actually hit, not
    * permission to delete the same IDs after their content has disappeared. */

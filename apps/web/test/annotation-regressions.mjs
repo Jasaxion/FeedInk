@@ -285,6 +285,84 @@ export async function annotationRegressions(browser, expect) {
     await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
     await expect(page.locator('.annotation-list-item')).toHaveCount(0);
   });
+  await scenario('batch clears only the displayed mode/hash through offline drafts and late ACKs, retaining text/source/other contexts', async ({ page, state, fixture }) => {
+    await draw(page); await expect.poll(() => state.document.ink?.strokes.length).toBe(1);
+    await page.getByRole('button', { name: '退出手写', exact: true }).click(); await page.getByTestId('annotation-toggle').click();
+    await saveNote(page, state, 'text retained by ink-only clear');
+    const latest = structuredClone(state.document);
+    const historical = structuredClone(latest); historical.contentHash = historical.context.contentHash = 'c'.repeat(64); historical.context.contentHtml = '<p>保留的历史正文</p>';
+    const fulltext = structuredClone(latest); fulltext.contentHash = fulltext.context.contentHash = 'b'.repeat(64); fulltext.context.mode = 'fulltext'; fulltext.context.contentHtml = '<p>保留的全文</p>';
+    const other = structuredClone(latest); other.context.articleId = 'two'; other.context.title = '另一文章';
+    const key = doc => `${doc.context.articleId}:${doc.context.mode}:${doc.contentHash}`;
+    const docs = new Map([latest, historical, fulltext, other].map(doc => [key(doc), structuredClone(doc)]));
+    const untouched = [fulltext, other].map(doc => structuredClone(doc));
+    let getHold = null, heldGet = false, ackHold = null, heldAck = false;
+    fixture.route(/^\/api\/articles\/(?:one|two)\/annotations$/, async ({ request, url, body, json }) => {
+      const id = url.pathname.split('/')[3], mode = url.searchParams.get('mode');
+      const payload = request.method === 'PUT' ? await body() : null;
+      const hash = payload?.contentHash || url.searchParams.get('contentHash') || (mode === 'fulltext' ? fulltext.contentHash : latest.contentHash);
+      const contextKey = `${id}:${mode}:${hash}`, current = docs.get(contextKey);
+      assert.ok(current, 'only fixture-owned retained contexts may be read or written');
+      if (request.method === 'PUT') {
+        if (request.headers['if-match'] !== `"${current.revision}"`) return json({ error: { code: 'ANNOTATION_CONFLICT', message: 'fixture CAS' } }, 412);
+        const next = { ...current, ...payload, revision: current.revision + 1 }; docs.set(contextKey, next);
+        if (ackHold) { heldAck = true; const hold = ackHold; ackHold = null; await hold.promise; }
+        return json(next);
+      }
+      if (getHold) { heldGet = true; const hold = getHold; getHold = null; await hold.promise; }
+      return json({ ...current, versions: [latest, historical].map(doc => ({ contentHash: doc.contentHash, revision: doc.revision, updatedAt: '', markCount: doc.marks.length, strokeCount: doc.ink.strokes.length })) });
+    });
+    const holds = [], prompts = [];
+    const confirmBatch = async label => {
+      page.once('dialog', async dialog => { prompts.push(dialog.message()); await dialog.accept(); });
+      await page.getByRole('button', { name: label, exact: true }).click();
+    };
+    try {
+      await page.reload(); await page.getByTestId('annotation-toggle').click();
+      await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+      await page.getByText('正文版本 · 当前正文', { exact: true }).click();
+      const load = deferred(); holds.push(load); getHold = load;
+      await page.getByRole('button', { name: /^cccccccccccc ·/ }).click();
+      await expect.poll(() => heldGet).toBe(true);
+      await expect(page.getByRole('button', { name: '删除全部批注', exact: true })).toBeDisabled();
+      load.resolve(); await expect(page.getByTestId('reader-content')).toContainText('保留的历史正文');
+      await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+      await confirmBatch('仅删除手写批注');
+      await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
+      await expect(page.getByTestId('annotations-panel')).toContainText('手写 0 笔');
+      await expect(page.getByTestId('annotations-panel')).toContainText('text retained by ink-only clear');
+      assert.deepEqual(docs.get(key(historical)).ink, historical.ink, 'offline edit is not a server success');
+      await page.evaluate(() => window.dispatchEvent(new Event('online')));
+      await expect.poll(() => docs.get(key(historical)).ink).toBe(null);
+      assert.deepEqual(docs.get(key(historical)).marks, historical.marks);
+      assert.deepEqual(docs.get(key(historical)).context, historical.context);
+      assert.deepEqual(docs.get(key(latest)), latest, 'clearing the displayed history never touches latest RSS');
+      await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+      await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
+      await expect(page.getByTestId('reader-content')).toContainText('第一篇');
+      const ack = deferred(); holds.push(ack); ackHold = ack;
+      await newNote(page, 'save acknowledgement delayed before batch clear');
+      await page.getByRole('button', { name: '保存备注', exact: true }).click();
+      await expect.poll(() => heldAck).toBe(true);
+      await confirmBatch('删除全部批注');
+      await expect(page.getByTestId('annotations-panel')).toContainText('文字批注（0） · 手写 0 笔');
+      await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+      ack.resolve();
+      await expect.poll(() => ({ ink: docs.get(key(latest)).ink, marks: docs.get(key(latest)).marks })).toEqual({ ink: null, marks: [] });
+      await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+      await page.getByTestId('ink-toggle').click();
+      await expect(page.getByRole('button', { name: '撤销笔迹', exact: true })).toBeDisabled();
+      await expect(page.getByRole('button', { name: '重做笔迹', exact: true })).toBeDisabled();
+      await page.reload(); await page.getByTestId('annotation-toggle').click();
+      await expect(page.getByTestId('annotations-panel')).toContainText('文字批注（0） · 手写 0 笔');
+      assert.deepEqual(docs.get(key(latest)).context, latest.context);
+      assert.ok(docs.get(key(latest)).revision > latest.revision, 'empty revision-bearing row is a tombstone, not source deletion');
+      assert.deepEqual(docs.get(key(historical)).marks, historical.marks);
+      for (const doc of untouched) assert.deepEqual(docs.get(key(doc)), doc);
+      assert.equal(prompts.length, 2, 'one batch confirmation per action');
+      assert.match(prompts[0], /RSS 正文 · cccccccccccc/); assert.match(prompts[1], /RSS 正文 · aaaaaaaaaaaa/);
+    } finally { for (const hold of holds) hold.resolve(); }
+  });
   await scenario('floating editor receives focus after its first visible layout', async ({ page }) => {
     await page.getByRole('button', { name: '整篇备注', exact: true }).click();
     await expect(page.getByTestId('note-editor')).toBeFocused();

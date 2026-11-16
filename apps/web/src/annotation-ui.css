@@ -1,5 +1,8 @@
 /* Annotation controls are portal overlays: opening them never changes article flow. */
 .annotation-section{min-width:0}
+/* Set before pen-down: prevent Chromium's touch-pan cancellation on the same scope
+   as input/paint. Wheel/scrollbar scrolling remains available while ink is enabled. */
+[data-ink-enabled]{touch-action:none}
 .annotation-entry{position:relative;display:inline-flex;gap:2px;align-items:center}
 .annotation-float.annotation-notice{z-index:28;max-width:300px;border-color:var(--accent);font-size:12px}
 .annotation-notice strong{margin-right:6px}
@@ -24,6 +27,7 @@
 .annotation-float .annotation-swatch{width:38px;min-width:38px;padding:4px;color:#000;background:var(--paper)}
 .annotation-swatch-chip{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:24px;height:24px;border:1px solid #333;border-radius:50%;background:var(--swatch-color)}
 .annotation-swatch[aria-checked=true]{outline:2px solid var(--ink);outline-offset:-2px}
+.annotation-swatch-chip[data-color=black]{color:#fff;background:#000}
 .annotation-swatch[aria-checked=true] .annotation-swatch-chip{border:2px solid #000}
 .annotation-swatch:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 .annotation-delete-undo{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:4px 0;font-size:13px}
@@ -63,9 +67,11 @@
 [data-theme=eink] .annotation-float{border:2px solid #000;border-radius:0;background:#fff;box-shadow:none}
 [data-theme=eink] .annotation-float button[aria-pressed=true]{background:#000!important;color:#fff!important;border:2px solid #000}
 [data-theme=eink] .annotation-swatch-chip{background:#fff;border-color:#000}
-[data-theme=eink] .annotation-swatch-chip[data-color=green]{background:repeating-linear-gradient(0deg,#fff 0 4px,#000 4px 5px)}
-[data-theme=eink] .annotation-swatch-chip[data-color=blue]{background:repeating-linear-gradient(90deg,#fff 0 4px,#000 4px 5px)}
-[data-theme=eink] .annotation-swatch-chip[data-color=lilac]{background:repeating-linear-gradient(45deg,#fff 0 4px,#000 4px 5px)}
+/* Intentional accessible pattern exception to the global e-ink image reset. */
+:root[data-theme=eink] .annotation-swatch-chip[data-color=green]{background-image:repeating-linear-gradient(0deg,#fff 0 4px,#000 4px 5px)!important}
+:root[data-theme=eink] .annotation-swatch-chip[data-color=blue]{background-image:repeating-linear-gradient(90deg,#fff 0 4px,#000 4px 5px)!important}
+:root[data-theme=eink] .annotation-swatch-chip[data-color=lilac]{background-image:repeating-linear-gradient(45deg,#fff 0 4px,#000 4px 5px)!important}
+[data-theme=eink] .annotation-swatch-chip[data-color=black]{background-color:#000;color:#fff}
 [data-theme=eink] .annotation-swatch[aria-checked=true]{outline:2px solid #000}
 [data-theme=eink] .annotation-swatch:focus-visible{outline:3px solid #000;outline-offset:2px}
 [data-theme=eink] .annotation-swatch-chip svg{background:#fff;border-radius:50%;color:#000}

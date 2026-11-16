@@ -2,17 +2,14 @@
 import assert from 'node:assert/strict';
 import { deferred } from './audit-fixture.mjs';
 import { aiResultsFixture } from './ai-results-fixture.mjs';
+import { closeAiSettings, openAiSettings, signInToAiReader } from './ai-browser-ui.mjs';
 
 export async function aiResultsRegressions(browser, expect) {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('AI result fixtures require approved GitHub-hosted execution.');
   const calls = (fixture, method) => fixture.results.calls.filter(call => call.method === method);
   const panel = page => page.getByTestId('ai-results');
   const selected = (page, id) => panel(page).locator(`[data-result-id="${id}"] input[type=checkbox]`);
-  const changePath = (page, path) => page.evaluate(path => { history.pushState({}, '', path); window.dispatchEvent(new PopStateEvent('popstate')); }, path);
-  async function openSettings(page) {
-    await changePath(page, '/settings/ai?article=one');
-    await expect(page.getByRole('form', { name: 'AI 模型设置' })).toBeVisible();
-  }
+  const openSettings = page => openAiSettings(page, expect);
   async function openResults(page) {
     await page.getByRole('button', { name: '管理已保存 AI 结果', exact: true }).click();
     await expect(panel(page).getByTestId('ai-results-total')).toBeVisible();
@@ -165,7 +162,7 @@ export async function aiResultsRegressions(browser, expect) {
     fixture.results.rejectDelete = true; await confirmDelete(page);
     await expect(panel(page).getByRole('alert')).toContainText('已保留选择'); await expect(selected(page, id)).toBeChecked();
     await expect(page.getByTestId('ai-card')).toHaveCount(0); assert.equal(fixture.ai.jobs.has(id), true);
-    await changePath(page, '/?article=one'); await startSummary(page); await expect(page.getByTestId('ai-summary')).toBeVisible();
+    await closeAiSettings(page, expect); await startSummary(page); await expect(page.getByTestId('ai-summary')).toBeVisible();
     assert.equal(fixture.ai.providerCalls, 1, 'explicit retrieval can reuse the retained result after failed cleanup');
     assert.equal(fixture.ai.calls.some(call => call.kind === 'cancel'), false);
   });
@@ -175,7 +172,7 @@ export async function aiResultsRegressions(browser, expect) {
     const id = [...fixture.ai.jobs.keys()][0];
     await openSettings(page); await openResults(page); await selected(page, 'retained-23').check(); await confirmDelete(page);
     await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 0 条');
-    await changePath(page, '/?article=one'); await expect(page.getByTestId('ai-summary')).toBeVisible();
+    await closeAiSettings(page, expect); await expect(page.getByTestId('ai-summary')).toBeVisible();
     assert.equal(fixture.ai.jobs.has(id), true); assert.equal(fixture.results.rows.get('active-result').status, 'running');
     assert.equal(fixture.ai.providerCalls, 1); assert.equal(fixture.ai.calls.some(call => call.kind === 'cancel'), false);
   });
@@ -187,7 +184,7 @@ export async function aiResultsRegressions(browser, expect) {
     await expect(panel(page).locator(`[data-result-id="${id}"]`)).toHaveCount(0);
     await selected(page, 'retained-23').check(); await confirmDelete(page);
     await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 0 条');
-    await changePath(page, '/?article=one'); await expect(page.getByTestId('ai-progress')).toContainText('1 / 131');
+    await closeAiSettings(page, expect); await expect(page.getByTestId('ai-progress')).toContainText('1 / 131');
     assert.equal(fixture.ai.jobs.get(id).status, 'running'); assert.equal(fixture.ai.providerCalls, 1);
     assert.equal(fixture.ai.calls.some(call => call.kind === 'cancel'), false);
   });
@@ -201,7 +198,7 @@ export async function aiResultsRegressions(browser, expect) {
     await confirmDelete(page); await expect.poll(() => fixture.results.deleted.length).toBe(1);
     await expect(page.getByTestId('ai-card')).toHaveCount(0);
     const reads = calls(fixture, 'GET').length;
-    await changePath(page, '/?article=one'); held.resolve(); await page.waitForTimeout(100);
+    await closeAiSettings(page, expect); held.resolve(); await page.waitForTimeout(100);
     await expect(page.getByTestId('ai-card')).toHaveCount(0); assert.equal(calls(fixture, 'GET').length, reads);
     assert.equal(fixture.ai.providerCalls, 1); assert.equal(fixture.ai.calls.some(call => call.kind === 'cancel'), false);
     assert.equal(await page.getByTestId('reader-content').evaluate(root => root === window.__cleanupOriginal && root.innerHTML === window.__cleanupHtml), true);
@@ -213,7 +210,7 @@ export async function aiResultsRegressions(browser, expect) {
     const id = [...fixture.ai.jobs.keys()][0];
     await openSettings(page); await openResults(page); await selected(page, id).check(); await confirmDelete(page);
     await expect(panel(page).getByTestId('ai-results-selected')).toContainText('已选 0 条');
-    held.resolve(); await changePath(page, '/?article=one'); await page.waitForTimeout(100);
+    held.resolve(); await closeAiSettings(page, expect); await page.waitForTimeout(100);
     await expect(page.getByTestId('ai-card')).toHaveCount(0); assert.equal(fixture.ai.providerCalls, 1);
   });
 
@@ -238,8 +235,7 @@ export async function aiResultsRegressions(browser, expect) {
     });
     fixture.control.loggedIn = false; await page.evaluate(() => window.dispatchEvent(new Event('feedink:unauthorized')));
     await expect(page.getByRole('heading', { name: '欢迎回来' })).toBeVisible();
-    await page.getByLabel('邮箱', { exact: true }).fill(`${nextOwner}@example.test`); await page.getByLabel('密码', { exact: true }).fill('synthetic-password');
-    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await signInToAiReader(page, expect, nextOwner);
     await openSettings(page); await expect(panel(page)).toHaveCount(0); await openResults(page);
     const currentId = nextOwner === 'bob' ? 'foreign-result' : 'retained-22';
     await selected(page, currentId).check();
@@ -252,7 +248,7 @@ export async function aiResultsRegressions(browser, expect) {
     assert.equal(calls(fixture, 'GET').length, reads); assert.equal(await page.evaluate(() => window.__aiRetirements.length), retirements);
     if (operation === 'delete') {
       const old = await page.evaluate(() => window.__aiRetirements[0]);
-      await changePath(page, '/?article=one'); fixture.ai.autoComplete = true;
+      await closeAiSettings(page, expect); fixture.ai.autoComplete = true;
       await expect(page.getByTestId('reader-content')).toHaveAttribute('data-annotation-context', 'a'.repeat(64));
       await startSummary(page); await expect(page.getByTestId('ai-summary')).toBeVisible();
       const id = [...fixture.ai.jobs.keys()][0];

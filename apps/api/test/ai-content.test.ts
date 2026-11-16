@@ -75,15 +75,16 @@ test('ai-content detectAiLanguage: ordinary supported prose and independently ag
     assert.equal(detectAiLanguage([{ id: 'body', text: paragraph }, { id: 'caption', text: title }]), language, `${language} short caption after body`);
   }
 });
-test('ai-content detectAiLanguage: bounded sentences and complete long-window remainders', () => {
+test('ai-content detectAiLanguage: bounded sentences, long windows and conservative padded remainders', () => {
   assert.ok(englishAiBoundedSentence.length > 240 && englishAiBoundedSentence.length < 480);
   assert.ok((englishAiBoundedSentence.slice(240).match(/\p{L}/gu)?.length ?? 0) < 40);
   assert.equal(detectAiLanguage([{ id: 'bounded', text: englishAiBoundedSentence }]), 'en');
   assert.ok(englishAiLongPositiveSentence.length > 480);
   assert.equal(detectAiLanguage([{ id: 'long-positive', text: englishAiLongPositiveSentence }]), 'en');
-  // Boundary padding exercises a short final window without depending on a particular word's length.
+  // Hosted evidence: this exact padded prefix has eng/sco separation below 0.01.
+  // Keep the authored input as uncertainty: an English remainder cannot override it.
   const prefix = englishAiParagraph.slice(0, -1).padEnd(480, ' ');
-  assert.equal(detectAiLanguage([{ id: 'tail', text: prefix + shortEnglishAiRemainder }]), 'en');
+  assert.equal(detectAiLanguage([{ id: 'tail', text: prefix + shortEnglishAiRemainder }]), 'unknown');
   for (const { name, text } of shortForeignAiFragments) {
     assert.notEqual(detectAiLanguage([{ id: 'tail', text: prefix + text }]), 'en', `${name} trailing window`);
     assert.notEqual(detectAiLanguage([{ id: 'tail', text: `${englishAiParagraph} ${text}` }]), 'en', `${name} trailing sentence`);

@@ -19,15 +19,19 @@ const tier = Number(process.env.SCALE_ARTICLES || '10000');
 if (![10000, 100000, 1000000].includes(tier) || !process.env.TEST_DATABASE_URL || !process.env.RUNNER_TEMP)
   throw new Error('Require an allowed tier and the disposable hosted test database');
 const searchMode = process.env.SCALE_SEARCH_INDEXES || 'before';
-if (!['before', 'compare'].includes(searchMode) || (searchMode === 'compare' && tier !== 10000))
-  throw new Error('SCALE_SEARCH_INDEXES accepts before or compare; compare is restricted to the approved 10k tier');
-const compareSearch = searchMode === 'compare';
+if (!['before', 'compare', 'indexed'].includes(searchMode) || (searchMode === 'compare' && tier !== 10000))
+  throw new Error('SCALE_SEARCH_INDEXES accepts before, compare (10k only), or indexed (10k/100k/1M)');
+const compareSearch = searchMode === 'compare', indexedSearch = searchMode === 'indexed';
+const diagnoseMcpPrepared = process.env.SCALE_MCP_PREPARED === '1';
+if (process.env.SCALE_MCP_PREPARED && !['0', '1'].includes(process.env.SCALE_MCP_PREPARED))
+  throw new Error('SCALE_MCP_PREPARED accepts 0 or 1');
 const output = join(process.env.RUNNER_TEMP, `scale-evidence-${tier}`);
 await mkdir(output, { recursive: true });
 const started = performance.now(), deadline = started + 30 * 60_000;
 const budgets = { wallSeconds: 1800, statementMs: 10000, seedBatchMs: 120000, maintenanceMs: 900000, rssBytes: 768 * 1024 ** 2, databaseBytes: 16 * 1024 ** 3, writeSeconds: 120 };
 const report = {
   formatVersion: 2, status: 'running', tier, budgets, searchMode,
+  queryVariant: 'literal-first-mcp-split-v1', diagnoseMcpPrepared,
   hardware: { platform: platform(), release: release(), cpu: cpus()[0]?.model, logicalCpus: cpus().length, ramBytes: totalmem(), node: process.version },
   dataset: { seed: 'scale-v2-uuid8', primaryOwnerArticles: tier, isolationOwners: 10, isolationArticlesEach: Math.min(10000, tier / 10), feeds: 100, tags: 100, folders: 20, timestampGroupSize: 100, microsecondSubgroups: 3, unreadPercent: 5, savedPercent: 2, body: '95% ~2KiB, 5% ~32KiB deterministic HIGHLY COMPRESSIBLE text; not a realistic media or storage benchmark', images: Math.min(200000, tier), contexts: 0 },
   phases: {}, reads: [], plans: [], limitations: [], peakRssBytes: 0,
@@ -41,8 +45,8 @@ let captured = null;
 const db = postgres(process.env.TEST_DATABASE_URL, {
   max: 8, onnotice: () => {},
   connection: { search_path: schema, statement_timeout: String(budgets.statementMs), lock_timeout: '3000', application_name: 'feedink-synthetic-scale' },
-  debug: (_connection, query, parameters) => {
-    if (captured && /^SELECT /i.test(query) && captured.length < 12) captured.push({ query, parameters: [...parameters] });
+  debug: (connection, query, parameters) => {
+    if (captured && /^SELECT /i.test(query) && captured.length < 12) captured.push({ connection, query, parameters: [...parameters] });
   },
 });
 const articles = new Articles(db);
@@ -120,6 +124,90 @@ const searchWriteCost = async () => {
   } catch (error) { if (error !== rollback) throw error; }
   return { rows: 20, rolledBack: true, insert: percentiles(insert), indexedContentUpdate: percentiles(update), delete: percentiles(remove) };
 };
+// Opt-in, bounded diagnosis of the actual SDK callback, not another read matrix.
+// Reserve one backend; report its inherited counters rather than resetting the
+// driver's statement cache or changing production plan_cache_mode.
+const mcpPreparedEvidence = async stage => {
+  const sql = await db.reserve();
+  const client = new Client({ name: 'synthetic-prepared-search', version: '1.0.0' });
+  const server = createMcpServer(sql, null, null, { userId: owner, tokenId: uid(9000), scopes: ['articles:read'] });
+  const snapshot = async () => [...await sql.unsafe('SELECT name,statement,parameter_types::text AS parameter_types,generic_plans::text AS generic_plans,custom_plans::text AS custom_plans FROM pg_prepared_statements', [], { prepare: false })]
+    .filter(row => /^SELECT (count\(\*\)::integer AS total|id,title,url,left\(summary,400\) AS summary,published_at) FROM articles WHERE /.test(row.statement));
+  const evidence = { stage, provenance: 'actual-mcp-callback-reserved-connection', calls: [], explains: [] };
+  (report.mcpPrepared ||= []).push(evidence);
+  try {
+    const [{ pid, mode }] = await sql`SELECT pg_backend_pid() AS pid,current_setting('plan_cache_mode') AS mode`;
+    evidence.backendPid = pid; evidence.planCacheMode = mode; evidence.initialStatements = await snapshot();
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    const seen = new Map(), candidates = new Map();
+    // Six common calls cross PostgreSQL's initial custom-plan sampling window;
+    // rare/absent then exercise that same nonempty shape. Empty has its own shape.
+    for (const query of ['', ...Array(6).fill('Synthetic'), 'needle-rare', 'needle-rare', 'never-occurs-in-fixture', '']) {
+      await guard();
+      const before = await snapshot(); captured = [];
+      const begin = performance.now();
+      const result = await client.callTool({ name: 'search_articles', arguments: { query, limit: 20 } });
+      const milliseconds = performance.now() - begin, statements = captured; captured = null;
+      const after = await snapshot();
+      const call = { query, milliseconds, before, after };
+      evidence.calls.push(call);
+      if (result.isError) {
+        call.errorCode = result.structuredContent?.error?.code || 'MCP_OPERATION_FAILED';
+        throw Object.assign(new Error('Prepared MCP callback failed'), { code: call.errorCode });
+      }
+      const page = result.structuredContent;
+      assert.equal(page.total, query === 'needle-rare' ? Math.floor(tier / 997) : query === 'never-occurs-in-fixture' ? 0 : tier);
+      assert.equal(page.items.length, Math.min(20, page.total));
+      call.digest = digest(page);
+      if (seen.has(query)) assert.equal(call.digest, seen.get(query), 'Repeated actual MCP response parity');
+      seen.set(query, call.digest);
+      assert.equal(statements.length, 2, 'Capture callback count and page only');
+      assert.equal(new Set(statements.map(s => s.connection)).size, 1);
+      for (const statement of statements) {
+        const current = after.filter(row => row.statement === statement.query);
+        assert.equal(current.length, 1, 'Find the actual named callback statement on the reserved backend');
+        const previous = before.find(row => row.name === current[0].name);
+        const executions = row => Number(row?.generic_plans || 0) + Number(row?.custom_plans || 0);
+        assert.equal(executions(current[0]) - executions(previous), 1, 'One prepared execution per actual callback statement');
+        if (query === 'needle-rare' || query === 'never-occurs-in-fixture')
+          candidates.set(`${query}/${current[0].name}`, { query, statement, name: current[0].name });
+      }
+    }
+    evidence.afterCallbacks = await snapshot();
+    // EXECUTE uses server-quoted synthetic literals, not bind parameters (which
+    // PostgreSQL's utility EXECUTE cannot bind). This is an EXTRA execution of
+    // the callback's named statement; counters bracket it separately, after all
+    // timed callbacks, so these plans are not passed off as the timed execution.
+    for (const { query, statement, name } of candidates.values()) {
+      await guard();
+      const literals = [];
+      for (const value of statement.parameters) {
+        const [{ literal }] = await sql`SELECT quote_literal(${String(value)}::text) AS literal`;
+        literals.push(literal);
+      }
+      const entry = { query, name, sql: statement.query, provenance: 'same-connection-explain-execute', before: await snapshot() };
+      evidence.explains.push(entry);
+      try {
+        const rows = await sql.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE "${name.replaceAll('"', '""')}"(${literals.join(',')})`, [], { prepare: false });
+        entry.plan = rows[0]['QUERY PLAN'];
+      } catch (error) {
+        entry.errorCode = error.code || 'ERROR';
+        report.limitations.push(`${stage}/mcp-prepared/${query}: EXPLAIN EXECUTE failed (${entry.errorCode})`);
+      }
+      entry.after = await snapshot();
+    }
+    assert.equal((await sql`SELECT pg_backend_pid() AS pid`)[0].pid, pid);
+  } finally { captured = null; await client.close(); await server.close(); sql.release(); }
+};
+const installSearchIndexes = async () => {
+  await phase('migration010IndexesMs', () => db.begin(async sql => {
+    await sql.unsafe(await readFile(new URL('../apps/api/migrations/010_search_indexes.sql', import.meta.url), 'utf8'));
+  }));
+  await phase('analyzeAfter010Ms', () => db.begin(async sql => { await sql`SET LOCAL statement_timeout='120s'`; await sql.unsafe('ANALYZE'); }));
+  report.searchIndexes.afterBuild = await relationSnapshot();
+  report.searchIndexes.extension = (await db`SELECT e.extversion,n.nspname AS schema FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'`)[0];
+};
 try {
   await admin.unsafe(`CREATE SCHEMA ${schema}`);
   report.postgres = (await db`SELECT version() AS version,current_setting('shared_buffers') AS shared_buffers,current_setting('work_mem') AS work_mem,current_setting('max_parallel_workers_per_gather') AS max_parallel_workers_per_gather`)[0];
@@ -190,6 +278,10 @@ try {
   }));
   await phase('analyzeMs', () => db.begin(async (sql) => { await sql`SET LOCAL statement_timeout='120s'`; await sql.unsafe('ANALYZE'); }));
   await phase('initialAuditMs', audit);
+  if (indexedSearch) {
+    report.searchIndexes = { method: 'Current query variant with 010 installed before reads; not a paired before/after comparison.', parity: [], before: await relationSnapshot() };
+    await installSearchIndexes();
+  }
   const sizes = await db`SELECT c.relname AS relation,pg_relation_size(c.oid)::text AS heap_bytes,pg_indexes_size(c.oid)::text AS index_bytes,CASE WHEN c.reltoastrelid=0 THEN '0' ELSE pg_total_relation_size(c.reltoastrelid)::text END AS toast_bytes,pg_total_relation_size(c.oid)::text AS total_bytes FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=${schema} AND c.relkind='r' ORDER BY c.relname`;
   report.relationSizes = [...sizes];
   report.indexSizes = [...await db`SELECT indexrelname,pg_relation_size(indexrelid)::text AS bytes FROM pg_stat_user_indexes WHERE schemaname=${schema} ORDER BY indexrelname`];
@@ -208,8 +300,9 @@ try {
       method: 'Same committed 10k corpus before/after 010; warm bounded-page parity, not a full traversal. Rolled-back write probes leave physical work/dead tuples. No WAL, cold-cache, sustained GIN maintenance or realistic TOAST measurement.',
       parity: [], before: await relationSnapshot(),
     };
-    shapes.push(['search-backslash', { scope: 'archive', q: '\\' }], ['search-short-ascii', { scope: 'archive', q: 'a' }]);
   }
+  if (compareSearch || indexedSearch)
+    shapes.push(['search-backslash', { scope: 'archive', q: '\\' }], ['search-short-ascii', { scope: 'archive', q: 'a' }]);
   const readMatrix = async (stage) => {
     const planLabel = label => stage === 'before' ? label : `${stage}/${label}`;
     for (const [label, query] of shapes) {
@@ -279,7 +372,7 @@ try {
               throw Object.assign(new Error('MCP search failed'), { code: errorCode });
             }
             page = result.structuredContent;
-            if (!sample) parity(stage, `mcp/owner-${account}/${label}`, page);
+            if (compareSearch && !sample) parity(stage, `mcp/owner-${account}/${label}`, page);
             const statements = captured; captured = null;
             if (statements) for (const [index, statement] of statements.entries())
               await explain(`${stage}/mcp/owner-${account}/${label}/statement-${index}`, statement.query, statement.parameters);
@@ -294,18 +387,17 @@ try {
       } finally { captured = null; await client.close(); await server.close(); }
     }
   };
-  await phase('readMatrixMs', () => readMatrix('before'));
+  await phase('readMatrixMs', () => readMatrix(indexedSearch ? 'indexed' : 'before'));
+  if (indexedSearch) await phase('mcpIndexedMs', () => mcpReadMatrix('indexed'));
+  if (diagnoseMcpPrepared && !compareSearch) await phase('mcpPreparedMs', () => mcpPreparedEvidence(indexedSearch ? 'indexed' : 'before'));
   if (compareSearch) {
     await phase('mcpBeforeMs', () => mcpReadMatrix('before'));
+    if (diagnoseMcpPrepared) await phase('mcpPreparedMs', () => mcpPreparedEvidence('before'));
     report.searchIndexes.beforeWriteCost = await phase('searchWritesBeforeMs', searchWriteCost);
-    await phase('migration010IndexesMs', () => db.begin(async sql => {
-      await sql.unsafe(await readFile(new URL('../apps/api/migrations/010_search_indexes.sql', import.meta.url), 'utf8'));
-    }));
-    await phase('analyzeAfter010Ms', () => db.begin(async sql => { await sql`SET LOCAL statement_timeout='120s'`; await sql.unsafe('ANALYZE'); }));
-    report.searchIndexes.afterBuild = await relationSnapshot();
-    report.searchIndexes.extension = (await db`SELECT e.extversion,n.nspname AS schema FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'`)[0];
+    await installSearchIndexes();
     await phase('readMatrixAfter010Ms', () => readMatrix('after'));
     await phase('mcpAfterMs', () => mcpReadMatrix('after'));
+    if (diagnoseMcpPrepared) await phase('mcpPreparedAfterMs', () => mcpPreparedEvidence('after'));
     assert.equal(report.searchIndexes.parity.length, searchPages.size, 'every before page has an after comparison');
     report.searchIndexes.afterWriteCost = await phase('searchWritesAfterMs', searchWriteCost);
     report.searchIndexes.afterWriteProbe = await relationSnapshot();
@@ -360,7 +452,7 @@ try {
     assert.equal(bulk.updated, bulkIds.length);
     report.bulk = { rows: bulk.updated, milliseconds: performance.now()-begin };
   });
-  if (compareSearch) report.searchIndexes.afterConcurrentWrites = await relationSnapshot();
+  if (compareSearch || indexedSearch) report.searchIndexes.afterConcurrentWrites = await relationSnapshot();
   await phase('finalAuditMs', audit);
   await phase('isolationMs', async () => {
     for (let i = 2; i <= 11; i++) {

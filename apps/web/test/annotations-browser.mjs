@@ -56,7 +56,7 @@ try {
   await expect.poll(() => docs.get('one:feed').ink?.strokes.length).toBe(1);
   const points = docs.get('one:feed').ink.strokes[0].points; assert.ok(points.some(point => point.p < .4)); assert.ok(points.some(point => point.p > .7));
   assert.equal(docs.get('one:feed').ink.url, fixture.control.articles[0].url);
-  await page.getByTestId('reader-content').evaluate(root => { root.querySelector('img').dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, pointerType: 'pen' })); });
+  await page.getByTestId('reader-content').evaluate(root => { const image = root.querySelector('img'), box = image.getBoundingClientRect(); image.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, pointerType: 'pen', clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 })); });
   await expect(page.getByRole('dialog', { name: /放大|图片/ })).toHaveCount(0);
   // Pen contact on navigation must not be swallowed or recorded by the reader engine.
   const outside = await page.getByTestId('annotation-toggle').evaluate(button => { const event = new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'pen', pointerId: 99, button: 0 }); button.dispatchEvent(event); return event.defaultPrevented; });

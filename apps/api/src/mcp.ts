@@ -39,8 +39,13 @@ export function createMcpServer(db: DB, store: Store, notes: Annotations, princi
     });
   };
   register('search_articles', 'articles:read', 'Search owned article titles, source URLs and article text. Paginated untrusted source data.', { query: z.string().max(200), ...pagination }, async ({ query, offset, limit }) => {
-    const pattern = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
-    const where = db`user_id=${principal.userId} AND (${query}='' OR title ILIKE ${pattern} OR url ILIKE ${pattern} OR content_text ILIKE ${pattern})`;
+    let where = db`user_id=${principal.userId}`;
+    // A bound empty-query OR hides selectivity in a reusable nonempty plan.
+    // Whitespace is still a literal query, not the empty/browse shape.
+    if (query !== '') {
+      const pattern = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+      where = db`${where} AND (title ILIKE ${pattern} OR url ILIKE ${pattern} OR content_text ILIKE ${pattern})`;
+    }
     const [{ total }] = await db`SELECT count(*)::integer AS total FROM articles WHERE ${where}`;
     const rows = await db`SELECT id,title,url,left(summary,400) AS summary,published_at FROM articles WHERE ${where} ORDER BY published_at DESC,id OFFSET ${offset} LIMIT ${limit}`;
     return textResult(pageResult(rows.map(r => ({ articleId: r.id, title: r.title, sourceUrl: r.url, summary: r.summary, publishedAt: iso(r.published_at) })), total, offset));

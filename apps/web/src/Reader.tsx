@@ -108,9 +108,9 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
         </div>}
         {speech && <div hidden={menuView !== 'speech'}><SpeechPanel article={article} next={() => move(1)} /></div>}
       </div>
-      <div className="reader-scroll" ref={scrollRef} tabIndex={0} onScroll={scroll} onTouchStart={event => { if (event.touches.length !== 1 || (event.target as HTMLElement).closest('button,input,textarea,select,a,[role=toolbar],[role=dialog]')) { touch.current = null; return; } const point = event.touches[0]; touch.current = { x: point.clientX, y: point.clientY }; }} onTouchEnd={event => { const start = touch.current; touch.current = null; if (!start || window.getSelection()?.toString()) return; const point = event.changedTouches[0]; if (Math.abs(point.clientY - start.y) < 50 && point.clientX - start.x > 110) back(); }}>
+      <div className="reader-scroll" ref={scrollRef} tabIndex={0} onScroll={scroll} onTouchStart={event => { if (event.touches.length !== 1 || (event.target as HTMLElement).closest('[data-ink-enabled],button,input,textarea,select,a,[role=toolbar],[role=dialog]')) { touch.current = null; return; } const point = event.touches[0]; touch.current = { x: point.clientX, y: point.clientY }; }} onTouchEnd={event => { const start = touch.current; touch.current = null; if (!start || window.getSelection()?.toString()) return; const point = event.changedTouches[0]; if (Math.abs(point.clientY - start.y) < 50 && point.clientX - start.x > 110) back(); }}>
         <article className="article-document"><div className="article-source"><SourceIcon subscriptionId={article.subscriptionId} /><span>{article.feedTitle || '网页存档'}</span></div>
-          <h1><a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">{article.title || '无标题文章'}</a></h1>
+          <h1 data-ink-title=""><a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">{article.title || '无标题文章'}</a></h1>
           <div className="reader-metadata">
             <div className="article-meta"><time dateTime={article.publishedAt}>{formatDate(article.publishedAt)}</time>{article.author && <span>· {article.author}</span>}</div>
             <div ref={setAiBodyHost} className="reader-ai-results" data-reading-transient />

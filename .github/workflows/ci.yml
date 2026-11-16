@@ -17,6 +17,15 @@ on:
         type: choice
         options: ['none', '10000', '100000', '1000000', 'all']
         default: 'none'
+      scale_search_mode:
+        description: Indexed release workload or historical index comparison
+        type: choice
+        options: [indexed, compare, before]
+        default: indexed
+      scale_mcp_prepared:
+        description: Inspect actual same-connection prepared execution
+        type: boolean
+        default: false
       publish_scale_evidence:
         description: Publish only structured synthetic scale evidence
         type: boolean
@@ -371,3 +380,5 @@ jobs:
       tier: ${{ inputs.scale_tier || '10000' }}
       publish_evidence: ${{ inputs.publish_scale_evidence || false }}
       search_indexes: ${{ inputs.compare_search_indexes || false }}
+      search_mode: ${{ inputs.scale_search_mode || 'indexed' }}
+      mcp_prepared: ${{ inputs.scale_mcp_prepared || false }}

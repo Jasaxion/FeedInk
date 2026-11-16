@@ -1,11 +1,12 @@
 /** FeedInk modifications (Apache-2.0): bound creation/resolution to a supplied reader
- * root and its stable context hash; never resolve raw page ink into application chrome.
+ * identity and trusted title/body surface; never resolve raw page ink into application chrome.
  * Adapted from WebInk; see packages/ink/LICENSE and repository NOTICE. */
 import { supportedBrush, identityFrame, inverse, multiply, transformPoint, validFrame, visibleBounds, type Clip, type FrameResolution, type Matrix, type RenderFrame } from './frames.ts';
 import type { Anchor, AttachmentMode, Point, Stroke } from './types.ts';
 import { segmentAtPoint, segmentRange, segmentText, findSegment, SEGMENT_LIMITS, type LocalSegment, type SegmentText, type SegmentMatch } from './segments.ts';
 import { engineWork } from './work.ts';
 import { LIMITS } from './validation.ts';
+import type { ReaderInkSurface } from './reader-surface.ts';
 
 interface Locator {
   tag: string;
@@ -169,7 +170,7 @@ export class ContentAnchorResolver {
   private observed = new Set<Element>();
   private readonly win: Window;
   private readonly notice: (code: string) => void;
-  constructor(win: Window, notice: (code: string) => void = () => {}, changed: (entries: ResizeObserverEntry[]) => void = () => {}, private readonly readerRoot?: HTMLElement) {
+  constructor(win: Window, notice: (code: string) => void = () => {}, changed: (entries: ResizeObserverEntry[]) => void = () => {}, private readonly readerRoot?: HTMLElement, private readonly readerSurface?: ReaderInkSurface) {
     this.win = win; this.notice = notice;
     if (typeof ResizeObserver !== 'undefined') this.resize = new ResizeObserver(entries => { this.beginFrame(); changed(entries); });
   }
@@ -487,9 +488,33 @@ export class ContentAnchorResolver {
   private createSmart(point: Point): AttachedAnchor {
     try { return this.createContent(point, true); }
     catch (error) {
+      // FeedInk has a host-verified complete context, unlike arbitrary web pages.
+      // Ambiguous words/gaps can follow that surface, never guessed nearby content.
+      if (this.readerSurface) return this.createReaderSurface(point);
       if (!(error instanceof SurfaceRequired)) throw error;
       return this.createSurface(point);
     }
+  }
+  /** Existing surface-v1 wire shape, with reserved reader-plane identity. Only the
+   * explicitly supplied current body/title can resolve it; DOM search is not authority. */
+  private readerSurfaceIdentity(target: HTMLElement): { scope: Scope; scopeContext: string; target: Locator } {
+    const surface = this.readerSurface!;
+    const scopeContext = this.readerIdentity(), identity = `surface:reader-${hash(scopeContext)}`;
+    const title = target === surface.title;
+    return { scope: { locator: { tag: surface.content.tagName, path: [], attrs: [['data-annotation-context', surface.content.dataset.annotationContext!]], fingerprint: identity }, identity }, scopeContext,
+      target: { tag: target.tagName, path: [], attrs: [[title ? 'data-ink-title' : 'data-reader-root', '']],
+        fingerprint: `surface:reader-${hash(`${scopeContext}|${title ? `title:${surface.title.textContent}` : 'body'}`)}` } };
+  }
+  private createReaderSurface(point: Point): SurfaceAnchor {
+    const x = point.x - this.win.scrollX, y = point.y - this.win.scrollY;
+    const target = this.readerSurface!.targetAt(x, y), hit = this.win.document.elementFromPoint(x, y);
+    if (!target || !(hit instanceof HTMLElement)) throw new Error('Outside verified reader surface');
+    this.geometry(hit, 'block'); // An outer plane must not bypass unsafe contact geometry.
+    const basis = this.geometry(target, 'block');
+    const anchor: SurfaceAnchor = { kind: 'surface-v1', ...this.readerSurfaceIdentity(target), basis: basis.matrix, mode: 'block', width: basis.width };
+    if (!isSurfaceAnchor(anchor)) throw new Error('Invalid reader surface');
+    this.targets.set(anchor, { status: 'found', element: target });
+    return anchor;
   }
   /** A contact-only probe, never ink: unsupported origins conservatively lose
    * continuity on identity invalidation, without choosing/noticing page fallback. */
@@ -586,6 +611,18 @@ export class ContentAnchorResolver {
   private target(anchor: AttachedAnchor): { status: 'hidden' | 'unresolved' } | { status: 'found'; element: HTMLElement } {
     const cached = this.targets.get(anchor);
     if (cached) return cached;
+    if (anchor.kind === 'surface-v1' && anchor.scope.identity.startsWith('surface:reader-')) {
+      if (this.readerSurface && anchor.mode === 'block') {
+        for (const element of [this.readerSurface.content, this.readerSurface.title]) {
+          const expected = this.readerSurfaceIdentity(element);
+          if (anchor.scopeContext === expected.scopeContext && anchor.scope.identity === expected.scope.identity &&
+            this.sameLocator(anchor.scope.locator, expected.scope.locator) && this.sameLocator(anchor.target, expected.target)) {
+            const found = { status: 'found' as const, element }; this.targets.set(anchor, found); return found;
+          }
+        }
+      }
+      return { status: 'unresolved' };
+    }
     const root = this.readerRoot ?? this.win.document.documentElement;
     let scope: Element = root;
     let result: ReturnType<ContentAnchorResolver['target']>;
@@ -609,6 +646,9 @@ export class ContentAnchorResolver {
     }
     this.targets.set(anchor, result);
     return result;
+  }
+  private sameLocator(a: Locator, b: Locator): boolean {
+    return a.tag === b.tag && a.id === b.id && a.fingerprint === b.fingerprint && JSON.stringify(a.path) === JSON.stringify(b.path) && JSON.stringify(a.attrs) === JSON.stringify(b.attrs);
   }
   /** Runtime-only target for detached export projection; never put it in Page. */
   resolvedTarget(stroke: Stroke): Element | null {
