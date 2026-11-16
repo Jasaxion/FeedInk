@@ -224,6 +224,8 @@ test('PostgreSQL annotations: CAS, history, tenant binding, portable archives an
       await db`UPDATE images SET status='failed',file_key=null,content_hash=null WHERE id=${existingImageId}`;
       await rm(store.path(key), { force: true });
       const filesBefore = (await readdir(dataDir)).sort();
+      const fanoutDirectory = join(dataDir, key.slice(0, 2), key.slice(2, 4));
+      const blobsBefore = (await readdir(fanoutDirectory)).sort();
       const [article] = await db`SELECT * FROM articles WHERE id=${concurrentId}`;
       const fetcher = new SafeFetcher();
       fetcher.fetch = async input => {
@@ -284,7 +286,9 @@ test('PostgreSQL annotations: CAS, history, tenant binding, portable archives an
         assert.equal(restored.revision, 1); assert.deepEqual(restored.marks, payload.marks);
         assert.equal((await db`SELECT id FROM articles WHERE user_id=${owner.id}`).length, 1);
         assert.equal((await db`SELECT id FROM annotations WHERE article_id=${concurrentId}`).length, 1);
-        assert.deepEqual((await readdir(dataDir)).sort(), [...filesBefore, key].sort(), 'No staged or unreferenced files remain');
+        assert.deepEqual((await readdir(dataDir)).sort(), filesBefore, 'No unexpected storage roots remain');
+        assert.deepEqual((await readdir(fanoutDirectory)).sort(), [...blobsBefore, key].sort(), 'Only the captured immutable blob was published');
+        assert.deepEqual(await readdir(store.stagingDirectory), [], 'No transaction staging remains');
       } finally {
         releaseCapture();
         await pending;

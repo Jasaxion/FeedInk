@@ -66,6 +66,225 @@ export async function annotationRegressions(browser, expect) {
       return false;
     }));
   }
+  async function saveNote(page, state, text) {
+    await newNote(page, text);
+    await page.getByRole('button', { name: '保存备注', exact: true }).click();
+    await expect.poll(() => state.document.marks.some(mark => mark.text === text)).toBe(true);
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+  }
+  for (const width of [1280, 390]) await scenario(`accessible swatches retain selection, caret and mobile bounds at ${width}px`, async ({ page, state }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.getByRole('button', { name: '关闭批注与笔记', exact: true }).click();
+    await page.getByTestId('reader-content').evaluate(root => {
+      const text = root.querySelector('p').firstChild, range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 6);
+      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); document.dispatchEvent(new Event('selectionchange'));
+    });
+    const toolbar = page.getByTestId('selection-annotation-toolbar');
+    await toolbar.getByLabel('文字批注颜色', { exact: true }).click();
+    const swatches = toolbar.getByRole('radiogroup', { name: '批注颜色', exact: true });
+    await swatches.getByRole('radio', { name: '黄色', exact: true }).focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(swatches.getByRole('radio', { name: '绿色', exact: true })).toBeFocused();
+    await expect(swatches.getByRole('radio', { name: '绿色', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await page.keyboard.press('End'); await page.keyboard.press('ArrowRight');
+    await expect(swatches.getByRole('radio', { name: '黄色', exact: true })).toBeFocused();
+    await page.keyboard.press('ArrowLeft'); await page.keyboard.press('Home'); await page.keyboard.press('ArrowDown');
+    await toolbar.getByRole('button', { name: '备注', exact: true }).click();
+    const editor = page.getByTestId('note-editor'); await expect(editor).toBeFocused();
+    await editor.fill('caret stays here');
+    await editor.evaluate(node => { node.setSelectionRange(2, 5); });
+    const colors = page.getByRole('radiogroup', { name: '标记颜色', exact: true });
+    await colors.getByRole('radio', { name: '蓝色', exact: true }).click();
+    await expect(editor).toBeFocused();
+    assert.deepEqual(await editor.evaluate(node => [node.selectionStart, node.selectionEnd]), [2, 5]);
+    await expect(colors.getByRole('radio', { name: '蓝色', exact: true })).toHaveAttribute('aria-checked', 'true');
+    await expect(colors.getByRole('radio', { name: '蓝色', exact: true })).toHaveAttribute('title', '蓝色');
+    assert.equal(await colors.innerText(), '', 'swatches do not expose raw color-name text');
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'eink'; });
+    assert.equal(await colors.locator('[data-color=blue]').evaluate(node => getComputedStyle(node).backgroundImage.includes('gradient')), true, 'e-ink has a non-color pattern');
+    await expect.poll(() => page.getByTestId('annotation-note-popover').evaluate(node => { const box = node.getBoundingClientRect(); return box.left >= 0 && box.right <= innerWidth && box.bottom <= innerHeight; })).toBe(true);
+    await page.getByRole('button', { name: '保存备注', exact: true }).click();
+    await expect.poll(() => state.document.marks[0]?.color).toBe('blue');
+    assert.equal(state.document.marks[0].anchor.exact.length, 6);
+    assert.equal(state.document.marks[0].text, 'caret stays here');
+  });
+  await scenario('editor single delete and undo do not wait for an in-flight network save or prompt', async ({ page, state }) => {
+    await page.setViewportSize({ width: 1280, height: 2000 });
+    const prompts = []; page.on('dialog', async dialog => { prompts.push(dialog.message()); await dialog.dismiss(); });
+    state.hold = deferred();
+    await newNote(page, 'delete while saving');
+    await page.getByRole('button', { name: '保存备注', exact: true }).click();
+    await expect.poll(() => state.writes).toBe(1);
+    await page.locator('.annotation-list-item').click();
+    await page.getByRole('button', { name: '删除当前批注', exact: true }).click();
+    await expect(page.getByTestId('note-editor')).toHaveCount(0);
+    await expect(page.locator('.annotation-list-item')).toHaveCount(0);
+    await expect(page.getByTestId('reader-content')).toBeFocused();
+    await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeEnabled();
+    await newNote(page, 'later edit survives undo');
+    await page.getByTestId('note-editor').evaluate(node => node.setSelectionRange(2, 5));
+    await page.getByRole('button', { name: '撤销删除批注', exact: true }).click();
+    await expect(page.getByTestId('note-editor')).toHaveValue('later edit survives undo');
+    await expect(page.getByTestId('note-editor')).toBeFocused();
+    assert.deepEqual(await page.getByTestId('note-editor').evaluate(node => [node.selectionStart, node.selectionEnd]), [2, 5]);
+    await expect(page.locator('.annotation-list-item')).toHaveCount(2);
+    assert.equal(state.writes, 1, 'held network request never gates local delete/undo');
+    state.hold.resolve(); state.hold = null;
+    await expect.poll(() => state.document.marks.map(mark => mark.text)).toEqual(['delete while saving', 'later edit survives undo']);
+    assert.deepEqual(prompts, []);
+  });
+  await scenario('list delete undo survives acknowledgement and preserves subsequent edits and ink', async ({ page, state }) => {
+    const prompts = []; page.on('dialog', async dialog => { prompts.push(dialog.message()); await dialog.dismiss(); });
+    await draw(page); await expect.poll(() => state.document.ink?.strokes.length).toBe(1);
+    await page.getByRole('button', { name: '退出手写', exact: true }).click(); await page.getByTestId('annotation-toggle').click();
+    await saveNote(page, state, 'restore only this mark'); await saveNote(page, state, 'keep this mark');
+    const original = structuredClone(state.document), deleted = original.marks[0];
+    await page.locator('.annotation-list li').first().getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect.poll(() => state.document.marks.length).toBe(1);
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeEnabled();
+    await page.locator('.annotation-list-item').click(); await page.getByTestId('note-editor').fill('later text must survive');
+    await page.getByRole('button', { name: '保存备注', exact: true }).click();
+    await expect.poll(() => state.document.marks[0]?.text).toBe('later text must survive');
+    await page.getByRole('button', { name: '撤销删除批注', exact: true }).click();
+    await expect.poll(() => state.document.marks.length).toBe(2);
+    assert.deepEqual(state.document.marks[0], deleted); assert.equal(state.document.marks[1].text, 'later text must survive');
+    assert.deepEqual(state.document.ink, original.ink); assert.deepEqual(prompts, []);
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    // A second delete replaces only the prior undo opportunity; dismissal never reverts data.
+    await page.locator('.annotation-list li').first().getByRole('button', { name: '删除备注', exact: true }).click();
+    await page.locator('.annotation-list li').first().getByRole('button', { name: '删除备注', exact: true }).click();
+    await page.getByRole('button', { name: '撤销删除批注', exact: true }).click();
+    await expect(page.locator('.annotation-list-item')).toHaveCount(1);
+    await expect(page.locator('.annotation-list-item')).toContainText('later text must survive');
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await page.getByRole('button', { name: '关闭撤销删除提示', exact: true }).click();
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    await expect(page.locator('.annotation-list-item')).toHaveCount(0);
+  });
+  for (const undoBeforeConflict of [false, true]) await scenario(`delete undo respects remote CAS (undo before conflict: ${undoBeforeConflict})`, async ({ page, state }) => {
+    await saveNote(page, state, 'original mark');
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
+    state.document = { ...state.document, revision: state.document.revision + 1, marks: [{ ...state.document.marks[0], text: 'remote edit must survive', updatedAt: Date.now() }] };
+    const remote = structuredClone(state.document);
+    if (undoBeforeConflict) await page.getByRole('button', { name: '撤销删除批注', exact: true }).click();
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect(page.getByTestId('annotation-status')).toContainText('冲突');
+    assert.deepEqual(state.document, remote, 'undo cannot overwrite remote revision');
+    if (!undoBeforeConflict) await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeDisabled();
+    const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出本地版本', exact: true }).click();
+    const local = JSON.parse(await readFile(await (await downloaded).path(), 'utf8'));
+    assert.deepEqual(local.marks.map(mark => mark.text), undoBeforeConflict ? ['original mark'] : []);
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: '使用服务器版本', exact: true }).click();
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    await expect(page.locator('.annotation-list-item')).toContainText('remote edit must survive');
+  });
+  await scenario('offline failed delete/undo preserves the memory draft, recovery export and retirement fence', async ({ page, state }) => {
+    await saveNote(page, state, 'recover the deleted note');
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('offline'));
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function(value, ...args) { if (value.kind === 'annotations') throw new DOMException('Controlled delete quota', 'QuotaExceededError'); return put.call(this, value, ...args); };
+      window.restoreNoteWrites = () => { IDBObjectStore.prototype.put = put; };
+    });
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect(page.getByTestId('annotation-status')).toContainText('未保存');
+    await expect(page.locator('.annotation-list-item')).toHaveCount(0);
+    await newNote(page, 'later memory-only note'); await page.getByTestId('note-editor').press('Escape');
+    await page.getByRole('button', { name: '撤销删除批注', exact: true }).click();
+    await expect(page.getByTestId('annotation-status')).toContainText('未保存');
+    await page.getByTestId('reader').getByRole('button', { name: '返回', exact: true }).click();
+    await expect(page.getByText(/未切换页面：/)).toBeVisible();
+    await expect(page.getByTestId('reader-content')).toBeVisible();
+    const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
+    assert.deepEqual(JSON.parse(await readFile(await (await downloaded).path(), 'utf8')).marks.map(mark => mark.text), ['recover the deleted note', 'later memory-only note']);
+    await page.evaluate(() => window.restoreNoteWrites());
+    await page.getByRole('button', { name: '重试同步', exact: true }).click();
+    await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
+    assert.equal(state.document.marks.length, 1, 'offline local recovery is not a server acknowledgement');
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect.poll(() => state.document.marks.length).toBe(2);
+  });
+  await scenario('undo retains local CAS fencing against a different tab draft', async ({ page, state }) => {
+    await saveNote(page, state, 'original local mark');
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect(page.getByTestId('annotation-status')).toContainText('本地待同步');
+    await page.evaluate(mark => new Promise((resolve, reject) => {
+      const open = indexedDB.open('feedink-private-v1'); open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const tx = open.result.transaction('rows', 'readwrite'), rows = tx.objectStore('rows'), all = rows.getAll();
+        all.onsuccess = () => {
+          const row = all.result.find(row => row.kind === 'annotations' && row.value.document.context.articleId === 'one');
+          row.value.localVersion = 'synthetic-other-tab-version'; row.value.document.marks = [{ ...mark, text: 'other tab draft' }]; rows.put(row);
+        };
+        tx.oncomplete = () => { open.result.close(); resolve(); }; tx.onerror = () => reject(tx.error);
+      };
+    }), state.document.marks[0]);
+    await page.getByRole('button', { name: '撤销删除批注', exact: true }).click();
+    await expect(page.getByTestId('annotation-status')).toContainText('未保存');
+    await expect(page.locator('.annotation-list-item')).toContainText('original local mark');
+    assert.deepEqual(await page.evaluate(() => new Promise(resolve => {
+      const open = indexedDB.open('feedink-private-v1'); open.onsuccess = () => {
+        const all = open.result.transaction('rows').objectStore('rows').getAll(); all.onsuccess = () => { resolve(all.result.find(row => row.kind === 'annotations' && row.value.document.context.articleId === 'one').value.document.marks.map(mark => mark.text)); open.result.close(); };
+      };
+    })), ['other tab draft'], 'undo never overwrites another localVersion');
+    const downloaded = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
+    assert.deepEqual(JSON.parse(await readFile(await (await downloaded).path(), 'utf8')).marks.map(mark => mark.text), ['original local mark']);
+  });
+  await scenario('undo is disabled during a held context load and retired when that load completes', async ({ page, state }) => {
+    await saveNote(page, state, 'paused undo');
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect.poll(() => state.document.marks.length).toBe(0);
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    state.loadHold = deferred(); const loads = state.loads;
+    await page.getByText('正文版本 · 当前正文', { exact: true }).click();
+    await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
+    await expect.poll(() => state.loads).toBe(loads + 1);
+    await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeDisabled();
+    assert.equal(state.document.marks.length, 0);
+    state.loadHold.resolve(); state.loadHold = null;
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+  });
+  await scenario('delete undo cannot survive context reload, article navigation or account retirement', async ({ page, state, fixture }) => {
+    await saveNote(page, state, 'context-bound delete');
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect.poll(() => state.document.marks.length).toBe(0);
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    await page.getByText('正文版本 · 当前正文', { exact: true }).click();
+    await page.getByRole('button', { name: '返回最新正文版本', exact: true }).click();
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    await saveNote(page, state, 'article-bound delete');
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect.poll(() => state.document.marks.length).toBe(0);
+    await page.getByRole('button', { name: '下一篇 (J)', exact: true }).click();
+    await expect(page.getByTestId('reader-content')).toContainText('第二篇');
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    await page.getByRole('button', { name: '上一篇 (K)', exact: true }).click();
+    await expect(page.getByTestId('reader-content')).toContainText('第一篇'); await page.getByTestId('annotation-toggle').click();
+    await saveNote(page, state, 'owner-bound delete');
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect.poll(() => state.document.marks.length).toBe(0);
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await expect(page.getByTestId('app-shell')).toHaveCount(0);
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    // Fresh owner cannot inherit even a completed deletion's undo capability.
+    state.document = { ...state.document, marks: [], revision: 0 };
+    await page.getByLabel('邮箱', { exact: true }).fill('bob@example.test');
+    await page.getByLabel('密码', { exact: true }).fill('synthetic-password');
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByTestId('app-shell')).toBeVisible();
+    assert.equal(fixture.control.user.id, 'bob');
+    await page.getByTestId('article-card').filter({ hasText: '第一篇' }).click();
+    await page.getByTestId('annotation-toggle').click();
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    await expect(page.locator('.annotation-list-item')).toHaveCount(0);
+  });
   await scenario('floating editor receives focus after its first visible layout', async ({ page }) => {
     await page.getByRole('button', { name: '整篇备注', exact: true }).click();
     await expect(page.getByTestId('note-editor')).toBeFocused();
@@ -97,6 +316,48 @@ export async function annotationRegressions(browser, expect) {
     const download = page.waitForEvent('download'); await page.getByRole('button', { name: '导出 JSON', exact: true }).click();
     const backup = JSON.parse(await readFile(await (await download).path(), 'utf8'));
     assert.equal(backup.marks.length, 1); assert.equal(backup.marks[0].kind, 'highlight');
+  });
+  await scenario('ancestor-only card shifts repaint finished and active ink without cancelling contact or rewriting raw points', async ({ page, state }) => {
+    await page.setViewportSize({ width: 1280, height: 2000 });
+    await draw(page); await expect.poll(() => state.document.ink?.strokes.length).toBe(1);
+    await expect(page.getByTestId('annotation-status')).toContainText('已同步');
+    const raw = structuredClone(state.document.ink.strokes[0]), writes = state.writes;
+    async function canvasTop(index) {
+      return page.locator('[data-webink-overlay]').evaluate((host, index) => {
+        const canvas = host.shadowRoot.querySelectorAll('canvas')[index], pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+        for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) if (pixels[(y * canvas.width + x) * 4 + 3]) return y * canvas.getBoundingClientRect().height / canvas.height;
+        return null;
+      }, index);
+    }
+    await page.getByTestId('reader-content').evaluate(root => {
+      const target = root.querySelector('p'), box = target.getBoundingClientRect();
+      for (const [type, x] of [['pointerdown', 20], ['pointermove', 40]]) target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 81, pointerType: 'pen', isPrimary: true, button: 0, buttons: 1, pressure: .5, clientX: box.left + x, clientY: box.top + 18 }));
+    });
+    await expect.poll(() => canvasTop(1)).not.toBeNull();
+    const before = await page.getByTestId('reader-content').boundingBox(), committed = await canvasTop(0), active = await canvasTop(1);
+    assert.notEqual(committed, null); assert.notEqual(active, null);
+    await page.getByTestId('reader-content').evaluate(root => {
+      const card = document.createElement('section'); card.id = 'synthetic-summary-shift'; card.style.height = '90px'; card.textContent = 'Synthetic summary card';
+      root.closest('.annotation-section').before(card);
+    });
+    await expect.poll(async () => (await page.getByTestId('reader-content').boundingBox()).y - before.y).toBe(90);
+    assert.equal((await page.getByTestId('reader-content').boundingBox()).height, before.height, 'only the ancestor layout changed');
+    await expect.poll(async () => { const top = await canvasTop(0); return top !== null && Math.abs(top - committed - 90) < 2; }).toBe(true);
+    await expect.poll(async () => { const top = await canvasTop(1); return top !== null && Math.abs(top - active - 90) < 2; }).toBe(true);
+    assert.equal(state.writes, writes, 'layout refresh never saves a new raw document');
+    await page.getByTestId('reader-content').evaluate(root => {
+      const target = root.querySelector('p'), box = target.getBoundingClientRect();
+      target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 81, pointerType: 'pen', isPrimary: true, button: 0, buttons: 0, pressure: 0, clientX: box.left + 60, clientY: box.top + 18 }));
+    });
+    await expect.poll(() => state.document.ink?.strokes.length).toBe(2);
+    assert.deepEqual(state.document.ink.strokes[0], raw);
+    assert.ok(state.document.ink.strokes[1].points.length >= 3, 'active browser contact was not cancelled by a configure refresh');
+    const both = structuredClone(state.document.ink.strokes);
+    await page.locator('#synthetic-summary-shift').evaluate(node => node.remove());
+    await expect.poll(async () => { const top = await canvasTop(0); return top !== null && Math.abs(top - committed) < 2; }).toBe(true);
+    assert.deepEqual(state.document.ink.strokes, both);
+    await page.getByRole('button', { name: '撤销笔迹', exact: true }).click(); await expect.poll(() => state.document.ink?.strokes.length).toBe(1);
+    await page.getByRole('button', { name: '重做笔迹', exact: true }).click(); await expect.poll(() => state.document.ink?.strokes).toEqual(both);
   });
   await scenario('reader ink stays below floating controls and inside the reading clip', async ({ page, state }) => {
     await draw(page); await expect.poll(() => state.document.ink?.strokes.length).toBe(1);

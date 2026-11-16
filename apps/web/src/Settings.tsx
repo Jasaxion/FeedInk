@@ -5,11 +5,12 @@ import { api, mutate } from './api';
 import { Field, Icon, Toggle } from './components';
 import { scopedCss } from './safety';
 import { McpTokens } from './McpTokens';
+import { AiSettings } from './AiSettings';
 
-type Tab = 'appearance' | 'content' | 'listing' | 'ebook' | 'account' | 'offline' | 'admin' | 'mcp';
+type Tab = 'appearance' | 'content' | 'listing' | 'ebook' | 'account' | 'offline' | 'admin' | 'mcp' | 'ai';
 export function SettingsPanel({ path }: { path: string }) {
   const app = useApp();
-  const initial: Tab = path.includes('article-contents') ? 'content' : path.includes('article-listing') ? 'listing' : path.endsWith('ebook') ? 'ebook' : 'appearance';
+  const initial: Tab = path.endsWith('/ai') ? 'ai' : path.includes('article-contents') ? 'content' : path.includes('article-listing') ? 'listing' : path.endsWith('ebook') ? 'ebook' : 'appearance';
   const [tab, setTab] = useState<Tab>(initial);
   const [draft, setDraft] = useState(app.session.settings);
   const [busy, setBusy] = useState(false);
@@ -20,9 +21,9 @@ export function SettingsPanel({ path }: { path: string }) {
   const number = (key: keyof ReaderSettings, label: string, min: number, max: number, step = 1) => <Field label={label}><input type="number" required min={min} max={max} step={step} value={Number(draft[key])} onChange={event => set(key, Number(event.target.value) as never)} /></Field>;
   async function save(event: FormEvent) { event.preventDefault(); setBusy(true); await app.task(async () => { scopedCss(draft.customCss); await app.updateSettings(draft); app.notify('设置已保存并同步'); }); setBusy(false); }
   return <div className="settings-layout"><nav className="settings-nav" aria-label="设置分类">{([
-    ['appearance', '外观与排版'], ['content', '文章内容'], ['listing', '文章列表'], ['ebook', '电子书与邮箱'], ['offline', '离线与安装'], ['account', '我的账号'], ['mcp', 'MCP 令牌'], ...(app.session.user.isAdmin ? [['admin', '用户管理']] : []),
+    ['appearance', '外观与排版'], ['content', '文章内容'], ['listing', '文章列表'], ['ebook', '电子书与邮箱'], ['offline', '离线与安装'], ['account', '我的账号'], ['ai', 'AI 模型'], ['mcp', 'MCP 令牌'], ...(app.session.user.isAdmin ? [['admin', '用户管理']] : []),
   ] as [Tab, string][]).map(([key, label]) => <button key={key} aria-current={key === tab ? 'page' : undefined} onClick={() => setTab(key)}>{label}</button>)}<button type="button" className="danger" onClick={() => void app.logout()}>退出登录</button></nav>
-    {tab === 'mcp' ? <McpTokens /> : tab === 'account' ? <AccountPanel /> : tab === 'admin' ? <AdminPanel /> : <form className="settings-form" onSubmit={save}>
+    {tab === 'ai' ? <AiSettings /> : tab === 'mcp' ? <McpTokens /> : tab === 'account' ? <AccountPanel /> : tab === 'admin' ? <AdminPanel /> : <form className="settings-form" onSubmit={save}>
       {tab === 'appearance' && <><h3>让阅读更合心意</h3><Field label="主题"><select value={draft.theme} onChange={event => set('theme', event.target.value as ReaderSettings['theme'])}><option value="system">跟随系统</option><option value="light">明亮</option><option value="dark">深色</option><option value="sepia">护眼纸张</option><option value="eink">墨水屏（纯黑白）</option></select></Field>
         <Field label="强调色"><input type="color" value={draft.accent} onChange={event => set('accent', event.target.value)} /></Field>
         <Field label="正文字体"><select value={draft.fontFamily} onChange={event => set('fontFamily', event.target.value as ReaderSettings['fontFamily'])}><option value="system">系统字体</option><option value="sans">无衬线</option><option value="serif">衬线 / 宋体</option></select></Field>

@@ -1,0 +1,29 @@
+/* AI controls wrap as named groups instead of shrinking touch targets or hiding actions. */
+.reader-pane .reader-ai-toolbar { flex-wrap:wrap; height:auto; min-height:53px; padding-block:4px; }
+.reader-pane .reader-ai-toolbar .icon-button { flex:0 0 44px; width:44px; min-width:44px; height:44px; }
+.reader-pane .reader-ai-toolbar .toolbar-spacer { min-width:0; }
+.reader-ai-tools,.ai-toolbar { display:inline-flex; align-items:center; flex:none; gap:2px; }
+.reader-ai-results:empty { display:none; }
+.ai-card { margin:0 0 24px; padding:16px; border:1px solid var(--line); border-radius:6px; overflow-wrap:anywhere; min-width:0; }
+.ai-card>header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
+.ai-card h2 { font-size:18px; margin:0; }
+.ai-card .field { max-width:320px; }
+.ai-card button,.ai-settings button { min-height:44px; white-space:normal; }
+.ai-card .button-row,.ai-settings .button-row { flex-wrap:wrap; }
+.ai-card progress { width:100%; max-width:320px; }
+.ai-summary { white-space:pre-wrap; margin-block:16px; line-height:var(--line-height,1.8); }
+.ai-bilingual { min-width:0; overflow-wrap:anywhere; }
+.ai-bilingual img { max-width:100%; height:auto; }
+.ai-bilingual pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.ai-bilingual table { display:block; max-width:100%; overflow:auto; }
+.ai-bilingual .feedink-ai-pair { border-bottom:1px solid var(--line); padding-block:14px; }
+.ai-bilingual .feedink-ai-source::before,.ai-bilingual .feedink-ai-target::before { display:block; font:600 12px/1.6 system-ui,sans-serif; color:var(--muted); }
+.ai-bilingual .feedink-ai-source::before { content:'原文'; }
+.ai-bilingual .feedink-ai-target::before { content:'译文'; }
+.ai-bilingual .feedink-ai-target { padding-inline-start:12px; border-inline-start:2px solid var(--line); margin-block-start:12px; }
+.ai-settings fieldset { border:0; padding:0; margin:0; min-width:0; }
+.ai-settings .field { margin-block:16px; }
+@container(max-width:360px) { .reader-pane .reader-ai-toolbar { gap:2px; padding-inline:6px; } .ai-card { padding:10px; } }
+:root[data-theme=eink] .ai-card { border:2px solid #000; border-radius:0; }
+:root[data-theme=eink] .ai-bilingual .feedink-ai-target { border-color:#000; }
+@media print { .ai-toolbar,.ai-card { display:none; } }

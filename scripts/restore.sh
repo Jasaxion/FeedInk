@@ -6,7 +6,12 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 [ "$2" = "--confirm-restore=$COMPOSE_PROJECT_NAME" ] || fail 'Restore requires exact target project confirmation'
 bundle_path "$1"
 [ -d "$BUNDLE" ] || fail 'Backup directory not found'
+# Keep version1 bundles readable; version2 has its own bounded referenced-blob verifier.
+if [ -f "$BUNDLE/blobs.archive" ]; then
+  exec sh "$SCRIPT_DIR/storage-restore.sh" "$@"
+fi
 require_stopped
+storage require-filesystem
 # Verify the entire archive before touching the target; neither input links nor archive paths are trusted.
 for name in manifest.json postgres.dump data.archive; do
   [ -f "$BUNDLE/$name" ] && [ ! -L "$BUNDLE/$name" ] || fail 'Bundle must contain regular, non-symlink files'

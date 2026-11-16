@@ -8,24 +8,23 @@ import type {
 } from "@feedink/shared";
 import { type DB, type SQL, type Row, iso, ApiFailure } from "./core.js";
 import { articleQuery, uuid } from "./validation.js";
+import { commonArticleTotal, countSnapshot, requireArticleCounts } from "./scale-counts.js";
+
+// Used by lists and state acknowledgements, never transfer discarded body/TOAST columns.
+const summaryColumns = (sql: SQL) => sql`a.id,a.user_id,a.feed_id,a.feed_title,a.title,a.url,a.author,a.published_at,a.summary,a.read,a.state_version,a.saved,a.word_count,a.archived_at,a.progress,a.enclosures`;
 
 export class Articles {
   constructor(readonly db: DB) {}
-  async owned(userId: string, articleId: string): Promise<Row> {
-    const [row] = await this
-      .db`SELECT * FROM articles WHERE id=${articleId} AND user_id=${userId}`;
+  async owned(userId: string, articleId: string, sql: SQL = this.db): Promise<Row> {
+    const [row] = await sql`SELECT * FROM articles WHERE id=${articleId} AND user_id=${userId}`;
     if (!row) throw new ApiFailure(404, "NOT_FOUND", "Article not found");
     return row;
   }
   async tags(userId: string): Promise<Tag[]> {
-    const rows = await this
-      .db`SELECT t.*,count(at.article_id)::integer AS count FROM tags t LEFT JOIN article_tags at ON at.tag_id=t.id WHERE t.user_id=${userId} GROUP BY t.id ORDER BY t.name`;
-    return rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      color: r.color,
-      count: r.count,
-    }));
+    return countSnapshot(this.db, userId, async (sql) => {
+      const rows = await sql`SELECT t.id,t.name,t.color,COALESCE(c.total,0)::integer AS count FROM tags t LEFT JOIN article_counts c ON c.user_id=t.user_id AND c.tag_key=t.id::text AND c.feed_key='*' WHERE t.user_id=${userId} ORDER BY t.name`;
+      return rows.map((r) => ({ id: r.id, name: r.name, color: r.color, count: r.count }));
+    });
   }
   async summaries(
     rows: Row[],
@@ -33,39 +32,32 @@ export class Articles {
   ): Promise<(ArticleSummary & { stateVersion: number })[]> {
     if (!rows.length) return [];
     const ids = rows.map((r) => r.id);
-    const tags =
-      await sql`SELECT at.article_id,t.*,(SELECT count(*)::integer FROM article_tags WHERE tag_id=t.id) AS count FROM article_tags at JOIN tags t ON t.id=at.tag_id WHERE at.article_id IN ${sql(ids)}`;
-    const images =
-      await sql`SELECT DISTINCT ON (article_id) article_id,id FROM images WHERE article_id IN ${sql(ids)} AND status='cached' ORDER BY article_id,captured_at,id`;
-    const subscriptions =
-      await sql`SELECT s.id,s.feed_id,s.title FROM subscriptions s WHERE s.feed_id IN (SELECT feed_id FROM articles WHERE id IN ${sql(ids)})`;
+    const tags = await sql`SELECT at.article_id,t.id,t.name,t.color,COALESCE(c.total,0)::integer AS count FROM article_tags at JOIN articles a ON a.id=at.article_id JOIN tags t ON t.id=at.tag_id AND t.user_id=a.user_id LEFT JOIN article_counts c ON c.user_id=t.user_id AND c.tag_key=t.id::text AND c.feed_key='*' WHERE at.article_id IN ${sql(ids)}`;
+    const images = await sql`SELECT DISTINCT ON (article_id) article_id,id FROM images WHERE article_id IN ${sql(ids)} AND status='cached' ORDER BY article_id,captured_at,id`;
+    const subscriptions = await sql`SELECT DISTINCT s.id,s.feed_id,s.title FROM subscriptions s JOIN articles a ON a.feed_id=s.feed_id AND a.user_id=s.user_id WHERE a.id IN ${sql(ids)}`;
+    const byFeed = new Map(subscriptions.map((s) => [s.feed_id, s]));
+    const byImage = new Map(images.map((i) => [i.article_id, i.id]));
+    const byTags = new Map<string, Tag[]>();
+    for (const t of tags) {
+      const list = byTags.get(t.article_id) || [];
+      list.push({ id: t.id, name: t.name, color: t.color, count: t.count });
+      byTags.set(t.article_id, list);
+    }
     return rows.map((r) => ({
       id: r.id,
       feedId: r.feed_id,
-      subscriptionId:
-        subscriptions.find((s) => s.feed_id === r.feed_id)?.id || null,
-      feedTitle:
-        subscriptions.find((s) => s.feed_id === r.feed_id)?.title ||
-        r.feed_title,
+      subscriptionId: byFeed.get(r.feed_id)?.id || null,
+      feedTitle: byFeed.get(r.feed_id)?.title || r.feed_title,
       title: r.title,
       url: r.url,
       author: r.author,
       publishedAt: iso(r.published_at),
       summary: r.summary,
-      thumbnailUrl: images.find((i) => i.article_id === r.id)
-        ? `/api/assets/${images.find((i) => i.article_id === r.id)!.id}`
-        : null,
+      thumbnailUrl: byImage.has(r.id) ? `/api/assets/${byImage.get(r.id)}` : null,
       read: r.read,
       stateVersion: r.state_version,
       saved: r.saved,
-      tags: tags
-        .filter((t) => t.article_id === r.id)
-        .map((t) => ({
-          id: t.id,
-          name: t.name,
-          color: t.color,
-          count: t.count,
-        })),
+      tags: byTags.get(r.id) || [],
       wordCount: r.word_count,
       archivedAt: iso(r.archived_at),
       progress: r.progress,
@@ -76,30 +68,27 @@ export class Articles {
     userId: string,
     articleId: string,
   ): Promise<ArticleDetail & { stateVersion: number }> {
-    const row = await this.owned(userId, articleId),
-      [summary] = await this.summaries([row]);
-    const images = await this
-      .db`SELECT * FROM images WHERE article_id=${articleId} ORDER BY id`;
-    return {
-      ...summary,
-      contentHtml: row.content_html,
-      fulltextHtml: row.fulltext_html,
-      contentText: row.content_text,
-      fetchedAt: iso(row.fetched_at),
-      contentHash: row.content_hash,
-      fulltextError: row.fulltext_error,
-      images: images.map((i) => ({
-        id: i.id,
-        originalUrl: i.original_url,
-        url: `/api/assets/${i.id}`,
-        status: i.status,
-        contentType: i.content_type,
-      })),
-    };
+    return countSnapshot(this.db, userId, async (sql) => {
+      const row = await this.owned(userId, articleId, sql),
+        [summary] = await this.summaries([row], sql);
+      const images = await sql`SELECT * FROM images WHERE article_id=${articleId} ORDER BY id`;
+      return {
+        ...summary,
+        contentHtml: row.content_html,
+        fulltextHtml: row.fulltext_html,
+        contentText: row.content_text,
+        fetchedAt: iso(row.fetched_at),
+        contentHash: row.content_hash,
+        fulltextError: row.fulltext_error,
+        images: images.map((i) => ({
+          id: i.id, originalUrl: i.original_url, url: `/api/assets/${i.id}`,
+          status: i.status, contentType: i.content_type,
+        })),
+      };
+    });
   }
-  selection(userId: string, input: ArticleQuery, withCursor = true) {
-    const q = articleQuery.parse(input),
-      db = this.db;
+  selection(userId: string, input: ArticleQuery, withCursor = true, db: SQL = this.db) {
+    const q = articleQuery.parse(input);
     let condition = db`a.user_id=${userId}`;
     if (q.scope === "all" || q.scope === "unread")
       condition = db`${condition} AND (a.feed_id IS NULL OR EXISTS(SELECT 1 FROM subscriptions s WHERE s.feed_id=a.feed_id AND s.user_id=${userId}))`;
@@ -147,29 +136,25 @@ export class Articles {
     return { condition, q };
   }
   async page(userId: string, input: ArticleQuery): Promise<ArticlePage> {
-    const { condition, q } = this.selection(userId, input),
-      countCondition = this.selection(userId, input, false).condition;
-    const [{ total }] = await this
-      .db`SELECT count(*)::integer AS total FROM articles a WHERE ${countCondition}`;
-    const rows =
-      q.sort === "oldest"
-        ? await this
-            .db`SELECT a.*,to_char(a.published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_date FROM articles a WHERE ${condition} ORDER BY a.published_at,a.id LIMIT ${q.limit + 1}`
-        : await this
-            .db`SELECT a.*,to_char(a.published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_date FROM articles a WHERE ${condition} ORDER BY a.published_at DESC,a.id DESC LIMIT ${q.limit + 1}`;
-    const hasMore = rows.length > q.limit,
-      visible = rows.slice(0, q.limit),
-      last = visible.at(-1);
-    return {
-      items: await this.summaries(visible),
-      total,
-      nextCursor:
-        hasMore && last
-          ? Buffer.from(
-              JSON.stringify({ date: last.cursor_date, id: last.id }),
-            ).toString("base64url")
+    return countSnapshot(this.db, userId, async (sql) => {
+      const { condition, q } = this.selection(userId, input, true, sql);
+      let total = await commonArticleTotal(sql, userId, q);
+      if (total === undefined) {
+        const countCondition = this.selection(userId, input, false, sql).condition;
+        const [count] = await sql`SELECT count(*)::integer AS total FROM articles a WHERE ${countCondition}`;
+        total = count.total;
+      }
+      const order = q.sort === "oldest" ? sql`a.published_at,a.id` : sql`a.published_at DESC,a.id DESC`;
+      const rows = await sql`SELECT ${summaryColumns(sql)},to_char(a.published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_date FROM articles a WHERE ${condition} ORDER BY ${order} LIMIT ${q.limit + 1}`;
+      const visible = rows.slice(0, q.limit), last = visible.at(-1);
+      return {
+        items: await this.summaries(visible, sql),
+        total: total!,
+        nextCursor: rows.length > q.limit && last
+          ? Buffer.from(JSON.stringify({ date: last.cursor_date, id: last.id })).toString("base64url")
           : null,
-    };
+      };
+    });
   }
   async patch(
     userId: string,
@@ -178,8 +163,14 @@ export class Articles {
     expectedVersion?: number,
   ) {
     return this.db.begin(async (tx) => {
+      await requireArticleCounts(tx, userId);
+      // Count-changing API writers take the owner aggregate before article rows.
+      // This avoids a bulk writer holding it while a single writer holds a later
+      // article row and waits for the same aggregate. Progress-only stays exempt.
+      if (patch.read !== undefined || patch.saved !== undefined || patch.tagIds !== undefined)
+        await tx`SELECT total FROM article_counts WHERE user_id=${userId} AND tag_key='' AND feed_key='*' FOR UPDATE`;
       const [row] =
-        await tx`SELECT * FROM articles WHERE id=${articleId} AND user_id=${userId} FOR UPDATE`;
+        await tx`SELECT state_version FROM articles WHERE id=${articleId} AND user_id=${userId} FOR UPDATE`;
       if (!row) throw new ApiFailure(404, "NOT_FOUND", "Article not found");
       if (
         expectedVersion !== undefined &&
@@ -207,7 +198,7 @@ export class Articles {
           await tx`INSERT INTO article_tags(article_id,tag_id) VALUES(${articleId},${tagId})`;
       }
       const updated =
-        await tx`UPDATE articles SET state_version=state_version+1,read=COALESCE(${patch.read ?? null},read),saved=COALESCE(${patch.saved ?? null},saved),progress=COALESCE(${patch.progress ?? null},progress) WHERE id=${articleId} AND user_id=${userId} RETURNING *`;
+        await tx`UPDATE articles a SET state_version=state_version+1,read=COALESCE(${patch.read ?? null},read),saved=COALESCE(${patch.saved ?? null},saved),progress=COALESCE(${patch.progress ?? null},progress) WHERE id=${articleId} AND user_id=${userId} RETURNING ${summaryColumns(tx)}`;
       return (await this.summaries(updated, tx))[0];
     });
   }
@@ -217,15 +208,14 @@ export class Articles {
     ids?: string[],
     query?: ArticleQuery,
   ) {
-    if (ids) {
-      if (!ids.length) return { updated: 0 };
-      const rows = await this
-        .db`UPDATE articles SET state_version=state_version+1,read=${read} WHERE user_id=${userId} AND id IN ${this.db(ids)} RETURNING id`;
-      return { updated: rows.length };
-    }
-    const { condition } = this.selection(userId, query || {});
-    const rows = await this
-      .db`UPDATE articles a SET state_version=state_version+1,read=${read} WHERE ${condition} RETURNING id`;
-    return { updated: rows.length };
+    if (ids && !ids.length) return { updated: 0 };
+    return this.db.begin(async (tx) => {
+      await tx`SELECT total FROM article_counts WHERE user_id=${userId} AND tag_key='' AND feed_key='*' FOR UPDATE`;
+      const condition = ids
+        ? tx`a.user_id=${userId} AND a.id IN ${tx(ids)}`
+        : this.selection(userId, query || {}, true, tx).condition;
+      const rows = await tx`UPDATE articles a SET state_version=state_version+1,read=${read} WHERE ${condition}`;
+      return { updated: rows.count };
+    });
   }
 }

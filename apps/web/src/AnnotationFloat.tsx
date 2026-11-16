@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { observeAnnotationLayout } from './annotationLayout';
 
 export interface AnnotationBounds { left: number; top: number; right: number; bottom: number }
 /** Fixed overlays use layout-viewport coordinates, clipped to the visible reader. */
@@ -45,10 +46,11 @@ export function AnnotationFloat({ root, anchor, kind, children, onClose, onInvis
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(position); };
     const resize = new ResizeObserver(schedule); resize.observe(node); resize.observe(reader);
+    const stopLayout = root.current ? observeAnnotationLayout(root.current, schedule) : () => {};
     window.addEventListener('resize', schedule); window.addEventListener('scroll', schedule, true);
     window.visualViewport?.addEventListener('resize', schedule); window.visualViewport?.addEventListener('scroll', schedule);
     position();
-    return () => { cancelAnimationFrame(frame); resize.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); window.visualViewport?.removeEventListener('resize', schedule); window.visualViewport?.removeEventListener('scroll', schedule); };
+    return () => { stopLayout(); cancelAnimationFrame(frame); resize.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); window.visualViewport?.removeEventListener('resize', schedule); window.visualViewport?.removeEventListener('scroll', schedule); };
   }, [host, anchor, kind, root]);
   useLayoutEffect(() => {
     if (style.visibility !== 'visible') return;

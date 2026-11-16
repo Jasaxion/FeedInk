@@ -234,6 +234,8 @@ export class WebInkOverlay implements WebInkAPI {
     });
     return freshnessFloor;
   }
+  /** Host-only layout changes do not cancel browser contacts or mutate raw ink. */
+  refreshLayout(): void { this.guard(() => this.onGeometry()); }
   undo(): void { this.historyAction('undo'); }
   redo(): void { this.historyAction('redo'); }
   private historyAction(action: 'undo' | 'redo'): void {

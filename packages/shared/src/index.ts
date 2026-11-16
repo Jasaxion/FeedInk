@@ -110,3 +110,4 @@ export interface Ebook { id: string; title: string; createdAt: string; articleCo
 export interface ApiError { error: { code: string; message: string; details?: unknown } }
 export const API_VERSION = 1;
 export * from './annotations.js';
+export * from './ai.js';

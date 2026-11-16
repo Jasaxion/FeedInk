@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { NotebookPen, PenLine, X, Undo2, Redo2 } from 'lucide-react';
+import { NotebookPen, PenLine, X, Undo2, Redo2, Trash2, Palette, SlidersHorizontal } from 'lucide-react';
+import { AnnotationColors } from './AnnotationColors';
+import { observeAnnotationLayout } from './annotationLayout';
 import { AnnotationFloat } from './AnnotationFloat';
 import './annotation-ui.css';
-import type { AnnotationDocument, AnnotationMode, AnnotationVersion, ArticleDetail, MarkColor, TextAnnotation, TextMarkKind, TextQuoteAnchor } from '@feedink/shared';
+import type { AnnotationContext, AnnotationDocument, AnnotationMode, AnnotationVersion, ArticleDetail, MarkColor, TextAnnotation, TextMarkKind, TextQuoteAnchor } from '@feedink/shared';
 import { WebInkOverlay } from '@feedink/ink/overlay';
 import type { HostMessage, Tool } from '@feedink/ink/types';
 import { useApp } from './context';
@@ -17,12 +19,13 @@ import { captureQuote, matchQuote, quoteRange, quoteStream } from './textAnchors
 import { sanitizeArticle } from './safety';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : '批注操作失败';
-interface AnnotatedArticleProps { article: ArticleDetail; mode: AnnotationMode; onImage: (url: string) => void; onTap: () => void; toolbarHost?: HTMLElement | null }
+interface DeletedMark { owner: string; epoch: number; contextKey: string; sourceUrl: string; mark: TextAnnotation; index: number }
+interface AnnotatedArticleProps { article: ArticleDetail; mode: AnnotationMode; onImage: (url: string) => void; onTap: () => void; toolbarHost?: HTMLElement | null; onContextChange?: (context: AnnotationContext | null) => void }
 export function AnnotatedArticle(props: AnnotatedArticleProps) {
   const app = useApp();
   return <AnnotationSession key={`${app.session.user.id}:${props.article.id}:${props.mode}:${props.mode === 'fulltext' ? props.article.fulltextHtml : props.article.contentHtml}`} {...props} />;
 }
-function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: AnnotatedArticleProps) {
+function AnnotationSession({ article, mode, onImage, onTap, toolbarHost, onContextChange }: AnnotatedArticleProps) {
   const app = useApp(), owner = app.session.user.id;
   const [epoch] = useState(authEpoch);
   const root = useRef<HTMLDivElement>(null), engine = useRef<WebInkOverlay | null>(null);
@@ -38,15 +41,25 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
   const [paused, setPaused] = useState(false), [loadGeneration, setLoadGeneration] = useState(0), [syncAgain, setSyncAgain] = useState(0);
   const [configurationGeneration, setConfigurationGeneration] = useState(0);
   const [inkOpen, setInkOpen] = useState(false);
+  const [deletedMark, setDeletedMark] = useState<DeletedMark | null>(null);
   const [selection, setSelection] = useState<{ anchor: TextQuoteAnchor; range: Range } | null>(null);
   const [editorRange, setEditorRange] = useState<Range | null>(null);
+  const noteInput = useRef<HTMLTextAreaElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null), selectionRef = useRef(selection); selectionRef.current = selection;
-  const readOnly = loading || paused;
+  const readOnly = loading || paused || frozen.current;
   const closeEditor = () => { setEditor(null); const target = returnFocus.current?.isConnected ? returnFocus.current : root.current; target?.focus({ preventScroll: true }); };
   const closeDrawer = () => { setOpen(false); toolbarHost?.querySelector<HTMLButtonElement>('[data-testid=annotation-toggle]')?.focus({ preventScroll: true }); };
   const closeSelection = () => { setSelection(null); window.getSelection()?.removeAllRanges(); };
   const closeInk = () => { engine.current?.flush(); setInkOpen(false); setTool('text'); toolbarHost?.querySelector<HTMLButtonElement>('[data-testid=ink-toggle]')?.focus({ preventScroll: true }); };
   function openEditor(id: string, range: Range | null = null) { returnFocus.current = document.activeElement as HTMLElement; setEditorRange(range); setSelection(null); setInkOpen(false); setTool('text'); setEditor(id); }
+
+  const displayedContext = !loading && !paused && !frozen.current && authEpoch() === epoch ? row?.document.context ?? null : null;
+  // This reports the actual retained body, not Reader's possibly newer article props.
+  // Autosave creates fresh document objects without changing this source identity.
+  useLayoutEffect(() => {
+    onContextChange?.(displayedContext);
+    return () => onContextChange?.(null);
+  }, [onContextChange, displayedContext?.articleId, displayedContext?.mode, displayedContext?.contentHash, displayedContext?.contentHtml, displayedContext?.title, displayedContext?.sourceUrl]);
 
   const rawHtml = row?.document.context.contentHtml ?? (mode === 'fulltext' && article.fulltextHtml ? article.fulltextHtml : article.contentHtml);
   const html = useMemo(() => sanitizeArticle(rawHtml, app.session.settings.lazyImages), [rawHtml, app.session.settings.lazyImages]);
@@ -94,10 +107,12 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
   const actions = useRef({ update, flush, pause }); actions.current = { update, flush, pause };
   useEffect(() => {
     alive.current = true;
-    const unregister = registerNotes({ owner, email: app.session.user.email, flush: () => actions.current.flush(), pause: () => actions.current.pause(), freeze: () => { engine.current?.flush(); frozen.current = true; engine.current?.configure({ enabled: false }); }, snapshot: () => current.current });
+    const unregister = registerNotes({ owner, email: app.session.user.email, flush: () => actions.current.flush(), pause: () => actions.current.pause(), freeze: () => { engine.current?.flush(); frozen.current = true; setPaused(true); setDeletedMark(null); engine.current?.configure({ enabled: false }); }, snapshot: () => current.current });
     const unload = (event: BeforeUnloadEvent) => { engine.current?.flush(); if (current.current?.pending || writeError.current) { event.preventDefault(); event.returnValue = ''; } };
+    const clearUndo = () => setDeletedMark(null);
+    window.addEventListener('feedink:identity-lock', clearUndo);
     window.addEventListener('beforeunload', unload);
-    return () => { alive.current = false; window.dispatchEvent(new Event('feedink:annotation-context-retired')); unregister(); window.removeEventListener('beforeunload', unload); engine.current?.destroy(); engine.current = null; };
+    return () => { window.removeEventListener('feedink:identity-lock', clearUndo); alive.current = false; window.dispatchEvent(new Event('feedink:annotation-context-retired')); unregister(); window.removeEventListener('beforeunload', unload); engine.current?.destroy(); engine.current = null; };
   }, []);
   async function load(contentHash?: string) {
     if (loading || pauses.current || frozen.current) return;
@@ -136,7 +151,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
       }
       await check(); assertAuthEpoch(epoch);
       await app.store.putAnnotations(owner, next, local?.localVersion ?? null); assertAuthEpoch(epoch); if (!alive.current) return;
-      setLoadGeneration(value => value + 1); setTool('text'); setInkOpen(false); setEditor(null); setSelection(null);
+      setDeletedMark(null); setLoadGeneration(value => value + 1); setTool('text'); setInkOpen(false); setEditor(null); setSelection(null);
       storedVersion.current = next.localVersion; present(next); setStatus(`${cachedHistory ? '本机历史快照 · ' : ''}${pendingLabel(next)}`); setHistorical(!!contentHash || !app.online); setVersions([...new Map([...(document.versions || []), ...localDocuments.map(item => ({ contentHash: item.document.contentHash, revision: item.document.revision, updatedAt: item.document.updatedAt || '', markCount: item.document.marks.length, strokeCount: item.document.ink?.strokes.length || 0 }))].map(item => [item.contentHash, item])).values()]); setNextVersion(0);
       }));
     } catch (reason) { if (alive.current) { setError(errorText(reason)); setStatus('载入失败 · 未启用书写'); } }
@@ -172,7 +187,8 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
       overlay.restore(validateAnnotations(row.document).ink);
       engine.current = overlay;
     } catch (reason) { setEngineError(errorText(reason)); return; }
-    return () => { window.dispatchEvent(new Event('feedink:annotation-context-retired')); overlay.destroy(); if (engine.current === overlay) engine.current = null; };
+    const stopLayout = observeAnnotationLayout(reader, () => overlay.refreshLayout());
+    return () => { stopLayout(); window.dispatchEvent(new Event('feedink:annotation-context-retired')); overlay.destroy(); if (engine.current === overlay) engine.current = null; };
   }, [contextKey, html, loadGeneration]);
   useEffect(() => { engine.current?.configure({ enabled: inkOpen && tool !== 'text' && !readOnly && !frozen.current && !pauses.current, tool: tool === 'text' ? 'pen' : tool, color: app.session.settings.theme === 'eink' ? '#000000' : markColors[color], width: tool === 'highlighter' ? Math.max(12, width * 4) : tool === 'eraser' ? Math.max(16, width * 4) : width }); }, [inkOpen, tool, color, width, contextKey, html, loadGeneration, configurationGeneration, readOnly, app.session.settings.theme]);
   useEffect(() => {
@@ -259,6 +275,32 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
   function editMark(id: string, patch: Partial<Pick<TextAnnotation, 'text' | 'kind' | 'color'>>) {
     const document = current.current?.document; if (document) update({ ...document, marks: document.marks.map(mark => mark.id === id ? { ...mark, ...patch, updatedAt: Date.now() } : mark) });
   }
+  function canChangeSingleMark() {
+    if (!alive.current || frozen.current || pauses.current || loading || !current.current || current.current.conflict) return false;
+    try { assertAuthEpoch(epoch); return true; } catch { return false; }
+  }
+  function removeMark(id: string) {
+    if (!canChangeSingleMark()) return;
+    const document = current.current!.document, index = document.marks.findIndex(mark => mark.id === id);
+    if (index < 0) return;
+    const deleted: DeletedMark = { owner, epoch, contextKey: annotationKey(document.context), sourceUrl: document.context.sourceUrl, mark: document.marks[index], index };
+    // This is a local edit, not a server round trip. Persistence failure retains the
+    // new in-memory draft and its recovery warning, exactly like typing a note.
+    if (update({ ...document, marks: document.marks.filter(mark => mark.id !== id) })) {
+      setDeletedMark(deleted); if (editor === id) setEditor(null);
+      root.current?.focus({ preventScroll: true });
+    }
+  }
+  function undoRemoveMark() {
+    if (!deletedMark || !canChangeSingleMark()) return;
+    const document = current.current!.document;
+    if (deletedMark.owner !== owner || deletedMark.epoch !== epoch || deletedMark.contextKey !== annotationKey(document.context) || deletedMark.sourceUrl !== document.context.sourceUrl) { setDeletedMark(null); return; }
+    if (document.marks.some(mark => mark.id === deletedMark.mark.id)) return;
+    // Restore only this mark into the latest document; never roll back later text,
+    // ink, revision acknowledgements or conflict metadata with a stale snapshot.
+    const marks = [...document.marks]; marks.splice(Math.min(deletedMark.index, marks.length), 0, deletedMark.mark);
+    if (update({ ...document, marks })) { setDeletedMark(null); (noteInput.current || root.current)?.focus({ preventScroll: true }); }
+  }
   const editing = row?.document.marks.find(mark => mark.id === editor);
   async function resolveConflict(useLocal: boolean) {
     const active = current.current; if (!active?.conflict) return;
@@ -266,7 +308,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
     await flush();
     const next: StoredAnnotations = { document: useLocal ? { ...active.document, revision: active.conflict.revision, id: active.conflict.id } : active.conflict, pending: useLocal, localVersion: crypto.randomUUID() };
     await app.store.putAnnotations(owner, next, storedVersion.current); assertAuthEpoch(epoch);
-    storedVersion.current = next.localVersion; present(next); engine.current?.restore(next.document.ink); setStatus(pendingLabel(next)); setError('');
+    setDeletedMark(null); storedVersion.current = next.localVersion; present(next); engine.current?.restore(next.document.ink); setStatus(pendingLabel(next)); setError('');
   }
   function exportSnapshot() {
     const active = current.current; if (!active) throw new Error('笔记尚未载入');
@@ -290,20 +332,22 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
     <button type="button" className="icon-button" data-testid="annotation-toggle" aria-label="批注与笔记" title="批注与笔记" aria-expanded={open} onClick={() => { window.getSelection()?.removeAllRanges(); setSelection(null); setEditor(null); setInkOpen(false); setTool('text'); setOpen(value => !value); if (!row && !loading) void load(); }}><NotebookPen size={18} /></button>
     <button type="button" className="icon-button" data-testid="ink-toggle" aria-label="手写批注" title="手写批注" aria-pressed={inkOpen} disabled={!row || readOnly} onClick={() => { if (inkOpen) closeInk(); else { window.getSelection()?.removeAllRanges(); setSelection(null); setEditor(null); setOpen(false); setInkOpen(true); setTool('pen'); } }}><PenLine size={18} /></button>
   </span>;
-  const colors = <select aria-label="批注颜色" value={color} onChange={event => setColor(event.target.value as MarkColor)}>{Object.keys(markColors).map(value => <option key={value} value={value}>{({ yellow: '黄色', green: '绿色', blue: '蓝色', lilac: '淡紫' } as Record<string, string>)[value]}</option>)}</select>;
+  const colors = <AnnotationColors value={color} onChange={setColor} disabled={readOnly} />;
+  const undoNotice = deletedMark && <div className="annotation-delete-undo" data-testid="annotation-delete-undo"><span role="status">已删除{markLabels[deletedMark.mark.kind]}</span><button type="button" disabled={readOnly || !!row?.conflict} onPointerDown={event => event.preventDefault()} onClick={undoRemoveMark} aria-label="撤销删除批注" title={row?.conflict ? '请先处理版本冲突' : '撤销删除批注'}><Undo2 size={16} aria-hidden="true" />撤销</button><button type="button" aria-label="关闭撤销删除提示" title="关闭撤销删除提示" onClick={() => setDeletedMark(null)}><X size={16} aria-hidden="true" /></button>{row?.conflict && <small>请先处理版本冲突</small>}</div>;
+  const recoveryNotice = Boolean(writeError.current || row?.pending && error || row?.conflict);
   return <section className="annotation-section">
     {toolbarHost ? createPortal(toolbar, toolbarHost) : root.current?.closest('.app-shell') && createPortal(<div className="annotation-entry-fallback">{toolbar}</div>, root.current.closest('.app-shell')!)}
-    {Boolean(writeError.current || row?.pending && error || row?.conflict) && !open && !editor && <AnnotationFloat root={root} kind="notice" label="笔记保存状态" onClose={() => setOpen(true)}><div role="alert"><strong>{writeError.current ? '笔记未保存' : row?.conflict ? '笔记有冲突' : '笔记待同步'}</strong> <button onClick={() => { closeInk(); setOpen(true); }}>查看恢复选项</button></div></AnnotationFloat>}
+    {(recoveryNotice || deletedMark) && !open && !editor && <AnnotationFloat root={root} kind="notice" label="笔记保存状态" onClose={() => { if (deletedMark) setDeletedMark(null); else setOpen(true); }}>{recoveryNotice && <div role="alert"><strong>{writeError.current ? '笔记未保存' : row?.conflict ? '笔记有冲突' : '笔记待同步'}</strong> <button onClick={() => { closeInk(); setOpen(true); }}>查看恢复选项</button></div>}{undoNotice}</AnnotationFloat>}
     {!open && <span className="annotation-sr-status" role="status" data-testid="annotation-status">{status}{error && ` · ${error}`}</span>}
     {selection && !editor && !inkOpen && <AnnotationFloat root={root} anchor={selection.range} kind="selection" label="选中文字批注" testId="selection-annotation-toolbar" onClose={closeSelection} onInvisible={() => setSelection(null)}>
       {(['highlight', 'underline', 'wave', 'note'] as TextMarkKind[]).map(kind => <button key={kind} disabled={readOnly} onPointerDown={event => event.preventDefault()} onClick={() => addMark(kind)}>{markLabels[kind]}</button>)}
-      <details className="annotation-options"><summary aria-label="文字批注颜色">颜色</summary>{colors}</details>
+      <details className="annotation-options"><summary aria-label="文字批注颜色" title="文字批注颜色"><Palette size={18} aria-hidden="true" /></summary>{colors}</details>
       <button aria-label="关闭文字批注工具" onClick={closeSelection}><X size={16} /></button>
     </AnnotationFloat>}
     {inkOpen && <AnnotationFloat root={root} kind="ink" label="手写工具" testId="annotation-toolbar" onClose={closeInk}>
       {([['pen', '钢笔'], ['highlighter', '荧光笔'], ['eraser', '橡皮']] as const).map(([key, label]) => <button key={key} disabled={!row || readOnly} aria-pressed={tool === key} onClick={() => setTool(key)}>{label}</button>)}
       <button aria-label="撤销笔迹" title="撤销笔迹" disabled={!historyState.undo || readOnly} onClick={() => engine.current?.undo()}><Undo2 size={17} /></button><button aria-label="重做笔迹" title="重做笔迹" disabled={!historyState.redo || readOnly} onClick={() => engine.current?.redo()}><Redo2 size={17} /></button>
-      <details className="annotation-options"><summary>选项</summary><label>颜色{colors}</label><label>笔宽<input aria-label="笔宽" type="range" min="1" max="12" value={width} onChange={event => setWidth(Number(event.target.value))} /></label></details>
+      <details className="annotation-options"><summary aria-label="手写选项" title="手写选项"><SlidersHorizontal size={18} aria-hidden="true" /></summary>{colors}<label>笔宽<input aria-label="笔宽" type="range" min="1" max="12" value={width} onChange={event => setWidth(Number(event.target.value))} /></label></details>
       <button aria-label="退出手写" onClick={closeInk}><X size={17} /></button>
       {engineError && <small role="status">{engineError} · 未定位数据仍保留</small>}
     </AnnotationFloat>}
@@ -311,6 +355,7 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
     <aside className="annotations-panel" data-testid="annotations-panel" aria-label="批注与笔记" inert={paused || undefined}>
       <header className="annotation-drawer-header"><h2>批注与笔记</h2><button aria-label="关闭批注与笔记" onClick={closeDrawer}><X size={18} /></button></header>
       <p role="status" data-testid="annotation-status">{status}</p>
+      {!editing && undoNotice}
       <button disabled={!row || readOnly} onClick={() => addMark('note', true)}>整篇备注</button>
       {error && <p role="alert">{error}</p>}{Boolean(writeError.current) && row && <button onClick={() => { if (confirm('请先导出 JSON。本操作放弃此标签页尚未写入的草稿，重新载入本机 / 服务器版本。')) { engine.current?.destroy(); engine.current = null; writeTail.current = Promise.resolve(); writeError.current = null; void load(row.document.contentHash); } }}>放弃此页草稿并重新载入</button>}{engineError && <p role="status">笔迹提示：{engineError} · 未定位数据仍在 JSON / 打印报告中保留。</p>}
       {row && <><div className="button-row"><button className="secondary" disabled={syncing || readOnly} onClick={() => void sync()}>{syncing ? '正在同步…' : '重试同步'}</button><button onClick={() => void app.task(async () => { exportNotesJson(exportSnapshot()); })}>导出 JSON</button><button disabled={!app.online || row.pending} onClick={() => void app.task(() => exportNotesMarkdown(row.document))}>导出 Markdown</button><button onClick={() => void app.task(async () => { printNotes(exportSnapshot()); })}>打印 / PDF</button><label className="secondary">导入笔记 JSON<input aria-label="导入笔记 JSON" type="file" accept="application/json,.json" disabled={!app.online || loading || row.pending} onChange={event => { const file = event.target.files?.[0]; if (file) void app.task(() => importJson(file)); event.target.value = ''; }} /></label></div>
@@ -318,11 +363,11 @@ function AnnotationSession({ article, mode, onImage, onTap, toolbarHost }: Annot
         {row.conflict && <section className="annotation-conflict" role="alert"><h3>版本冲突 · 未覆盖任何一方</h3><p>本地基线 {row.document.revision}，服务器修订 {row.conflict.revision}。请比较并导出后明确选择。</p><button onClick={() => exportNotesJson(row.document)}>导出本地版本</button><button onClick={() => exportNotesJson(row.conflict!)}>导出服务器冲突版本</button><button onClick={() => void app.task(() => resolveConflict(false))}>使用服务器版本</button><button onClick={() => void app.task(() => resolveConflict(true))}>保留本地版本</button></section>}
         <details><summary>正文版本 {historical ? '· 正在查看历史 / 离线快照' : '· 当前正文'}</summary><p className="hash">{row.document.contentHash}</p><button disabled={!app.online || loading} onClick={() => void load()}>返回最新正文版本</button>{versions.map(version => <button key={version.contentHash} disabled={loading} onClick={() => void load(version.contentHash)}>{version.contentHash.slice(0, 12)} · {version.markCount} 标记 / {version.strokeCount} 笔 · 修订 {version.revision}</button>)}<button disabled={!app.online || nextVersion === null} onClick={() => void app.task(async () => { const page = await api<{ items: AnnotationVersion[]; nextOffset: number | null }>(`/articles/${article.id}/annotation-versions?mode=${mode}&offset=${nextVersion}&limit=20`); assertAuthEpoch(epoch); if (!alive.current) return; setVersions(old => [...new Map([...old, ...page.items].map(item => [item.contentHash, item])).values()]); setNextVersion(page.nextOffset); })}>加载更多版本</button></details>
         <h3>文字批注（{row.document.marks.length}） · 手写 {row.document.ink?.strokes.length || 0} 笔</h3>
-        <ol className="annotation-list">{row.document.marks.map(mark => <li key={mark.id}><button className="annotation-list-item" onClick={() => openEditor(mark.id)}><strong>{markLabels[mark.kind]}</strong>{mark.anchor && <blockquote>{mark.anchor.exact}</blockquote>}{mark.text && <p>{mark.text}</p>}{!mark.anchor && <small>整篇备注</small>}</button><button aria-label={`删除${markLabels[mark.kind]}`} disabled={readOnly} onClick={() => { if (confirm('删除这条批注？')) update({ ...row.document, marks: row.document.marks.filter(item => item.id !== mark.id) }); }}>删除</button></li>)}</ol>
+        <ol className="annotation-list">{row.document.marks.map(mark => <li key={mark.id}><button className="annotation-list-item" onClick={() => openEditor(mark.id)}><strong>{markLabels[mark.kind]}</strong>{mark.anchor && <blockquote>{mark.anchor.exact}</blockquote>}{mark.text && <p>{mark.text}</p>}{!mark.anchor && <small>整篇备注</small>}</button><button type="button" aria-label={`删除${markLabels[mark.kind]}`} title={`删除${markLabels[mark.kind]}`} disabled={readOnly || !!row.conflict} onClick={() => removeMark(mark.id)}><Trash2 size={17} aria-hidden="true" /></button></li>)}</ol>
       </>}
       {!row && <button disabled={loading} onClick={() => void load()}>{loading ? '正在验证批注上下文…' : '重新载入批注'}</button>}
     </aside></AnnotationFloat>}
-    {editing && <AnnotationFloat root={root} anchor={editorRange} kind="editor" testId="annotation-note-popover" label="备注编辑器" onClose={closeEditor}><section className="note-editor"><button className="annotation-editor-close" aria-label="关闭备注编辑器" onClick={closeEditor}><X size={17} /></button><h3>编辑{markLabels[editing.kind]}</h3>{editing.anchor && <blockquote>{editing.anchor.exact}</blockquote>}<label>备注内容（纯文本）<textarea data-testid="note-editor" aria-label="备注内容" disabled={readOnly} maxLength={32768} rows={4} value={editing.text} onChange={event => editMark(editing.id, { text: event.target.value })} /></label><label>标记颜色<select disabled={readOnly} value={editing.color} onChange={event => editMark(editing.id, { color: event.target.value as MarkColor })}>{Object.keys(markColors).map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={readOnly} onClick={() => void app.task(async () => { await flush(); closeEditor(); if (app.online) await sync(); })}>保存备注</button><small role="status">{status}</small>{!open && error && <p role="alert">{error}</p>}<small>输入会立即尝试写入本机草稿；“服务器已确认”才表示跨设备保存。</small></section></AnnotationFloat>}
+    {editing && <AnnotationFloat root={root} anchor={editorRange} kind="editor" testId="annotation-note-popover" label="备注编辑器" onClose={closeEditor}><section className="note-editor"><button className="annotation-editor-close" aria-label="关闭备注编辑器" onClick={closeEditor}><X size={17} /></button><h3>编辑{markLabels[editing.kind]}</h3>{editing.anchor && <blockquote>{editing.anchor.exact}</blockquote>}<label>备注内容（纯文本）<textarea ref={noteInput} data-testid="note-editor" aria-label="备注内容" disabled={readOnly} maxLength={32768} rows={4} value={editing.text} onChange={event => editMark(editing.id, { text: event.target.value })} /></label><AnnotationColors label="标记颜色" disabled={readOnly} value={editing.color} onChange={color => editMark(editing.id, { color })} /><div className="annotation-editor-actions"><button disabled={readOnly} onClick={() => void app.task(async () => { await flush(); closeEditor(); if (app.online) await sync(); })}>保存备注</button><button type="button" aria-label="删除当前批注" title="删除当前批注" disabled={readOnly || !!row?.conflict} onClick={() => removeMark(editing.id)}><Trash2 size={17} aria-hidden="true" /></button></div>{undoNotice}<small role="status">{status}</small>{!open && error && <p role="alert">{error}</p>}<small>输入会立即尝试写入本机草稿；“服务器已确认”才表示跨设备保存。</small></section></AnnotationFloat>}
     {historical && row && <p className="notice">正在显示笔记所属的正文快照；不会替换文章最新存档。</p>}
     <div className="annotation-page">
       <div className="article-content" data-testid="reader-content" data-reader-root="" tabIndex={-1} ref={root} data-annotation-context={row?.document.contentHash} data-article-key={row?.document.contentHash} dangerouslySetInnerHTML={{ __html: html }} onClick={event => { if (tool === 'text' && !window.getSelection()?.toString() && !(event.target as HTMLElement).closest('a,img,button,summary,pre,code')) onTap(); }} />

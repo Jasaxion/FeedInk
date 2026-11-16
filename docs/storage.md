@@ -1,0 +1,87 @@
+# Immutable blob storage and maintenance migration
+
+This is an unreleased implementation/verification contract, **not measured million-article capacity**. Bodies, ownership, notes, tombstones, retained-only annotation contexts and auth state remain in PostgreSQL. Storage contains immutable image/icon/EPUB bytes, not a replacement body database. The small reader/user ZIP formats and limits are unchanged.
+
+## Deployment and API integration
+
+`Config.storage` is optional. `new Store(directory)` remains filesystem-compatible; the application must construct `new Store(config.dataDir, config.storage)`. Filesystem is the default. New keys remain lowercase SHA256 and are published to `ab/cd/<full-key>`. Reads try fanout first, then legacy `<directory>/<full-key>`. Existing DB keys and authenticated asset URLs do not change. Verification reports a corrupt fanout object as an error, rather than silently selecting an older flat copy. Normal streaming reads do not perform a second full hash pass; use maintenance verification to detect out-of-band corruption.
+
+For optional S3-compatible storage, use private **deployment** settings, never user/account/request parameters:
+
+| Setting | Meaning |
+| --- | --- |
+| `STORAGE_BACKEND` | `filesystem` (default) or `s3` |
+| `STORAGE_S3_BUCKET` | Existing private bucket |
+| `STORAGE_S3_REGION` | Signing region; default `us-east-1` |
+| `STORAGE_S3_ENDPOINT` | Optional HTTPS origin for a private S3-compatible service |
+| `STORAGE_S3_PREFIX` | Optional relative directory prefix ending in `/` |
+| `STORAGE_S3_FORCE_PATH_STYLE` | `true` for services that require it |
+| `STORAGE_S3_ALLOW_HTTP` | Explicit `true` only for a deliberately configured private/test endpoint |
+| `DATA_DIR` | Durable, private, writable local journal/scratch directory, **also required for S3** |
+
+Credentials use the official AWS SDK deployment credential chain (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, or the deployment's credential provider). Do not commit configuration, credentials, bucket contents or fingerprints from real deployments. Do not expose bucket credentials/URLs to users or return signed URLs. Block public bucket access and disable object expiry/lifecycle deletion. Grant only the intended prefix's GetObject/PutObject and ListBucket for nonempty-target checks; the application has no DeleteObject implementation. Prefixes must be private to this installation. Versioned buckets should use a fresh dedicated prefix/bucket for recovery; current-key emptiness is not proof that historical versions never existed.
+
+The SDK uses conditional `If-None-Match: *`, SHA256 checksums and a **full GET/hash verification** after publishing, including an existing-key collision. ETags are not integrity hashes. The provider must support atomic conditional PUT, read-after-write visibility and the checksum protocol. No unconditional overwrite or alternate transport fallback exists. Single PUT is limited to 5GiB; existing bounded image/EPUB producers are much smaller. There is no speculative multipart upload/garbage collector. S3 connections have a 10s connection and 120s request timeout, with at most three SDK attempts; complete transfer/recovery duration remains dependent on service latency and bandwidth.
+
+`Store.stream(key)` returns a Node readable. Application asset/icon/EPUB routes should return that stream **after the unchanged owner joins/session checks**. Do not accept a hash as authorization. Cross-account rows can legitimately share the same physical bytes; deleting/changing one owner's reference cannot authorize or delete another owner's object. Buffer-based `get()` remains for bounded archive/image processing callers.
+
+Parent integration: add runtime dependency `@aws-sdk/client-s3` (`^3.922.0`, resolve/review/pin the exact hosted lockfile version), pass storage configuration into Store, wire the three existing owned download handlers to `stream`, and forward the above deployment variables through Compose. No other SDK package is required. The compiled operator is already included by `apps/api/src/**/*.ts` and the existing runtime `dist` copy. Shell tools run `node apps/api/dist/storage/operator.js`; optional API package aliases are `storage: "node dist/storage/operator.js"`. No manifest/lockfile edits are part of this storage patch.
+
+## Publish, failures and bounded startup recovery
+
+All production blob transactions still take PostgreSQL advisory lock **71244004** on their existing reserved connection. Removing it requires separate concurrency/crash evidence; this patch makes no lock-throughput claim. Never reserve another pool connection while holding it.
+
+1. Create `.storage-staging/txn-*/intent.json` with a version and deployment-identity digest, fsync file/directory/parent before starting the SQL transaction.
+2. Stage each hash-keyed byte file, fsync it and the staging directory before `put()` returns. Key enumeration is on disk, not an archive-wide Set.
+3. Publish every staged object immutably, and verify bytes. Filesystem uses same-filesystem hard links and fsyncs new fanout parents and leaf directories. S3 uses conditional PUT + GET verification. Only then attempt PostgreSQL COMMIT.
+4. On an acknowledged commit, remove only the transaction's own staging. On a known pre-COMMIT rollback, staging can be removed; published objects are conservatively retained. A failed COMMIT is **ambiguous even if a later ROLLBACK succeeds**: retain the durable intent for authoritative recovery.
+5. Recovery takes the same lock, checks current PostgreSQL references, re-publishes/verifies referenced staged objects, then removes processed staging. It never deletes final objects. Corrupt staging/collisions, missing permissions or S3 outages fail closed and retain evidence. Cleanup failures still release the writer lock.
+
+Startup enumerates only `.storage-staging`, at most 256 journal/key entries per call (operator calls may choose 1–10,000). It never enumerates the fanout or legacy blob root. Remaining entries are safe to retain because publication precedes reference commit; run maintenance recovery to drain them. This bounds entry work/memory, **not a universal startup-time bound**: a slow backend or large staged file still costs I/O. Incomplete/corrupt intent metadata requires private operator inspection; it is not silently discarded. Each writer host's durable journal must be preserved and recovered using the original deployment identity before switching its backend/path. Do not use disposable `/tmp` for DATA_DIR. S3 bytes can outlive a lost journal; those unknown objects must remain, not be guessed away.
+
+### Existing interrupted writes
+
+Legacy `.stage-*` directories are not discoverable without traversing the old flat root. Before cutover, stop every writer and run:
+
+```sh
+sh scripts/storage-recover.sh legacy --confirm-maintenance=PROJECT
+sh scripts/storage-recover.sh journal --confirm-maintenance=PROJECT
+```
+
+Use the original filesystem DATA_DIR for the legacy command. It streams directory entries with bounded memory and processes stage contents in batches of 256; discovery can traverse the **entire old root during explicit maintenance**. It is not a bounded-time startup scan or a persisted filesystem directory cursor. If interrupted, rerun: processed staging is durable, immutable finals are retained, and discovery restarts. It restores/verifies committed/shared keys and conservatively keeps unreferenced legacy finals. New startup intentionally does not promise to discover every old root-stage directory. Old code must not be restarted after fanout writes: it cannot read fanout keys.
+
+## Copy and verify, never move
+
+The migration utility uses PostgreSQL reference-key keyset pages of 256, one streamed object scratch file at a time, and a constant-size JSON checkpoint every 128 completed copies. It never lists a bucket or accumulates all filenames. It scans `images.file_key`, `ebooks.file_key` and `feeds.icon_file_key`, regardless of owning account/status. Existing exact keys and bytes are retained without image normalization, HTML sanitation, ID rewriting or annotation import.
+
+For efficient keysets/reference checks, coordinate non-null blob-reference indexes with the query/index migration. On an installation without equivalent indexes, an operator may create `images(file_key) WHERE file_key IS NOT NULL`, `ebooks(file_key) WHERE file_key IS NOT NULL`, and `feeds(icon_file_key) WHERE icon_file_key IS NOT NULL` **CONCURRENTLY outside startup's transactional migration runner**. Review deployed index names/definitions first. Do not add duplicate indexes or run concurrent DDL inside a transaction. These scans and fingerprints require hosted plans/timing evidence.
+
+All public tables are fingerprinted in primary-key order with server-side cursor batches of 32; exact PostgreSQL JSONB text includes bodies, owner relations, auth epochs, full note payloads/revisions/tombstones and retained-only contexts. Column metadata also participates. Every public table must have a primary key or the operation refuses. Fingerprints do not emit row contents. Match PostgreSQL version/collation and use the same code/schema for comparison; this is not a portable cross-engine semantic hash. Large rows still impose a per-row/batch memory cost. Fingerprints are full scans, not fast counter checks, and PG dump preserves additional catalog/sequence state beyond this row fingerprint.
+
+Stop **all** API replicas, workers, external SQL, mail delivery and other source/target writers for the entire operation. The shared lock is not a substitute for stopping non-blob database writers. Source settings are `DATA_DIR`/`STORAGE_*`. Destination settings are `TARGET_DATA_DIR`/`TARGET_STORAGE_*` with the same suffixes as the source table. Mount a durable target directory and checkpoint path inside the utility container. For filesystem destinations scratch must be on that filesystem; for S3 it remains local. Do not put a checkpoint inside a blob key namespace or use an ephemeral container filesystem. The shell does not mount arbitrary paths or chown host directories for you.
+
+```sh
+# Set deployment-specific source/target env and mounts privately in Compose; no credentials on CLI.
+sh scripts/storage-migrate.sh /operator-state/copy.json --confirm-maintenance=PROJECT
+# Direct image commands for explicit verification (writers remain stopped):
+# STORAGE_MAINTENANCE=stopped node apps/api/dist/storage/operator.js verify
+```
+
+Filesystem→fanout in the same directory, filesystem→S3 and S3→filesystem use the same protocol. The checkpoint binds source/destination identities and the initial complete-row fingerprint. Resume refuses a different deployment or changed database. After copying the tail it **re-reads and hashes every referenced destination**, including previously checkpointed keys, and fingerprints the database again. A complete checkpoint is not permission to skip final verification. Disk-full, interrupted copy or ambiguous object acknowledgement leaves source and partial scratch/target intact; repeating from the checkpoint is idempotent. Source and destination must not alias through unreviewed mounts/symlinks; a changed identity requires a new checkpoint.
+
+Cutover is explicit: preserve an independently verified paired backup; drain every host's journal; stop all writers; complete copy/verification; save private PG/object fingerprints; change deployment config; verify the destination with the same database; then deliberately resume. Source removal/garbage collection is **not** implemented or authorized. Unreferenced legacy/fanout objects and abandoned scratch are retained and are not counted as migrated referenced data.
+
+Rollback before new writes can switch back to the retained source using a fanout-capable release. After new writes, a plain configuration switch is **not lossless**: copy/verify the reverse delta while stopped (new checkpoint) or restore a matching PostgreSQL/blob backup pair. Neither a blob migration nor a ZIP reconstructs historical content already overwritten before this release, nor browser-local unsynchronized drafts that were never sent to the server. Preserving their retained contexts makes existing offline drafts syncable; it does not back up browser storage.
+
+## Hosted acceptance gates
+
+No local service/build/typecheck/performance runs establish this feature. Run on approved GitHub-hosted infrastructure with synthetic data only:
+
+- API build/typecheck and full existing tests (including adapted legacy recovery, post-commit cleanup-lock and annotation race coverage).
+- New `storage.test.ts`, `storage-s3.test.ts`, `storage-bundle.test.ts` unit/protocol regressions; still unrun in the implementation lane.
+- `storage-postgres.test.ts` with a **dedicated empty** `TEST_STORAGE_DATABASE_URL`; S3 additionally needs `TEST_STORAGE_BACKEND=s3` and `TEST_STORAGE_S3_*` deployment fields plus synthetic SDK credentials. Do not point it at the shared integration database: migration validates **every** DB reference against its fixture's backend. Synthetic S3 prefixes are retained for diagnosis until the hosted environment is disposed.
+- `TEST_IMAGE=... sh scripts/test-storage-backup.sh` for paired restore, retained-only fingerprint preservation, corruption/nonempty refusal and intentional surplus exclusion; run unchanged `scripts/test-backup.sh` and data-archive tests for version1 compatibility.
+- Real filesystem disk-full/kill-at-fsync, process/connection death around publish/COMMIT, multi-host journal recovery, S3 conditional/outage behavior, corrupt/missing objects, interrupted migrations and fresh-target restores. Unit-injected failures are not substitutes for these service/volume-driver tests.
+- 10k/100k/1M synthetic references/articles, bounded process memory, exact plans, bytes/inodes, global-lock wait time, object requests, migration/backup/restore duration and fingerprint equality. No measured result or million-scale performance guarantee is claimed here.
+
+See [backup.md](backup.md) for paired referenced-blob recovery and the different scope of old full-volume archives.

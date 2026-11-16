@@ -1,0 +1,22 @@
+# Synthetic referenced-blob recovery drill; only run on approved GitHub-hosted infrastructure.
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    environment:
+      POSTGRES_USER: feedink_drill
+      POSTGRES_DB: feedink_drill
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Synthetic test password required}
+    volumes:
+      - database:/var/lib/postgresql/data
+  app:
+    image: ${TEST_IMAGE:?Set the hosted-built FeedInk image}
+    command: [node, -e, 'setInterval(() => {}, 1000)']
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: postgres://feedink_drill:${POSTGRES_PASSWORD}@postgres:5432/feedink_drill
+      STORAGE_BACKEND: filesystem
+    volumes:
+      - data:/data
+volumes:
+  database:
+  data:

@@ -34,6 +34,20 @@ services:
       APP_URL: ${APP_URL:?Set APP_URL to the browser-visible URL}
       SESSION_SECRET: ${SESSION_SECRET:?Set a random SESSION_SECRET}
       REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-false}
+      # Optional AI; keep its stable encryption key with private deployment backups.
+      AI_ENCRYPTION_KEY: ${AI_ENCRYPTION_KEY:-}
+      AI_ALLOW_HOSTS: ${AI_ALLOW_HOSTS:-}
+      # Filesystem remains the default. S3 credentials are operator-only.
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-filesystem}
+      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-}
+      STORAGE_S3_REGION: ${STORAGE_S3_REGION:-us-east-1}
+      STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-}
+      STORAGE_S3_PREFIX: ${STORAGE_S3_PREFIX:-}
+      STORAGE_S3_FORCE_PATH_STYLE: ${STORAGE_S3_FORCE_PATH_STYLE:-false}
+      STORAGE_S3_ALLOW_HTTP: ${STORAGE_S3_ALLOW_HTTP:-false}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       # Administrator identity is consumed only by the operator bootstrap CLI, never registration.
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_NAME: ${ADMIN_NAME:-Administrator}

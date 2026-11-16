@@ -23,6 +23,7 @@ import { SafeFetcher } from "./network.js";
 import { Content } from "./content.js";
 import { Feeds } from "./feeds.js";
 import { Articles } from "./articles.js";
+import { countSnapshot } from "./scale-counts.js";
 import { Archives } from "./archive.js";
 import { Ebooks, ebookDto } from "./ebooks.js";
 import { Auth } from "./auth.js";
@@ -40,11 +41,14 @@ import { ZIP_LIMIT } from "./zip.js";
 import { Annotations } from "./annotations.js";
 import { installAnnotationRoutes } from "./annotation-routes.js";
 import { installMcp } from "./mcp.js";
+import { AiService } from "./ai.js";
+import { aiEnvironmentFromEnv } from "./ai-security.js";
+import { installAiRoutes } from "./ai-routes.js";
 
 export async function createApp(config: Config, providedDb?: DB) {
   const db = providedDb || connect(config);
   await migrate(db);
-  const store = new Store(config.dataDir);
+  const store = new Store(config.dataDir, config.storage);
   await store.init();
   await withConnection(db, (sql) => store.recover(sql));
   const fetcher = new SafeFetcher(config.fetchAllowHosts),
@@ -153,6 +157,7 @@ export async function createApp(config: Config, providedDb?: DB) {
     seedDemo(db, store, config, user),
   );
   installAnnotationRoutes(app, annotations);
+  installAiRoutes(app, new AiService(db, aiEnvironmentFromEnv()), { worker: config.worker });
   installMcp(app, config, db, store, annotations);
   const param = (request: { params: unknown }) =>
     uuid.parse((request.params as any).id);
@@ -221,9 +226,7 @@ export async function createApp(config: Config, providedDb?: DB) {
     )
       throw new ApiFailure(404, "NOT_FOUND", "Folder not found");
     await db`UPDATE subscriptions SET title=${input.title ?? existing.title},folder_id=${input.folderId === undefined ? existing.folder_id : input.folderId},position=${input.position ?? existing.position},settings=${db.json({ ...existing.settings, ...input.settings })} WHERE id=${subscriptionId}`;
-    return (await feeds.subscriptions(userId)).find(
-      (s) => s.id === subscriptionId,
-    );
+    return (await feeds.subscriptions(userId, subscriptionId))[0];
   });
   app.delete("/api/subscriptions/:id", async (request, reply) => {
     const rows =
@@ -244,9 +247,7 @@ export async function createApp(config: Config, providedDb?: DB) {
       if (!feed)
         throw new ApiFailure(404, "NOT_FOUND", "Subscription not found");
       await feeds.refresh(feed);
-      return (await feeds.subscriptions(userId)).find(
-        (s) => s.id === subscriptionId,
-      );
+      return (await feeds.subscriptions(userId, subscriptionId))[0];
     },
   );
   app.get("/api/discover", { config: outboundLimit }, async (request) => {
@@ -260,17 +261,18 @@ export async function createApp(config: Config, providedDb?: DB) {
     if (/^(https?|rsshub):/i.test(input.q)) await demoOutbound(request);
     return { feeds: await feeds.discover(input.q, input.topic) };
   });
-  const folderList = async (userId: string) => {
-    const rows =
-      await db`SELECT f.*,(SELECT count(*)::integer FROM articles a JOIN subscriptions s ON s.feed_id=a.feed_id WHERE s.folder_id=f.id AND NOT a.read) AS unread_count FROM folders f WHERE f.user_id=${userId} ORDER BY f.position,f.name`;
-    return rows.map((f) => ({
-      id: f.id,
-      name: f.name,
-      position: f.position,
-      settings: f.settings,
-      unreadCount: f.unread_count,
-    }));
-  };
+  const folderList = async (userId: string) =>
+    countSnapshot(db, userId, async (sql) => {
+      const rows =
+        await sql`SELECT f.*,(SELECT COALESCE(sum(c.unread),0)::integer FROM subscriptions s JOIN article_counts c ON c.user_id=s.user_id AND c.feed_key=s.feed_id::text AND c.tag_key='' WHERE s.folder_id=f.id AND s.user_id=f.user_id) AS unread_count FROM folders f WHERE f.user_id=${userId} ORDER BY f.position,f.name`;
+      return rows.map((f) => ({
+        id: f.id,
+        name: f.name,
+        position: f.position,
+        settings: f.settings,
+        unreadCount: f.unread_count,
+      }));
+    });
   app.get("/api/folders", async (request) => ({
     items: await folderList(user(request)),
   }));
@@ -443,7 +445,7 @@ export async function createApp(config: Config, providedDb?: DB) {
     reply
       .type("image/png")
       .header("Content-Security-Policy", "default-src 'none'");
-    return store.get(feed.icon_file_key);
+    return store.stream(feed.icon_file_key);
   });
   app.get("/api/assets/:id", async (request, reply) => {
     const [image] =
@@ -458,7 +460,7 @@ export async function createApp(config: Config, providedDb?: DB) {
     reply
       .type(image.content_type)
       .header("Content-Security-Policy", "default-src 'none'");
-    return store.get(image.file_key);
+    return store.stream(image.file_key);
   });
   app.post("/api/import/opml", { config: outboundLimit }, async (request) => {
     await demoOutbound(request);
@@ -544,7 +546,7 @@ export async function createApp(config: Config, providedDb?: DB) {
     reply
       .type("application/epub+zip")
       .header("Content-Disposition", 'attachment; filename="feedink.epub"');
-    return store.get(ebook.file_key);
+    return store.stream(ebook.file_key);
   });
   const hasWeb = await stat(config.webDir)
     .then((s) => s.isDirectory())
@@ -592,7 +594,7 @@ export async function createApp(config: Config, providedDb?: DB) {
         }
         if (!stopped) {
           const pending =
-            await lock`SELECT i.*,a.url AS source_url FROM images i JOIN articles a ON a.id=i.article_id JOIN users u ON u.id=a.user_id WHERE i.status='pending' AND NOT u.disabled AND NOT u.is_demo LIMIT 20`;
+            await lock`SELECT i.*,a.url AS source_url FROM images i JOIN articles a ON a.id=i.article_id JOIN users u ON u.id=a.user_id WHERE i.status='pending' AND NOT u.disabled AND NOT u.is_demo ORDER BY i.article_id,i.id LIMIT 20`;
           const deadline = Date.now() + 30000;
           for (const image of pending) {
             if (stopped || Date.now() >= deadline) break;

@@ -22,6 +22,7 @@ import {
   raster,
 } from "./content.js";
 import { SafeFetcher, requireOk } from "./network.js";
+import { countSnapshot } from "./scale-counts.js";
 
 export interface FeedEntry {
   guid: string;
@@ -305,9 +306,7 @@ export class Feeds {
     const [subscription] = await this
       .db`INSERT INTO subscriptions (id,user_id,feed_id,title,folder_id) VALUES (${id()},${userId},${feed.id},${input.title || found.title},${input.folderId || null}) ON CONFLICT(feed_id) DO UPDATE SET feed_id=EXCLUDED.feed_id RETURNING id`;
     await this.refresh(feed);
-    return (await this.subscriptions(userId)).find(
-      (s) => s.id === subscription.id,
-    )!;
+    return (await this.subscriptions(userId, subscription.id))[0]!;
   }
   async refresh(feed: Row, connection?: SQL) {
     // All protected work uses this same reserved executor; never re-enter its pool.
@@ -374,7 +373,7 @@ export class Feeds {
             await lock`UPDATE feeds SET title=${parsed.title},site_url=${parsed.siteUrl},description=${parsed.description},etag=${response.headers.etag || null},last_modified=${response.headers["last-modified"] || null} WHERE id=${feed.id}`;
           }
           const pending =
-            await lock`SELECT i.*,a.url AS source_url FROM images i JOIN articles a ON a.id=i.article_id WHERE a.feed_id=${feed.id} AND i.status='pending' LIMIT 50`;
+            await lock`SELECT i.*,a.url AS source_url FROM images i JOIN articles a ON a.id=i.article_id WHERE a.feed_id=${feed.id} AND i.status='pending' ORDER BY i.article_id,i.id LIMIT 50`;
           const imageDeadline = Date.now() + 45000;
           for (const image of pending) {
             if (Date.now() >= imageDeadline) break;
@@ -430,26 +429,28 @@ export class Feeds {
       /* Missing/unsupported icons use the client's first-party fallback; keep an existing good icon. */
     }
   }
-  async subscriptions(userId: string): Promise<Subscription[]> {
-    const rows = await this
-      .db`SELECT s.*,f.url,f.site_url,f.description,f.icon_file_key,f.status,f.last_fetched_at,f.last_error,(SELECT count(*)::integer FROM articles a WHERE a.feed_id=f.id) AS total_count,(SELECT count(*)::integer FROM articles a WHERE a.feed_id=f.id AND NOT a.read) AS unread_count FROM subscriptions s JOIN feeds f ON f.id=s.feed_id WHERE s.user_id=${userId} ORDER BY (s.settings->>'pinned')::boolean DESC NULLS LAST,s.position,s.title`;
-    return rows.map((r) => ({
-      id: r.id,
-      feedId: r.feed_id,
-      title: r.title,
-      url: r.url,
-      siteUrl: r.site_url,
-      description: r.description,
-      iconUrl: r.icon_file_key ? `/api/feed-icons/${r.feed_id}` : null,
-      folderId: r.folder_id,
-      unreadCount: r.unread_count,
-      totalCount: r.total_count,
-      settings: r.settings,
-      status: r.status,
-      lastFetchedAt: r.last_fetched_at ? iso(r.last_fetched_at) : null,
-      lastError: r.last_error,
-      position: r.position,
-    }));
+  async subscriptions(userId: string, subscriptionId?: string): Promise<Subscription[]> {
+    return countSnapshot(this.db, userId, async (sql) => {
+      const filter = subscriptionId ? sql`AND s.id=${subscriptionId}` : sql``;
+      const rows = await sql`SELECT s.*,f.url,f.site_url,f.description,f.icon_file_key,f.status,f.last_fetched_at,f.last_error,COALESCE(c.total,0)::integer AS total_count,COALESCE(c.unread,0)::integer AS unread_count FROM subscriptions s JOIN feeds f ON f.id=s.feed_id AND f.user_id=s.user_id LEFT JOIN article_counts c ON c.user_id=s.user_id AND c.tag_key='' AND c.feed_key=f.id::text WHERE s.user_id=${userId} ${filter} ORDER BY (s.settings->>'pinned')::boolean DESC NULLS LAST,s.position,s.title`;
+      return rows.map((r) => ({
+        id: r.id,
+        feedId: r.feed_id,
+        title: r.title,
+        url: r.url,
+        siteUrl: r.site_url,
+        description: r.description,
+        iconUrl: r.icon_file_key ? `/api/feed-icons/${r.feed_id}` : null,
+        folderId: r.folder_id,
+        unreadCount: r.unread_count,
+        totalCount: r.total_count,
+        settings: r.settings,
+        status: r.status,
+        lastFetchedAt: r.last_fetched_at ? iso(r.last_fetched_at) : null,
+        lastError: r.last_error,
+        position: r.position,
+      }));
+    });
   }
   async importOpml(userId: string, xml: string) {
     rejectXmlEntities(xml);

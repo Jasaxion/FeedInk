@@ -13,6 +13,7 @@
     "reconcile-ebook": "node dist/operator-cli.js reconcile-ebook"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1169.0",
     "@fastify/cookie": "^11.0.2",
     "@fastify/multipart": "^9.3.0",
     "@fastify/rate-limit": "^10.3.0",
@@ -22,7 +23,9 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@mozilla/readability": "^0.6.0",
     "cheerio": "^1.1.2",
+    "domhandler": "5.0.3",
     "fastify": "^5.6.2",
+    "franc": "6.2.0",
     "ipaddr.js": "^2.2.0",
     "jsdom": "^27.2.0",
     "nodemailer": "^10.5.0",

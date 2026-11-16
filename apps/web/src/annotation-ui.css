@@ -20,6 +20,15 @@
 .annotation-options[open]{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .annotation-options label{display:inline-flex;gap:5px;align-items:center}
 .annotation-options input[type=range]{width:90px}
+.annotation-colors{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.annotation-float .annotation-swatch{width:38px;min-width:38px;padding:4px;color:#000;background:var(--paper)}
+.annotation-swatch-chip{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:24px;height:24px;border:1px solid #333;border-radius:50%;background:var(--swatch-color)}
+.annotation-swatch[aria-checked=true]{outline:2px solid var(--ink);outline-offset:-2px}
+.annotation-swatch[aria-checked=true] .annotation-swatch-chip{border:2px solid #000}
+.annotation-swatch:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.annotation-delete-undo{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:4px 0;font-size:13px}
+.annotation-delete-undo small{flex-basis:100%}
+.annotation-editor-actions{display:flex;gap:8px;justify-content:space-between}
 .annotation-drawer{width:390px;height:calc(100dvh - 90px);padding:0;z-index:22}
 .annotation-drawer .annotations-panel{border:0;border-radius:0;margin:0;padding:16px;background:var(--panel);color:var(--ink);font:14px/1.6 system-ui,sans-serif}
 .annotation-drawer-header{display:flex;gap:12px;align-items:center;justify-content:space-between}
@@ -53,8 +62,15 @@
 .annotation-unlocated{font:12px/1.5 system-ui,sans-serif;color:var(--muted)}
 [data-theme=eink] .annotation-float{border:2px solid #000;border-radius:0;background:#fff;box-shadow:none}
 [data-theme=eink] .annotation-float button[aria-pressed=true]{background:#000!important;color:#fff!important;border:2px solid #000}
+[data-theme=eink] .annotation-swatch-chip{background:#fff;border-color:#000}
+[data-theme=eink] .annotation-swatch-chip[data-color=green]{background:repeating-linear-gradient(0deg,#fff 0 4px,#000 4px 5px)}
+[data-theme=eink] .annotation-swatch-chip[data-color=blue]{background:repeating-linear-gradient(90deg,#fff 0 4px,#000 4px 5px)}
+[data-theme=eink] .annotation-swatch-chip[data-color=lilac]{background:repeating-linear-gradient(45deg,#fff 0 4px,#000 4px 5px)}
+[data-theme=eink] .annotation-swatch[aria-checked=true]{outline:2px solid #000}
+[data-theme=eink] .annotation-swatch:focus-visible{outline:3px solid #000;outline-offset:2px}
+[data-theme=eink] .annotation-swatch-chip svg{background:#fff;border-radius:50%;color:#000}
 [data-theme=eink] .text-mark{--mark-color:#000!important}
 [data-theme=eink] .text-mark-highlight,[data-theme=eink] .text-mark-note{background:transparent;border:1px solid #000;opacity:1}
 [data-theme=eink] .text-mark-wave::after{background:none}
-@media(max-width:699px){.annotation-float button,.annotation-float summary{min-height:44px}.annotation-drawer{width:100%;border-radius:16px 16px 6px 6px}.annotation-drawer .annotations-panel{padding:12px}.annotation-selection{gap:2px}.annotation-selection button{padding-inline:7px;font-size:13px}}
+@media(max-width:699px){.annotation-float button,.annotation-float summary{min-height:44px}.annotation-drawer{width:100%;border-radius:16px 16px 6px 6px}.annotation-drawer .annotations-panel{padding:12px}.annotation-selection{gap:2px}.annotation-selection button{padding-inline:7px;font-size:13px}.annotation-float .annotation-swatch{width:44px;min-width:44px;padding:4px}}
 @media print{.annotation-entry,.annotation-float,.annotation-sr-status,.text-mark-presentation,[data-webink-overlay]{display:none!important}}

@@ -183,10 +183,10 @@ test(
               ctx.store.writeTransaction(writer, async (put) => {
                 const key = await put(png);
                 await writer`INSERT INTO images(id,article_id,original_url,status,file_key,content_hash,content_type) VALUES(${imageId},${row.id},${base + "/image/committed.png"},'cached',${key},${hash(png)},'image/png')`;
-                const names = await readdir(directory);
+                const names = await readdir(ctx.store.stagingDirectory);
                 stage = join(
-                  directory,
-                  names.find((name) => name.startsWith(".stage-"))!,
+                  ctx.store.stagingDirectory,
+                  names.find((name) => name.startsWith("txn-"))!,
                 );
                 await chmod(stage, 0o500);
               }),
@@ -213,11 +213,7 @@ test(
             writer.release();
             probe.release();
           }
-          assert.ok(
-            !(await readdir(directory)).some((name) =>
-              name.startsWith(".stage-"),
-            ),
-          );
+          assert.deepEqual(await readdir(ctx.store.stagingDirectory), []);
           assert.equal(
             (await request(owner, "GET", `/assets/${imageId}`)).statusCode,
             200,

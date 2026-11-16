@@ -6,6 +6,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bundle_path "$1"
 [ ! -e "$BUNDLE" ] || fail 'Backup destination already exists; choose a new directory'
 require_stopped
+# A local volume-only archive cannot recover S3 objects.
+storage require-filesystem
 mkdir -m 700 -- "$BUNDLE"
 # Failure leaves an incomplete bundle WITHOUT a manifest; no cleanup deletes evidence.
 trap 'printf "%s\n" "Backup interrupted. App remains stopped; incomplete bundle retained." >&2' HUP INT TERM

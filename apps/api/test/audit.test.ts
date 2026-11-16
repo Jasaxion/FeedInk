@@ -554,16 +554,19 @@ test(
             /rollback/,
           );
           assert.deepEqual((await readdir(directory)).sort(), before);
-          // Simulate crash remnants: recover orphan bytes, retain a shared referenced key.
+          // Legacy crash remnants are recovered explicitly during maintenance, not by a startup root scan.
+          // Conservatively retain unknown published bytes; a hash does not prove exclusive ownership.
           const stage = await mkdtemp(join(directory, ".stage-")),
             orphan = hash(variant),
             shared = hash(png);
           await writeFile(join(stage, orphan), variant);
-          await link(join(stage, orphan), ctx.store.path(orphan));
+          await link(join(stage, orphan), join(directory, orphan));
           await writeFile(join(stage, shared), png);
-          await withConnection(db, (sql) => ctx.store.recover(sql));
-          assert.deepEqual((await readdir(directory)).sort(), before);
-          assert.equal((await ctx.store.get(shared)).length, png.length);
+          await withConnection(db, (sql) => ctx.store.recoverLegacy(sql));
+          assert.deepEqual((await readdir(directory)).sort(), [...before, orphan].sort());
+          assert.deepEqual(await ctx.store.get(orphan), variant);
+          assert.deepEqual(await ctx.store.get(shared), png);
+          assert.deepEqual(await readdir(ctx.store.stagingDirectory), []);
         },
       );
       await t.test(

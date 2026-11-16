@@ -38,6 +38,9 @@ checksum() {
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < "$1" | cut -d ' ' -f 1
   else fail 'Install sha256sum or shasum'; fi
 }
+storage() {
+  compose run --rm --no-deps -T -e STORAGE_MAINTENANCE=stopped --entrypoint node app apps/api/dist/storage/operator.js "$@"
+}
 archive() {
   # Runtime image owns /data as uid1000. Utility mounts do not need root or a Docker socket.
   compose run --rm --no-deps -T --entrypoint node app scripts/data-archive.mjs "$@"

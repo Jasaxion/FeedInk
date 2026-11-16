@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import type { ArticleDetail, ArticleMode } from '@feedink/shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { AnnotationContext, ArticleDetail, ArticleMode } from '@feedink/shared';
 import { useApp } from './context';
 import { download, downloadCachedImage, mutate } from './api';
 import { AssetImage, Empty, Field, Icon, IconButton, Modal, Toggle, SourceIcon } from './components';
@@ -7,6 +7,7 @@ import { formatDate, ownedAssetUrl, progressAt, safeExternalUrl } from './logic'
 import { AnnotatedArticle } from './Annotations';
 import { retireActiveNotes } from './annotationSync';
 import { assertAuthEpoch, authEpoch } from './authEpoch';
+import { AiReader } from './AiReader';
 
 export function Reader({ article, mode, setMode, back, move, more, onDetail, scrollRef }: {
   article: ArticleDetail | null; mode: ArticleMode; setMode: (mode: ArticleMode) => void; back: () => void; move: (direction: number) => void; more: () => void; onDetail: (article: ArticleDetail) => void; scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -19,6 +20,18 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   const [image, setImage] = useState<string | null>(null); const [zoom, setZoom] = useState(1); const [toolbar, setToolbar] = useState(!settings.hideToolbar); const [speech, setSpeech] = useState(false); const [fetching, setFetching] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false), [menuView, setMenuView] = useState<'main' | 'reading' | 'speech'>('main'), [focused, setFocused] = useState(false), [archiveOpen, setArchiveOpen] = useState(false);
   const [annotationHost, setAnnotationHost] = useState<HTMLSpanElement | null>(null);
+  const [aiToolbarHost, setAiToolbarHost] = useState<HTMLSpanElement | null>(null), [aiBodyHost, setAiBodyHost] = useState<HTMLDivElement | null>(null);
+  const aiContextIdentity = `${app.session.user.id}:${authEpoch()}:${article?.id}:${mode}`;
+  const [aiDisplayed, setAiDisplayed] = useState<{ identity: string; context: AnnotationContext } | null>(null);
+  const onAiContextChange = useCallback((context: AnnotationContext | null) => {
+    setAiDisplayed(previous => {
+      if (!context) return previous?.identity === aiContextIdentity ? null : previous;
+      const old = previous?.identity === aiContextIdentity ? previous.context : null;
+      if (old && old.articleId === context.articleId && old.mode === context.mode && old.contentHash === context.contentHash && old.contentHtml === context.contentHtml && old.title === context.title && old.sourceUrl === context.sourceUrl) return previous;
+      return { identity: aiContextIdentity, context };
+    });
+  }, [aiContextIdentity]);
+  const aiContext = aiDisplayed?.identity === aiContextIdentity ? aiDisplayed.context : null;
   const menu = useRef<HTMLDivElement>(null), menuButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { setMenuOpen(false); setArchiveOpen(false); if (!article) setFocused(false); }, [article?.id]);
   useEffect(() => {
@@ -64,15 +77,16 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
   }
   return <main className={`reader-pane ${settings.wrapCode ? 'wrap-code' : ''}`} data-testid="reader" data-focus={focused && !!article || undefined} aria-label="文章阅读区">
     {!article ? <Empty title="留一点时间，给阅读"><p>从左侧选择一篇文章</p><small>J / K 切换 · Enter 打开 · ? 快捷键</small></Empty> : <>
-      {toolbar ? <header className="reader-toolbar"><IconButton icon={focused ? 'focusExit' : 'back'} label={focused ? '退出专注阅读' : '返回'} onClick={focused ? () => setFocused(false) : back} /><IconButton icon="previous" label="上一篇 (K)" onClick={() => move(-1)} /><IconButton icon="next" label="下一篇 (J)" onClick={() => move(1)} /><span className="toolbar-spacer" />
+      {toolbar ? <header className="reader-toolbar reader-ai-toolbar"><IconButton icon={focused ? 'focusExit' : 'back'} label={focused ? '退出专注阅读' : '返回'} onClick={focused ? () => setFocused(false) : back} /><IconButton icon="previous" label="上一篇 (K)" onClick={() => move(-1)} /><IconButton icon="next" label="下一篇 (J)" onClick={() => move(1)} /><span className="toolbar-spacer" />
         <IconButton icon="article" label={fulltextLabel} className="icon-button desktop-tool" aria-pressed={mode === 'fulltext'} disabled={fulltextDisabled} onClick={toggleFulltext} />
         <IconButton icon="saved" label="稍后阅读" aria-pressed={article.saved} onClick={() => void app.task(() => app.patchArticle(article, { saved: !article.saved }))} />
         <IconButton icon="tag" label="管理文章标签" className="icon-button desktop-tool" onClick={more} />
         <IconButton icon={article.read ? 'unread' : 'check'} label={article.read ? '标记为未读' : '标记为已读'} className="icon-button desktop-tool" onClick={() => void app.task(() => app.patchArticle(article, { read: !article.read }))} />
+        <span className="reader-ai-tools" ref={setAiToolbarHost} />
         <span className="reader-annotation-tools" ref={setAnnotationHost} />
         {!app.online && <span className="reader-connection" role="status" title="离线阅读 · 更改将在本账号联网后同步"><Icon name="offline" size={14} /><span className="sr-only">离线阅读</span></span>}
         <button ref={menuButton} type="button" className="icon-button" title="更多文章操作" aria-label="更多文章操作" aria-expanded={menuOpen} aria-controls="reader-options" onClick={() => { setMenuView('main'); setMenuOpen(value => !value); }}><Icon name="more" /></button>
-      </header> : <div className="collapsed-toolbar"><IconButton icon="back" label="返回" onClick={back} /><span className="reader-annotation-tools" ref={setAnnotationHost} /><button className="text-button" onClick={() => setToolbar(true)}>显示工具栏</button></div>}
+      </header> : <div className="collapsed-toolbar reader-ai-toolbar"><IconButton icon="back" label="返回" onClick={back} /><span className="reader-ai-tools" ref={setAiToolbarHost} /><span className="reader-annotation-tools" ref={setAnnotationHost} /><button className="text-button" onClick={() => setToolbar(true)}>显示工具栏</button></div>}
       <div id="reader-options" ref={menu} popover="manual" className="reader-options" role="dialog" aria-label="阅读工具" hidden={!menuOpen} onKeyDown={event => event.stopPropagation()}>
         {menuView === 'main' && <>
           <button onClick={() => setMenuView('reading')}><Icon name="filters" />正文与排版</button>
@@ -97,15 +111,17 @@ export function Reader({ article, mode, setMode, back, move, more, onDetail, scr
         <article className="article-document"><div className="article-source"><SourceIcon subscriptionId={article.subscriptionId} /><span>{article.feedTitle || '网页存档'}</span></div>
           <h1><a href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">{article.title || '无标题文章'}</a></h1>
           <div className="article-meta"><time dateTime={article.publishedAt}>{formatDate(article.publishedAt)}</time>{article.author && <span>· {article.author}</span>}</div>
+          <div ref={setAiBodyHost} className="reader-ai-results" />
           {mode === 'webpage' ? <section className="original-page"><div className="original-page-actions"><a className="secondary" href={safeExternalUrl(article.url) || undefined} target="_blank" rel="noopener noreferrer">在新标签页打开原文</a><button className="text-button" onClick={() => changeMode('feed')}>返回归档正文</button></div><p className="muted small">原网页在受限沙箱中显示。网站可能拒绝嵌入或需要脚本，此时请使用上方外部打开链接。页面不能导航本应用或读取账号。</p>{app.online && safeExternalUrl(article.url) ? <iframe key={article.url} className="original-frame" title={`原网页：${article.title}`} src={safeExternalUrl(article.url)!} sandbox="" referrerPolicy="no-referrer" /> : <p role="status">离线时原网页不可用，请返回已归档正文。</p>}</section> : <>
             {mode === 'fulltext' && !article.fulltextHtml && <p className="notice">{article.fulltextError || (app.online ? '尚未取得全文，当前显示 RSS 正文。' : '此文章的全文尚未缓存，当前显示已缓存的 RSS 正文。')}{app.online && <button className="text-button" disabled={fetching} onClick={() => void extract()}>重试提取全文</button>}</p>}
-            <AnnotatedArticle key={`${article.id}:${mode}:${mode === 'fulltext' ? article.fulltextHtml : article.contentHtml}`} toolbarHost={annotationHost} article={article} mode={mode === 'fulltext' && article.fulltextHtml ? 'fulltext' : 'feed'} onImage={setImage} onTap={() => { if (settings.tapToPage) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />
+            <AnnotatedArticle key={`${article.id}:${mode}:${mode === 'fulltext' ? article.fulltextHtml : article.contentHtml}`} toolbarHost={annotationHost} onContextChange={onAiContextChange} article={article} mode={mode === 'fulltext' && article.fulltextHtml ? 'fulltext' : 'feed'} onImage={setImage} onTap={() => { if (settings.tapToPage) scrollRef.current?.scrollBy({ top: scrollRef.current.clientHeight * 0.85, behavior: 'instant' }); }} />
           </>}
           {article.enclosures.length > 0 && <section className="enclosures"><h3>播客与附件</h3>{article.enclosures.map((enclosure, index) => { const url = safeExternalUrl(enclosure.url); if (!url) return null; return <div key={index}>{enclosure.type.startsWith('audio/') ? <audio controls preload="none" src={url} aria-label={`播客音频 ${index + 1}`} /> : enclosure.type.startsWith('video/') ? <video controls preload="none" src={url} aria-label={`视频 ${index + 1}`} /> : <a href={url} target="_blank" rel="noopener noreferrer">打开附件 {index + 1} ({enclosure.type})</a>}<small className="muted">媒体由原站提供，未加入离线图片缓存。浏览器支持的格式才能播放。</small></div>; })}</section>}
           {archiveOpen && <Modal title="存档信息" onClose={() => setArchiveOpen(false)}><div className="archive-details"><p>{article.images.filter(item => item.status === 'cached').length}/{article.images.length} 张图片已在服务器保存 · 约 {Math.max(1, Math.ceil(article.wordCount / 400))} 分钟阅读</p><p>正文抓取：{formatDate(article.fetchedAt)}</p><p>首次归档：{formatDate(article.archivedAt)}</p><p className="hash">SHA-256: {article.contentHash}</p>{article.images.map(item => <div className="image-status" key={item.id}><span>{item.status === 'cached' ? '已归档' : item.status === 'failed' ? '抓取失败' : '等待抓取'}</span><span className="truncate">{item.originalUrl}</span>{item.status === 'cached' && ownedAssetUrl(item.url) && <button className="text-button" onClick={() => setImage(item.url)}>查看</button>}</div>)}<button className="secondary" disabled={!app.online} onClick={() => void app.task(async () => { const detail = await mutate<ArticleDetail>(`/articles/${article.id}/retry-images`, 'POST'); await retireActiveNotes(() => { if (latestArticleId.current === detail.id) onDetail(detail); }); await app.cacheArticle(detail); const failed = detail.images.filter(item => item.status !== 'cached').length; app.notify(failed ? `重试完成，仍有 ${failed} 张图片未归档` : '所有图片已归档', failed > 0); })}>重新抓取图片</button><p className="muted small">服务器归档与此设备离线缓存不同。源站限制可能导致部分图片始终无法抓取。</p></div></Modal>}
           <footer className="article-end"><span>— 读到这里 —</span><button className="secondary" onClick={() => move(1)}>下一篇 <Icon name="next" /></button></footer>
         </article>
       </div>
+      <AiReader key={`${aiContextIdentity}:${article.url}:${article.title}:${mode === 'fulltext' ? article.fulltextHtml : article.contentHtml}:${aiContext?.contentHash}:${aiContext?.contentHtml}:${aiContext?.sourceUrl}:${aiContext?.title}`} article={article} mode={mode} displayedContext={aiContext} toolbarHost={aiToolbarHost} bodyHost={aiBodyHost} returnToOriginal={() => { const epoch = authEpoch(); requestAnimationFrame(() => { if (authEpoch() !== epoch || latestArticleId.current !== article.id) return; const original = scrollRef.current?.querySelector<HTMLElement>('[data-reader-root]'); original?.scrollIntoView({ block: 'start' }); original?.focus({ preventScroll: true }); }); }} />
       {(settings.tapToPage || settings.theme === 'eink') && <nav className="page-controls" aria-label="阅读翻页"><button onClick={() => scrollRef.current?.scrollBy({ top: -(scrollRef.current.clientHeight * 0.85), behavior: 'instant' })}><Icon name="up" />上一页</button><button onClick={() => { const element = scrollRef.current; if (element && progressAt(element.scrollTop, element.scrollHeight, element.clientHeight) >= 0.99) move(1); else element?.scrollBy({ top: element.clientHeight * 0.85, behavior: 'instant' }); }}>下一页 <Icon name="down" /></button></nav>}
     </>}
     {image && <Modal title="图片预览" wide onClose={() => setImage(null)}><div className="image-preview" style={{ '--zoom': zoom } as React.CSSProperties}><AssetImage src={image} alt="归档文章图片" className="zoomed-image" /></div><div className="button-row zoom-controls"><button className="secondary" disabled={zoom <= 0.5} onClick={() => setZoom(value => Math.max(0.5, value - 0.25))}>缩小</button><output aria-live="polite">{Math.round(zoom * 100)}%</output><button className="secondary" disabled={zoom >= 4} onClick={() => setZoom(value => Math.min(4, value + 0.25))}>放大</button><button className="text-button" onClick={() => setZoom(1)}>适应宽度</button></div><button className="primary" onClick={() => void app.task(async () => { const source = await app.store.imageSource(app.session.user.id, image); if (source) downloadCachedImage(source, 'FeedInk-image'); else await download(image, 'FeedInk-image'); })}><Icon name="download" />下载图片</button><p className="muted">可使用浏览器缩放手势放大查看。</p></Modal>}

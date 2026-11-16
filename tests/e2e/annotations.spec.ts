@@ -150,6 +150,72 @@ test('selected quotes produce all four text marks, survive reload and do not mov
   await expect(page.getByTestId('annotations-panel')).toContainText(fixtureRemark);
 });
 
+test('prompt-free editor and list deletion undo restores only the mark and is retired on mode changes', async ({ page }) => {
+  const api = page.context().request;
+  const session = await createAnnotationUser(api);
+  const { first } = await seedAnnotationArticles(api, session);
+  const empty = await getAnnotation(api, first.id);
+  const marks = [textMark('note', '删除后可撤销'), textMark('note', '后续编辑保留')];
+  await putAnnotation(api, session, empty, { schemaVersion: 1, contentHash: empty.contentHash, ink: null, marks });
+  await openAnnotations(page, first.id);
+  const dialogs: string[] = [];
+  page.on('dialog', async dialog => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+  await page.locator('.annotation-list-item').first().click();
+  await page.getByRole('button', { name: '删除当前批注', exact: true }).click();
+  await expect(page.getByTestId('note-editor')).toHaveCount(0);
+  await expect(page.locator('.annotation-list-item')).toHaveCount(1);
+  await waitForMarks(api, first.id, 1);
+  await expect(page.getByTestId('annotation-status')).toContainText(synchronized);
+  await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeEnabled();
+  await page.locator('.annotation-list-item').click();
+  await page.getByTestId('note-editor').fill('后续编辑不会回滚');
+  await page.getByRole('button', { name: '保存备注', exact: true }).click();
+  await expect.poll(async () => (await getAnnotation(api, first.id)).marks[0].text).toBe('后续编辑不会回滚');
+  await page.getByRole('button', { name: '撤销删除批注', exact: true }).click();
+  const restored = await waitForMarks(api, first.id, 2);
+  expect(restored.marks[0]).toEqual(marks[0]);
+  expect(restored.marks[1]).toMatchObject({ id: marks[1].id, text: '后续编辑不会回滚' });
+  await page.locator('.annotation-list li').first().getByRole('button', { name: '删除备注', exact: true }).click();
+  await waitForMarks(api, first.id, 1);
+  await expect(page.getByTestId('annotation-status')).toContainText(synchronized);
+  await changeBodyMode(page, 'fulltext');
+  await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+  expect((await getAnnotation(api, first.id, 'fulltext')).marks).toEqual([]);
+  await changeBodyMode(page, 'feed');
+  await showAnnotations(page);
+  await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+  expect((await getAnnotation(api, first.id)).marks.map(mark => mark.text)).toEqual(['后续编辑不会回滚']);
+  expect(dialogs).toEqual([]);
+});
+
+test('single deletion is local before a delayed PUT and undo cannot overwrite a real remote conflict', async ({ page, context }) => {
+  const api = context.request;
+  const session = await createAnnotationUser(api);
+  const { first } = await seedAnnotationArticles(api, session);
+  const empty = await getAnnotation(api, first.id);
+  const saved = await putAnnotation(api, session, empty, { schemaVersion: 1, contentHash: empty.contentHash, ink: null, marks: [textMark('note', '待删除备注')] });
+  await openAnnotations(page, first.id);
+  const saveFault = await annotationSaveFault();
+  try {
+    await saveFault.hold(first.id);
+    await page.getByRole('button', { name: '删除备注', exact: true }).click();
+    await expect(page.locator('.annotation-list-item')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeEnabled();
+    await expect.poll(async () => (await saveFault.status()).held).toBe(1);
+    expect((await getAnnotation(api, first.id, 'feed', undefined, saveFault.witnessOrigin)).marks).toEqual(saved.marks);
+    const winner = await putAnnotation(api, session, saved, { schemaVersion: 1, contentHash: saved.contentHash, ink: saved.ink, marks: [{ ...saved.marks[0], text: '另一设备修改', updatedAt: Date.now() }] }, saveFault.witnessOrigin);
+    await saveFault.release();
+    await expect.poll(async () => (await saveFault.status()).lastStatus).toBe(412);
+    await expect(page.getByTestId('annotation-status')).toContainText('冲突');
+    await expect(page.getByRole('button', { name: '撤销删除批注', exact: true })).toBeDisabled();
+    expect((await getAnnotation(api, first.id)).marks).toEqual(winner.marks);
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: '使用服务器版本', exact: true }).click();
+    await expect(page.getByTestId('annotation-delete-undo')).toHaveCount(0);
+    await expect(page.locator('.annotation-list-item')).toContainText('另一设备修改');
+  } finally { await saveFault.reset(); }
+});
+
 test('browser pen preserves pressure, scopes input to the reader, and whole-stroke erase/undo/redo persist', async ({ page, browserName }) => {
   test.skip(browserName !== 'chromium', 'Trusted pressure input witness uses Chromium CDP; no cross-engine pen certification claimed');
   const api = page.context().request;

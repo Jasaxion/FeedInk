@@ -1,15 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  mkdir,
-  readFile,
-  writeFile,
-  readdir,
-  mkdtemp,
-  rm,
-  link,
-  stat,
-  open,
-} from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { storageConfigFromEnv, type StorageConfig } from "./storage/config.js";
+export { Store } from "./storage/store.js";
+export type { StorageConfig } from "./storage/config.js";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
@@ -33,6 +26,7 @@ export interface Config {
   fetchAllowHosts: string[];
   webDir: string;
   worker: boolean;
+  storage?: StorageConfig;
 }
 export function configFromEnv(): Config {
   const sessionSecret = process.env.SESSION_SECRET || "";
@@ -48,6 +42,7 @@ export function configFromEnv(): Config {
       process.env.DATABASE_URL ||
       "postgres://feedink:feedink@localhost:5432/feedink",
     dataDir: resolve(process.env.DATA_DIR || "/data"),
+    storage: storageConfigFromEnv(),
     appUrl: new URL(appUrl).origin,
     sessionSecret,
     host: process.env.HOST || "0.0.0.0",
@@ -174,121 +169,6 @@ export async function migrate(db: DB) {
   } finally {
     await connection`SELECT pg_advisory_unlock(71244001)`;
     connection.release();
-  }
-}
-export class Store {
-  constructor(readonly directory: string) {}
-  async init() {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-  }
-  path(key: string) {
-    if (!/^[a-f0-9]{64}$/.test(key)) throw new Error("Invalid storage key");
-    return join(this.directory, key);
-  }
-  async size(key: string) {
-    return (await stat(this.path(key))).size;
-  }
-  async referenced(sql: SQL, key: string) {
-    const [row] =
-      await sql`SELECT EXISTS(SELECT 1 FROM images WHERE file_key=${key} UNION ALL SELECT 1 FROM ebooks WHERE file_key=${key} UNION ALL SELECT 1 FROM feeds WHERE icon_file_key=${key}) AS found`;
-    return row.found;
-  }
-  async recover(sql: SQL) {
-    await sql`SELECT pg_advisory_lock(71244004)`;
-    try {
-      for (const entry of await readdir(this.directory, {
-        withFileTypes: true,
-      })) {
-        if (!entry.isDirectory() || !/^\.stage-[A-Za-z0-9]+$/.test(entry.name))
-          continue;
-        const directory = join(this.directory, entry.name);
-        for (const key of await readdir(directory))
-          if (/^[a-f0-9]{64}$/.test(key) && !(await this.referenced(sql, key)))
-            await rm(this.path(key), { force: true });
-        await rm(directory, { recursive: true, force: true });
-      }
-    } finally {
-      await sql`SELECT pg_advisory_unlock(71244004)`;
-    }
-  }
-  async writeTransaction<T>(
-    sql: SQL,
-    task: (put: (data: Buffer) => Promise<string>) => Promise<T>,
-  ): Promise<T> {
-    // Every production blob writer shares this lock, including DB references.
-    // Never acquire a second pool connection while holding it.
-    await sql`SELECT pg_advisory_lock(71244004)`;
-    let directory: string | undefined,
-      finished = false;
-    const staged = new Set<string>(),
-      created = new Set<string>();
-    try {
-      directory = await mkdtemp(join(this.directory, ".stage-"));
-      await sql`BEGIN`;
-      const result = await task(async (data) => {
-        const key = hash(data);
-        if (!staged.has(key)) {
-          const file = await open(join(directory!, key), "wx", 0o600);
-          try {
-            await file.writeFile(data);
-            await file.sync();
-          } finally {
-            await file.close();
-          }
-          staged.add(key);
-        }
-        return key;
-      });
-      const stageDirectory = await open(directory, "r");
-      try {
-        await stageDirectory.sync();
-      } finally {
-        await stageDirectory.close();
-      }
-      for (const key of staged) {
-        try {
-          await link(join(directory, key), this.path(key));
-          created.add(key);
-        } catch (e: any) {
-          if (e.code !== "EEXIST") throw e;
-        }
-      }
-      const rootDirectory = await open(this.directory, "r");
-      try {
-        await rootDirectory.sync();
-      } finally {
-        await rootDirectory.close();
-      }
-      await sql`COMMIT`;
-      finished = true;
-      return result;
-    } catch (e) {
-      try {
-        await sql`ROLLBACK`;
-        for (const key of created)
-          if (!(await this.referenced(sql, key)))
-            await rm(this.path(key), { force: true });
-        finished = true;
-      } catch {
-        /* Keep durable staging for startup recovery when the DB outcome is unknown. */
-      }
-      throw e;
-    } finally {
-      try {
-        if (finished && directory)
-          await rm(directory, { recursive: true, force: true });
-      } finally {
-        // Cleanup errors must not return a still-locked backend to the pool.
-        try {
-          await sql`SELECT pg_advisory_unlock(71244004)`;
-        } catch {
-          /* A lost connection releases its server-side lock. */
-        }
-      }
-    }
-  }
-  async get(key: string): Promise<Buffer> {
-    return readFile(this.path(key));
   }
 }
 export function safeError(error: unknown): string {

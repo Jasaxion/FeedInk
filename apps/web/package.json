@@ -14,7 +14,8 @@
     "test:images": "node test/portable-images.mjs",
     "test:offline-origin": "node test/offline-origin.mjs",
     "test:residual": "node test/residual-browser.mjs",
-    "test:annotations": "node test/annotations-browser.mjs"
+    "test:annotations": "node test/annotations-browser.mjs",
+    "test:ai": "node test/ai-browser.mjs"
   },
   "dependencies": {
     "@feedink/shared": "0.2.0",

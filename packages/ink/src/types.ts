@@ -99,6 +99,8 @@ export interface WebInkAPI {
   restore(page: Page | null): void;
   /** Live native mode: next-frame revision floor, including for {}; otherwise no usable floor. */
   configure(options: Configuration): number | undefined;
+  /** Re-resolve host layout without changing tools, browser contacts or saved strokes. */
+  refreshLayout(): void;
   undo(): void;
   redo(): void;
   flush(): boolean;

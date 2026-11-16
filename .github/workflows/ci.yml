@@ -75,7 +75,7 @@ jobs:
         run: |
           failed=0
           for browser in chromium webkit; do
-            for suite in browser audit shell images offline-origin annotations; do
+            for suite in browser audit shell images offline-origin annotations ai; do
               if ! FEEDINK_BROWSER="$browser" npm run "test:$suite" -w @feedink/web; then failed=1; fi
             done
           done
@@ -194,4 +194,76 @@ jobs:
         env:
           TEST_IMAGE: feedink:ci
         run: scripts/test-backup.sh
+      - name: Referenced-blob paired recovery and corruption refusal
+        env:
+          TEST_IMAGE: feedink:ci
+        run: scripts/test-storage-backup.sh
       # Keep raw diagnostic files ephemeral; publish only reviewed summaries.
+
+  storage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: feedink_ci
+          POSTGRES_PASSWORD: ephemeral_ci_only
+          POSTGRES_DB: feedink_storage
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U feedink_ci -d feedink_storage"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NODE_ENV: test
+      TEST_STORAGE_DATABASE_URL: postgresql://feedink_ci:ephemeral_ci_only@127.0.0.1:5432/feedink_storage
+      TEST_STORAGE_BACKEND: s3
+      TEST_STORAGE_S3_BUCKET: feedink-storage-ci
+      TEST_STORAGE_S3_REGION: us-east-1
+      TEST_STORAGE_S3_ENDPOINT: http://127.0.0.1:19000
+      TEST_STORAGE_S3_PREFIX: acceptance/
+      TEST_STORAGE_S3_FORCE_PATH_STYLE: 'true'
+      TEST_STORAGE_S3_ALLOW_HTTP: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.3
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Build storage runtime and shared contracts
+        run: |
+          npm run build -w @feedink/ink
+          npm run build -w @feedink/shared
+          npm run build -w @feedink/api
+      - name: Start private synthetic S3 fixture
+        run: |
+          access_key="fixture$(openssl rand -hex 8)"
+          secret_key="$(openssl rand -hex 24)"
+          echo "::add-mask::$access_key"
+          echo "::add-mask::$secret_key"
+          echo "AWS_ACCESS_KEY_ID=$access_key" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$secret_key" >> "$GITHUB_ENV"
+          docker run --detach --name feedink-s3-ci --publish 127.0.0.1:19000:9000 \
+            --env "MINIO_ROOT_USER=$access_key" --env "MINIO_ROOT_PASSWORD=$secret_key" \
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:19000/minio/health/live; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+      - name: Create isolated fixture bucket
+        run: |
+          node --input-type=module <<'JS'
+          import { S3Client, CreateBucketCommand } from '@aws-sdk/client-s3';
+          const client = new S3Client({ region: process.env.TEST_STORAGE_S3_REGION, endpoint: process.env.TEST_STORAGE_S3_ENDPOINT, forcePathStyle: true, maxAttempts: 1 });
+          try { await client.send(new CreateBucketCommand({ Bucket: process.env.TEST_STORAGE_S3_BUCKET })); }
+          finally { client.destroy(); }
+          JS
+      - name: PostgreSQL ownership and filesystem to S3 migration acceptance
+        run: npm exec -w @feedink/api -- tsx --test --test-concurrency=1 test/storage-postgres.test.ts
+      - name: Stop owned synthetic S3 fixture
+        if: always()
+        run: docker rm --force feedink-s3-ci >/dev/null 2>&1 || true

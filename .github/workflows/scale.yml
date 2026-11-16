@@ -1,0 +1,68 @@
+name: Manual synthetic scale rehearsal
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Articles in ONE owner (plus ten isolation owners)
+        type: choice
+        options: ['10000', '100000', '1000000', 'all']
+        default: '10000'
+      publish_evidence:
+        description: Explicitly publish synthetic structured plans/metrics (no raw logs)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: scale-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        tier: ${{ fromJSON(inputs.tier == 'all' && '[10000,100000,1000000]' || format('[{0}]', inputs.tier)) }}
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: scale_ci
+          POSTGRES_PASSWORD: ephemeral_scale_only
+          POSTGRES_DB: scale_ci
+        ports: ['5432:5432']
+        options: >-
+          --memory=6g --cpus=2
+          --health-cmd "pg_isready -U scale_ci -d scale_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NODE_ENV: test
+      TEST_DATABASE_URL: postgresql://scale_ci:ephemeral_scale_only@127.0.0.1:5432/scale_ci
+      SCALE_ARTICLES: ${{ matrix.tier }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.3
+          cache: npm
+      - name: Install reviewed dependencies on hosted runner
+        run: npm ci --no-audit --no-fund
+      - name: Build and typecheck (integration lanes must be present)
+        run: |
+          npm run build
+          npm run typecheck
+      - name: Retain existing API acceptance and add scale correctness
+        run: npm test -w @feedink/api
+      - name: Bounded synthetic workload (no upstream services or real content)
+        timeout-minutes: 35
+        run: node --max-old-space-size=512 scripts/scale-benchmark.mjs
+      - name: Explicit opt-in structured synthetic evidence only
+        if: ${{ always() && inputs.publish_evidence }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-scale-${{ matrix.tier }}-${{ github.sha }}
+          path: ${{ runner.temp }}/scale-evidence-${{ matrix.tier }}/report.json
+          retention-days: 7
+          if-no-files-found: warn
