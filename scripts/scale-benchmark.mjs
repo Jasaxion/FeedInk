@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import postgres from 'postgres';
 import { Articles } from '../apps/api/dist/articles.js';
+import { uuid } from '../apps/api/dist/validation.js';
+import { articleWrite } from '../apps/api/dist/scale-counts.js';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted')
   throw new Error('Scale workloads require approved GitHub-hosted infrastructure');
@@ -20,7 +22,7 @@ const budgets = { wallSeconds: 1800, statementMs: 10000, seedBatchMs: 120000, ma
 const report = {
   formatVersion: 1, status: 'running', tier, budgets,
   hardware: { platform: platform(), release: release(), cpu: cpus()[0]?.model, logicalCpus: cpus().length, ramBytes: totalmem(), node: process.version },
-  dataset: { seed: 'scale-v1', primaryOwnerArticles: tier, isolationOwners: 10, isolationArticlesEach: Math.min(10000, tier / 10), feeds: 100, tags: 100, folders: 20, timestampGroupSize: 100, microsecondSubgroups: 3, unreadPercent: 5, savedPercent: 2, body: '95% ~2KiB, 5% ~32KiB deterministic HIGHLY COMPRESSIBLE text; not a realistic media or storage benchmark', images: Math.min(200000, tier), contexts: 0 },
+  dataset: { seed: 'scale-v2-uuid8', primaryOwnerArticles: tier, isolationOwners: 10, isolationArticlesEach: Math.min(10000, tier / 10), feeds: 100, tags: 100, folders: 20, timestampGroupSize: 100, microsecondSubgroups: 3, unreadPercent: 5, savedPercent: 2, body: '95% ~2KiB, 5% ~32KiB deterministic HIGHLY COMPRESSIBLE text; not a realistic media or storage benchmark', images: Math.min(200000, tier), contexts: 0 },
   phases: {}, reads: [], plans: [], limitations: [], peakRssBytes: 0,
 };
 report.postgresResources = { containerCpuLimit: 2, containerMemoryBytes: 6 * 1024 ** 3 };
@@ -71,6 +73,19 @@ const explain = async (label, query, parameters = []) => {
 try {
   await admin.unsafe(`CREATE SCHEMA ${schema}`);
   report.postgres = (await db`SELECT version() AS version,current_setting('shared_buffers') AS shared_buffers,current_setting('work_mem') AS work_mem,current_setting('max_parallel_workers_per_gather') AS max_parallel_workers_per_gather`)[0];
+  await phase('seedIdCursorPreflightMs', async () => {
+    await db.unsafe(await readFile(new URL('./scale-seed-ids.sql', import.meta.url), 'utf8'));
+    const samples = [...new Set([1, 2, 99, 100, 997, Math.floor(tier * .9), tier])];
+    let validated = 0;
+    for (const account of [1, 2, 11]) for (const i of samples) {
+      const [row] = await db`SELECT scale_seed_uuid(${`article-${account}-${i}`}) AS article_id,scale_seed_uuid(${`image-${i}`}) AS image_id`;
+      for (const value of [row.article_id, row.image_id, uid(account), uid(1000 + i%100), uid(2000 + i%20), uid(3000 + i%100)]) uuid.parse(value);
+      const cursor = Buffer.from(JSON.stringify({ id: row.article_id, date: '2026-01-01T00:00:00.000123Z' })).toString('base64url');
+      for (const sort of ['oldest', 'newest']) articles.selection(owner, { scope: 'archive', cursor, sort });
+      validated++;
+    }
+    report.seedIdCursorPreflight = { validated, version: 8, variant: '10xx' };
+  });
   await phase('schemaThrough006Ms', async () => {
     for (const name of ['001_initial', '002_demo_usage', '003_audit_safety', '004_state_version', '005_annotations_mcp', '006_annotation_context_retention'])
       await db.unsafe(await readFile(new URL(`../apps/api/migrations/${name}.sql`, import.meta.url), 'utf8'));
@@ -92,7 +107,7 @@ try {
         await db.begin(async (sql) => {
           await sql`SET LOCAL statement_timeout='120s'`;
           await sql`INSERT INTO articles(id,user_id,feed_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash,summary,read,saved)
-            SELECT md5(${`article-${account}-`} || i)::uuid,${uid(account)},
+            SELECT scale_seed_uuid(${`article-${account}-`} || i),${uid(account)},
               CASE WHEN ${account}<>1 OR i%20=0 THEN NULL ELSE ('10000000-0000-4000-8000-' || lpad((1000+CASE WHEN i%2=0 THEN 0 ELSE 1+i%99 END)::text,12,'0'))::uuid END,
               i::text,'Synthetic','Synthetic 中文 ' || CASE WHEN i%997=0 THEN 'needle-rare ' ELSE '' END || i,
               'https://example.invalid/article/' || i,
@@ -108,14 +123,14 @@ try {
       await guard();
       await db.begin(async (sql) => {
         await sql`SET LOCAL statement_timeout='120s'`;
-        await sql`INSERT INTO article_tags(article_id,tag_id) SELECT md5('article-1-' || i)::uuid,${commonTag} FROM generate_series(${start}::integer,${Math.min(start + 4999, tier)}::integer) i WHERE i%2=0`;
-        await sql`INSERT INTO article_tags(article_id,tag_id) SELECT md5('article-1-' || i)::uuid,('10000000-0000-4000-8000-' || lpad((3001+i%99)::text,12,'0'))::uuid FROM generate_series(${start}::integer,${Math.min(start + 4999, tier)}::integer) i WHERE i%7=0`;
+        await sql`INSERT INTO article_tags(article_id,tag_id) SELECT scale_seed_uuid('article-1-' || i),${commonTag} FROM generate_series(${start}::integer,${Math.min(start + 4999, tier)}::integer) i WHERE i%2=0`;
+        await sql`INSERT INTO article_tags(article_id,tag_id) SELECT scale_seed_uuid('article-1-' || i),('10000000-0000-4000-8000-' || lpad((3001+i%99)::text,12,'0'))::uuid FROM generate_series(${start}::integer,${Math.min(start + 4999, tier)}::integer) i WHERE i%7=0`;
       });
     }
     for (let start = 1; start <= report.dataset.images; start += 5000) {
       await guard();
       await db`INSERT INTO images(id,article_id,original_url,status,file_key)
-        SELECT md5('image-' || i)::uuid,md5('article-1-' || i)::uuid,'https://example.invalid/image/' || i,
+        SELECT scale_seed_uuid('image-' || i),scale_seed_uuid('article-1-' || i),'https://example.invalid/image/' || i,
           CASE WHEN i<=10 THEN 'pending' ELSE 'cached' END,CASE WHEN i<=10 THEN NULL ELSE repeat(md5(i::text),2) END
         FROM generate_series(${start}::integer,${Math.min(start+4999,report.dataset.images)}::integer) i`;
     }
@@ -149,7 +164,10 @@ try {
         const referenceCountMs = performance.now() - begin;
         if (['archive', 'all', 'unread', 'saved', 'common-tag'].includes(label) && total > 100) {
           const [boundary] = await db`SELECT a.id,to_char(a.published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS date FROM articles a WHERE ${condition} ORDER BY a.published_at DESC,a.id DESC OFFSET ${Math.floor(total*.9)} LIMIT 1`;
-          paths.push({ label: 'deep-90-percent', cursor: Buffer.from(JSON.stringify(boundary)).toString('base64url') });
+          uuid.parse(boundary.id);
+          const cursor = Buffer.from(JSON.stringify(boundary)).toString('base64url');
+          articles.selection(owner, { ...query, cursor });
+          paths.push({ label: 'deep-90-percent', cursor });
         }
         for (const path of paths) for (const limit of [20, 100]) {
           await guard();
@@ -214,8 +232,8 @@ try {
       })()),
       ...Array.from({ length: 2 }, (_, worker) => (async () => {
         for (let i = 0; i < 50 && performance.now() < writeDeadline; i++) {
-          await retry(() => db`INSERT INTO articles(id,user_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash)
-            VALUES(${randomUUID()},${owner},${`write-${worker}-${i}`},'Synthetic','New synthetic','https://example.invalid/new',now(),'<p>New synthetic</p>','New synthetic','synthetic')`);
+          await retry(() => articleWrite(db, owner, (sql) => sql`INSERT INTO articles(id,user_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash)
+            VALUES(${randomUUID()},${owner},${`write-${worker}-${i}`},'Synthetic','New synthetic','https://example.invalid/new',now(),'<p>New synthetic</p>','New synthetic','synthetic')`));
         }
       })()),
     ]);

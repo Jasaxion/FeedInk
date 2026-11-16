@@ -1,3 +1,4 @@
+import { coordinateArticleWrites } from "./scale-counts.js";
 import sharp from "sharp";
 import {
   type DB,
@@ -17,6 +18,7 @@ export async function seedDemo(
 ) {
   return withConnection(pool, (db) =>
     store.writeTransaction(db, async (put) => {
+      await coordinateArticleWrites(db, user.id);
       const groups = [
         { name: "每日阅读", feeds: ["FeedInk 手记", "开放网络"] },
         { name: "技术与生活", feeds: ["构建与思考", "慢生活实验室"] },

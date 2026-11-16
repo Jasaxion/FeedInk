@@ -8,7 +8,7 @@ import type {
 } from "@feedink/shared";
 import { type DB, type SQL, type Row, iso, ApiFailure } from "./core.js";
 import { articleQuery, uuid } from "./validation.js";
-import { commonArticleTotal, countSnapshot, requireArticleCounts } from "./scale-counts.js";
+import { commonArticleTotal, countSnapshot, coordinateArticleWrites, requireArticleCounts } from "./scale-counts.js";
 
 // Used by lists and state acknowledgements, never transfer discarded body/TOAST columns.
 const summaryColumns = (sql: SQL) => sql`a.id,a.user_id,a.feed_id,a.feed_title,a.title,a.url,a.author,a.published_at,a.summary,a.read,a.state_version,a.saved,a.word_count,a.archived_at,a.progress,a.enclosures`;
@@ -163,12 +163,9 @@ export class Articles {
     expectedVersion?: number,
   ) {
     return this.db.begin(async (tx) => {
-      await requireArticleCounts(tx, userId);
-      // Count-changing API writers take the owner aggregate before article rows.
-      // This avoids a bulk writer holding it while a single writer holds a later
-      // article row and waits for the same aggregate. Progress-only stays exempt.
       if (patch.read !== undefined || patch.saved !== undefined || patch.tagIds !== undefined)
-        await tx`SELECT total FROM article_counts WHERE user_id=${userId} AND tag_key='' AND feed_key='*' FOR UPDATE`;
+        await coordinateArticleWrites(tx, userId);
+      await requireArticleCounts(tx, userId);
       const [row] =
         await tx`SELECT state_version FROM articles WHERE id=${articleId} AND user_id=${userId} FOR UPDATE`;
       if (!row) throw new ApiFailure(404, "NOT_FOUND", "Article not found");
@@ -210,7 +207,7 @@ export class Articles {
   ) {
     if (ids && !ids.length) return { updated: 0 };
     return this.db.begin(async (tx) => {
-      await tx`SELECT total FROM article_counts WHERE user_id=${userId} AND tag_key='' AND feed_key='*' FOR UPDATE`;
+      await coordinateArticleWrites(tx, userId);
       const condition = ids
         ? tx`a.user_id=${userId} AND a.id IN ${tx(ids)}`
         : this.selection(userId, query || {}, true, tx).condition;

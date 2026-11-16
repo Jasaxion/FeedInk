@@ -1,3 +1,4 @@
+import { coordinateArticleWrites } from "./scale-counts.js";
 import { boundedText, normalizeEnclosures } from "./metadata.js";
 import { z } from "zod";
 import * as cheerio from "cheerio";
@@ -138,14 +139,16 @@ export class Archives {
     return withConnection(this.db, async (db) => {
       await db`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`;
       try {
-        const [{ count, article_bytes }] =
-          await db`SELECT count(*)::integer AS count,coalesce(sum(octet_length((to_jsonb(a)-'content_text'-'summary')::text)+512),0)::text AS article_bytes FROM articles a WHERE user_id=${userId}`;
+        // Reject oversized portable archives without reading/serializing bodies.
+        const [{ count }] = await db`SELECT count(*)::integer AS count FROM (SELECT 1 FROM articles WHERE user_id=${userId} LIMIT 1001) eligible`;
         if (count > 1000)
           throw new ApiFailure(
             413,
             "ARCHIVE_LIMIT",
             "Archive supports at most 1000 articles",
           );
+        const [{ article_bytes }] =
+          await db`SELECT coalesce(sum(octet_length((to_jsonb(a)-'content_text'-'summary')::text)+512),0)::text AS article_bytes FROM articles a WHERE user_id=${userId}`;
         const [{ image_count, image_bytes }] =
           await db`SELECT count(*)::integer AS image_count,coalesce(sum(octet_length(to_jsonb(i)::text)+256),0)::text AS image_bytes FROM images i JOIN articles a ON a.id=i.article_id WHERE a.user_id=${userId}`;
         const [{ metadata_bytes }] =
@@ -431,6 +434,7 @@ export class Archives {
         }
     return withConnection(this.db, async (tx) =>
       this.store.writeTransaction(tx, async (put) => {
+        await coordinateArticleWrites(tx, userId);
         let imported = 0,
           skipped = 0;
         const folders = new Map<string, string>(),

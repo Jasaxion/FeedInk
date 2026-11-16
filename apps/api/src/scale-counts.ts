@@ -1,6 +1,20 @@
 import type { ArticleQuery } from "@feedink/shared";
 import { ApiFailure, type DB, type SQL } from "./core.js";
 
+// Global blob lock (when needed) -> owner coordination -> metadata/article/tag
+// locks -> trigger counters. Call only inside the transaction doing the writes;
+// never retain this lock while subsequently entering Store.writeTransaction.
+export async function coordinateArticleWrites(sql: SQL, userId: string): Promise<void> {
+  await sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}::uuid::text,71244005))`;
+}
+
+export async function articleWrite<T>(db: DB, userId: string, task: (sql: SQL) => Promise<T>): Promise<T> {
+  return db.begin(async (sql) => {
+    await coordinateArticleWrites(sql, userId);
+    return task(sql);
+  }) as Promise<T>;
+}
+
 export async function requireArticleCounts(sql: SQL, userId: string) {
   const [state] = await sql`SELECT valid FROM article_count_state WHERE user_id=${userId}`;
   if (!state?.valid)
@@ -20,7 +34,7 @@ export async function countSnapshot<T>(db: DB, userId: string, task: (sql: SQL) 
 // subscription eligibility here avoids stale deltas during subscribe/unsubscribe.
 export async function commonArticleTotal(sql: SQL, userId: string, q: ArticleQuery): Promise<number | undefined> {
   if (q.q || q.before || q.after) return undefined;
-  let condition = sql`c.user_id=${userId} AND c.tag_key=${q.tagId || ""}`;
+  let condition = sql`c.user_id=${userId} AND c.tag_key=${(q.tagId || "").toLowerCase()}`;
   const scope = q.scope || "all";
   const subscribed = scope === "all" || scope === "unread";
   if (!subscribed && !q.subscriptionId && !q.folderId) {

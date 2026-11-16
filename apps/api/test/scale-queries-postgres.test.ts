@@ -74,6 +74,38 @@ test("scale queries: backfill, exact snapshots, DML counters, CAS and reconcilia
       assert.equal((await articles.tags(owner))[0].count, 2);
       await reconcile();
     });
+    await t.test("uppercase/mixed-case tag UUIDs preserve exact totals across scopes and deep pages", async () => {
+      const caseTag = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+      const spellings = [caseTag, caseTag.toUpperCase(), "AbCdEfAb-CdEf-4aBc-8DeF-aBcDeFaBcDeF"];
+      await db`INSERT INTO tags(id,user_id,name) VALUES(${caseTag},${owner},'Case parity')`;
+      await insert(ids[10]); await insert(ids[11]);
+      for (const articleId of [ids[0], ids[1], ids[2], ids[10], ids[11]])
+        await db`INSERT INTO article_tags(article_id,tag_id) VALUES(${articleId},${caseTag})`;
+      for (const scope of ["all", "unread", "saved", "archive"] as const) {
+        for (const filter of [{}, { folderId: folder }, { subscriptionId: subscription }, { folderId: folder, subscriptionId: subscription }]) {
+          const lower = await articles.page(owner, { scope, ...filter, tagId: caseTag, limit: 100 });
+          for (const tagId of spellings) {
+            const query: ArticleQuery = { scope, ...filter, tagId, limit: 1 };
+            const { condition } = articles.selection(owner, query, false);
+            const [{ total }] = await db`SELECT count(*)::integer AS total FROM articles a WHERE ${condition}`;
+            const seen: string[] = []; let cursor: string | undefined;
+            do {
+              const page = await articles.page(owner, { ...query, cursor });
+              assert.equal(page.total, total); assert.equal(page.total, lower.total);
+              seen.push(...page.items.map((article) => article.id)); cursor = page.nextCursor || undefined;
+            } while (cursor);
+            assert.deepEqual(seen, lower.items.map((article) => article.id));
+            for (const exact of [{ q: "中文" }, { after: "2025-12-31T00:00:00Z" }])
+              assert.equal((await articles.page(owner, { ...query, ...exact })).total, total);
+          }
+        }
+      }
+      // The empty base-dimension marker must not become a UUID cast or tag filter.
+      assert.equal((await articles.page(owner, { scope: "archive" })).total, 5);
+      await db`DELETE FROM articles WHERE id IN ${db([ids[10], ids[11]])}`;
+      await db`DELETE FROM tags WHERE id=${caseTag}`;
+      await reconcile();
+    });
     await t.test("inserts/import SQL, skipped conflicts, tag replacement, progress and rollback", async () => {
       await insert(ids[4]);
       await db`INSERT INTO article_tags(article_id,tag_id) VALUES(${ids[4]},${tag}) ON CONFLICT DO NOTHING`;
@@ -220,6 +252,18 @@ test("scale queries: backfill, exact snapshots, DML counters, CAS and reconcilia
           await sql`SET LOCAL lock_timeout='100ms'`; await sql`SELECT scale_rebuild_counts()`;
         }), (e: any) => e.code === "55P03");
       } finally { await blocker`ROLLBACK`; blocker.release(); }
+      await rebuild(); await reconcile();
+      await db.begin(async (sql) => {
+        await sql`ALTER TABLE articles DISABLE TRIGGER scale_article_change`;
+        await sql`UPDATE articles SET read=NOT read WHERE id=${ids[4]}`;
+        await sql`ALTER TABLE articles ENABLE TRIGGER scale_article_change`;
+      });
+      const [{ bypassDrift }] = await db.begin(async (sql) => {
+        await sql`SET LOCAL lock_timeout='2s'`; await sql`SET LOCAL statement_timeout='20s'`;
+        return sql`SELECT scale_audit_counts()::integer AS "bypassDrift"`;
+      });
+      assert.equal(bypassDrift, 1);
+      await assert.rejects(articles.page(owner, {}), (e: any) => e.code === "COUNTS_UNAVAILABLE");
       await rebuild(); await reconcile();
       await db`TRUNCATE article_tags`;
       await assert.rejects(articles.page(owner, {}), (e: any) => e.code === "COUNTS_UNAVAILABLE");

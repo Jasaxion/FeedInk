@@ -22,7 +22,7 @@ import {
   raster,
 } from "./content.js";
 import { SafeFetcher, requireOk } from "./network.js";
-import { countSnapshot } from "./scale-counts.js";
+import { articleWrite, coordinateArticleWrites, countSnapshot } from "./scale-counts.js";
 
 export interface FeedEntry {
   guid: string;
@@ -301,10 +301,11 @@ export class Feeds {
       throw new ApiFailure(404, "NOT_FOUND", "Folder not found");
     const [found] = await this.discover(input.url);
     if (!found) throw new ApiFailure(422, "NO_FEED", "No feed found");
-    const [feed] = await this
-      .db`INSERT INTO feeds (id,user_id,url,title,site_url,description) VALUES (${id()},${userId},${found.url},${found.title},${found.siteUrl},${found.description}) ON CONFLICT(user_id,url) DO UPDATE SET url=EXCLUDED.url RETURNING *`;
-    const [subscription] = await this
-      .db`INSERT INTO subscriptions (id,user_id,feed_id,title,folder_id) VALUES (${id()},${userId},${feed.id},${input.title || found.title},${input.folderId || null}) ON CONFLICT(feed_id) DO UPDATE SET feed_id=EXCLUDED.feed_id RETURNING id`;
+    const { feed, subscription } = await articleWrite(this.db, userId, async (tx) => {
+      const [feed] = await tx`INSERT INTO feeds (id,user_id,url,title,site_url,description) VALUES (${id()},${userId},${found.url},${found.title},${found.siteUrl},${found.description}) ON CONFLICT(user_id,url) DO UPDATE SET url=EXCLUDED.url RETURNING *`;
+      const [subscription] = await tx`INSERT INTO subscriptions (id,user_id,feed_id,title,folder_id) VALUES (${id()},${userId},${feed.id},${input.title || found.title},${input.folderId || null}) ON CONFLICT(feed_id) DO UPDATE SET feed_id=EXCLUDED.feed_id RETURNING id`;
+      return { feed, subscription };
+    });
     await this.refresh(feed);
     return (await this.subscriptions(userId, subscription.id))[0]!;
   }
@@ -333,26 +334,27 @@ export class Feeds {
             );
             for (const entry of parsed.entries) {
               const articleId = id();
-              // Preserve existing snapshots on duplicate GUID, even when upstream returns a blank/corrupt replacement.
-              const existing =
-                await lock`SELECT id FROM articles WHERE feed_id=${feed.id} AND guid=${entry.guid}`;
-              if (existing.length) continue;
-              const [{ limited }] =
-                await lock`SELECT u.is_demo AND (SELECT count(*) FROM articles WHERE user_id=u.id)>=100 AS limited FROM users u WHERE u.id=${feed.user_id}`;
-              if (limited)
-                throw new ApiFailure(
-                  429,
-                  "DEMO_QUOTA",
-                  "Demo archive limit is 100 articles; register for your own library",
-                );
-              if (entry.html.length > ARTICLE_HTML_MAX_LENGTH)
-                throw new ApiFailure(
-                  413,
-                  "CONTENT_SIZE",
-                  "Article content exceeds the limit",
-                );
               await lock`BEGIN`;
               try {
+                await coordinateArticleWrites(lock, feed.user_id);
+                // Preserve existing snapshots on duplicate GUID, even when upstream returns a blank/corrupt replacement.
+                const existing =
+                  await lock`SELECT id FROM articles WHERE feed_id=${feed.id} AND guid=${entry.guid}`;
+                if (existing.length) { await lock`COMMIT`; continue; }
+                const [{ limited }] =
+                  await lock`SELECT u.is_demo AND (SELECT count(*) FROM articles WHERE user_id=u.id)>=100 AS limited FROM users u WHERE u.id=${feed.user_id}`;
+                if (limited)
+                  throw new ApiFailure(
+                    429,
+                    "DEMO_QUOTA",
+                    "Demo archive limit is 100 articles; register for your own library",
+                  );
+                if (entry.html.length > ARTICLE_HTML_MAX_LENGTH)
+                  throw new ApiFailure(
+                    413,
+                    "CONTENT_SIZE",
+                    "Article content exceeds the limit",
+                  );
                 const initial = cleanHtml(entry.html),
                   text = htmlText(initial);
                 await lock`INSERT INTO articles (id,user_id,feed_id,guid,feed_title,title,url,author,published_at,summary,content_html,content_text,content_hash,enclosures) VALUES (${articleId},${feed.user_id},${feed.id},${entry.guid},${parsed.title},${entry.title},${entry.url},${entry.author},${entry.publishedAt},${text.slice(0, 400)},${initial},${text},${hash(initial)},${lock.json(entry.enclosures)})`;
@@ -493,8 +495,8 @@ export class Feeds {
               .db`SELECT id FROM folders WHERE user_id=${userId} AND name=${folderName}`;
             folderId = existing?.id || id();
             if (!existing)
-              await this
-                .db`INSERT INTO folders(id,user_id,name) VALUES (${folderId!},${userId},${folderName})`;
+              await articleWrite(this.db, userId, async (sql) =>
+                sql`INSERT INTO folders(id,user_id,name) VALUES (${folderId!},${userId},${folderName})`);
             folders.set(folderName, folderId!);
           }
         }

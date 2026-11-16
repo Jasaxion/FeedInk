@@ -23,7 +23,7 @@ import { SafeFetcher } from "./network.js";
 import { Content } from "./content.js";
 import { Feeds } from "./feeds.js";
 import { Articles } from "./articles.js";
-import { countSnapshot } from "./scale-counts.js";
+import { articleWrite, countSnapshot } from "./scale-counts.js";
 import { Archives } from "./archive.js";
 import { Ebooks, ebookDto } from "./ebooks.js";
 import { Auth } from "./auth.js";
@@ -225,12 +225,12 @@ export async function createApp(config: Config, providedDb?: DB) {
       ).length
     )
       throw new ApiFailure(404, "NOT_FOUND", "Folder not found");
-    await db`UPDATE subscriptions SET title=${input.title ?? existing.title},folder_id=${input.folderId === undefined ? existing.folder_id : input.folderId},position=${input.position ?? existing.position},settings=${db.json({ ...existing.settings, ...input.settings })} WHERE id=${subscriptionId}`;
+    await articleWrite(db, userId, async (sql) => sql`UPDATE subscriptions SET title=${input.title ?? existing.title},folder_id=${input.folderId === undefined ? existing.folder_id : input.folderId},position=${input.position ?? existing.position},settings=${sql.json({ ...existing.settings, ...input.settings })} WHERE id=${subscriptionId}`);
     return (await feeds.subscriptions(userId, subscriptionId))[0];
   });
   app.delete("/api/subscriptions/:id", async (request, reply) => {
     const rows =
-      await db`DELETE FROM subscriptions WHERE id=${param(request)} AND user_id=${user(request)} RETURNING id`;
+      await articleWrite(db, user(request), async (sql) => sql`DELETE FROM subscriptions WHERE id=${param(request)} AND user_id=${user(request)} RETURNING id`);
     if (!rows.length)
       throw new ApiFailure(404, "NOT_FOUND", "Subscription not found");
     reply.code(204).send();
@@ -279,7 +279,7 @@ export async function createApp(config: Config, providedDb?: DB) {
   app.post("/api/folders", async (request, reply) => {
     const input = z.object({ name }).strict().parse(request.body),
       folderId = id();
-    await db`INSERT INTO folders(id,user_id,name) VALUES(${folderId},${user(request)},${input.name})`;
+    await articleWrite(db, user(request), async (sql) => sql`INSERT INTO folders(id,user_id,name) VALUES(${folderId},${user(request)},${input.name})`);
     reply.code(201);
     return (await folderList(user(request))).find((f) => f.id === folderId);
   });
@@ -296,12 +296,12 @@ export async function createApp(config: Config, providedDb?: DB) {
     const [existing] =
       await db`SELECT * FROM folders WHERE id=${folderId} AND user_id=${user(request)}`;
     if (!existing) throw new ApiFailure(404, "NOT_FOUND", "Folder not found");
-    await db`UPDATE folders SET name=${input.name ?? existing.name},position=${input.position ?? existing.position},settings=${db.json({ ...existing.settings, ...input.settings })} WHERE id=${folderId}`;
+    await articleWrite(db, user(request), async (sql) => sql`UPDATE folders SET name=${input.name ?? existing.name},position=${input.position ?? existing.position},settings=${sql.json({ ...existing.settings, ...input.settings })} WHERE id=${folderId}`);
     return (await folderList(user(request))).find((f) => f.id === folderId);
   });
   app.delete("/api/folders/:id", async (request, reply) => {
     const rows =
-      await db`DELETE FROM folders WHERE id=${param(request)} AND user_id=${user(request)} RETURNING id`;
+      await articleWrite(db, user(request), async (sql) => sql`DELETE FROM folders WHERE id=${param(request)} AND user_id=${user(request)} RETURNING id`);
     if (!rows.length)
       throw new ApiFailure(404, "NOT_FOUND", "Folder not found");
     reply.code(204).send();
@@ -315,7 +315,7 @@ export async function createApp(config: Config, providedDb?: DB) {
         .strict()
         .parse(request.body),
       tagId = id();
-    await db`INSERT INTO tags(id,user_id,name,color) VALUES(${tagId},${user(request)},${input.name},${input.color || "#861dd4"})`;
+    await articleWrite(db, user(request), async (sql) => sql`INSERT INTO tags(id,user_id,name,color) VALUES(${tagId},${user(request)},${input.name},${input.color || "#861dd4"})`);
     reply.code(201);
     return (await articles.tags(user(request))).find((t) => t.id === tagId);
   });
@@ -326,13 +326,13 @@ export async function createApp(config: Config, providedDb?: DB) {
         .parse(request.body),
       tagId = param(request);
     const rows =
-      await db`UPDATE tags SET name=COALESCE(${input.name ?? null},name),color=COALESCE(${input.color ?? null},color) WHERE id=${tagId} AND user_id=${user(request)} RETURNING id`;
+      await articleWrite(db, user(request), async (sql) => sql`UPDATE tags SET name=COALESCE(${input.name ?? null},name),color=COALESCE(${input.color ?? null},color) WHERE id=${tagId} AND user_id=${user(request)} RETURNING id`);
     if (!rows.length) throw new ApiFailure(404, "NOT_FOUND", "Tag not found");
     return (await articles.tags(user(request))).find((t) => t.id === tagId);
   });
   app.delete("/api/tags/:id", async (request, reply) => {
     const rows =
-      await db`DELETE FROM tags WHERE id=${param(request)} AND user_id=${user(request)} RETURNING id`;
+      await articleWrite(db, user(request), async (sql) => sql`DELETE FROM tags WHERE id=${param(request)} AND user_id=${user(request)} RETURNING id`);
     if (!rows.length) throw new ApiFailure(404, "NOT_FOUND", "Tag not found");
     reply.code(204).send();
   });
@@ -413,24 +413,30 @@ export async function createApp(config: Config, providedDb?: DB) {
       const input = z.object({ url }).strict().parse(request.body),
         target = fetcher.validate(input.url).href,
         userId = user(request);
-      const [existing] =
-        await db`SELECT id FROM articles WHERE user_id=${userId} AND feed_id IS NULL AND url=${target}`;
-      if (existing) {
+      const { articleId, created } = await articleWrite(db, userId, async (sql) => {
+        const [existing] =
+          await sql`SELECT id FROM articles WHERE user_id=${userId} AND feed_id IS NULL AND url=${target}`;
+        if (existing) {
+          return { articleId: existing.id as string, created: false };
+        }
+        if (request.account!.is_demo) {
+          const [{ count }] =
+            await sql`SELECT count(*)::integer AS count FROM articles WHERE user_id=${userId}`;
+          if (count >= 100)
+            throw new ApiFailure(
+              429,
+              "DEMO_QUOTA",
+              "Demo archive limit is 100 articles; register for your own library",
+            );
+        }
+        const articleId = id();
+        await sql`INSERT INTO articles(id,user_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash,saved) VALUES(${articleId},${userId},${articleId},'Saved links',${new URL(target).hostname},${target},now(),'','',${hash("")},true)`;
+        return { articleId, created: true };
+      });
+      if (!created) {
         reply.code(201);
-        return articles.detail(userId, existing.id);
+        return articles.detail(userId, articleId);
       }
-      if (request.account!.is_demo) {
-        const [{ count }] =
-          await db`SELECT count(*)::integer AS count FROM articles WHERE user_id=${userId}`;
-        if (count >= 100)
-          throw new ApiFailure(
-            429,
-            "DEMO_QUOTA",
-            "Demo archive limit is 100 articles; register for your own library",
-          );
-      }
-      const articleId = id();
-      await db`INSERT INTO articles(id,user_id,guid,feed_title,title,url,published_at,content_html,content_text,content_hash,saved) VALUES(${articleId},${userId},${articleId},'Saved links',${new URL(target).hostname},${target},now(),'','',${hash("")},true)`;
       const article = await articles.owned(userId, articleId);
       await content.extract(article);
       reply.code(201);
